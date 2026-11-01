@@ -425,6 +425,7 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     M(0xd558) = 1;
     crumb(44);
     M(0xd550) = 0;
+    unsigned long long t_kick_us = clk_us();
     M(0xd550) = 1;
     crumb(45);
     u32 tk0 = clk_ms();
@@ -439,6 +440,20 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     M(0xd550) = 0;
     crumb(48);
     int k3 = k2 ? -1 : poll(0xdc84, 1, 1, 3000000);
+    /* the status bits above come back long before the macroblocks are done: time the decode by the last pixel
+     * (bottom right, tiled address) leaving its 0x55 marker */
+    u32 lx = sps.width - 1, ly = sps.height - 1, lst = ly / 64, xg = (lx / 16) % 4;
+    u32 lo = lst * FB_PITCH * 64 + (lx / 64) * 4096 + (((ly & 1) ^ (xg & 1) ^ (lst & 1)) * 0x800) + xg * 0x200 +
+             ((ly % 64) / 2) * 16 + (lx % 16);
+    lo = (lo & ~7u) | (7 - (lo & 7));
+    volatile u8 *lastpx = (volatile u8 *)(FB_LUMA + lo);
+    u32 spins = 0;
+    for (; spins < 2000000; spins++) {
+        __asm__ volatile("cctl %0, L1D_VA_INVAL\n\tmsync all" ::"r"((u32)lastpx & ~31u) : "memory");
+        if (*lastpx != 0x55)
+            break;
+    }
+    u32 t_done = (u32)(clk_us() - t_kick_us);
     crumb(49);
     /* results into the breadcrumb first (words 4..11), so a hang in what follows still leaves them */
     CRUMB[4] = (u32)(k1 & 1) | (u32)(k2 & 1) << 1 | (u32)(k3 & 1) << 2, CRUMB[5] = d570;
@@ -473,10 +488,10 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     }
     vdec_stats.decodes++;
     crumb_clear();
-    return fmt(o, "vdec decode (skip %x): slice at %u (header %u bits), DPFU %d save %x/%x; ring %u words; pre DC84 %x ECA0 %x; "
+    return fmt(o, "vdec decode (skip %x) in %u us: slice at %u (header %u bits), DPFU %d save %x/%x; ring %u words; pre DC84 %x ECA0 %x; "
                   "start %s, done %s (D570 %x), picture end %s; D000 %x D04C %x D0AC %x D55C %x D558 %x D904 %x DC84 %x; "
                   "luma words changed %u of %u, mean %u; first %08x %08x",
-               skip, slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, pre_dc84, pre_eca0, k1 ? "TIMEOUT" : "ok",
+               skip, t_done, slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, pre_dc84, pre_eca0, k1 ? "TIMEOUT" : "ok",
                k2 ? "TIMEOUT" : "ok", d570, k3 ? "TIMEOUT" : "ok", st000, st04c, st0ac, st55c, st558, st904, stc84,
                changed, FB_LUMA_N / 4, sum / FB_LUMA_N, *(volatile u32 *)FB_LUMA, *(volatile u32 *)(FB_LUMA + 4));
 }
