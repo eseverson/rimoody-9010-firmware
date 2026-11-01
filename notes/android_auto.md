@@ -1,6 +1,6 @@
 # Android Auto on the head unit
 
-Status 2026-10-31: research only. Sources: the 16 MB NOR dump (`dump1.bin`), eCos strings, the module filesystem below.
+Status 2026-10-31: research; decision made (below). Sources: the 16 MB NOR dump (`dump1.bin`), eCos strings, the module filesystem below.
 
 ## What the stock firmware has
 
@@ -30,10 +30,18 @@ No, not in practice. Inside the module every `sethi/ori` call (3795 calls, 603 t
 
 The certificate for C: Google's phone app only talks to head units presenting a certificate signed by Google. The only one available is this unit's own (embedded in its AA module). Using it in our firmware on this same unit is the owner's call.
 
-## Plan for C (prerequisites that are needed whichever way the certificate question goes)
+## Decision (owner, 2026-10-31)
+
+**C: our own Android Auto stack, using this unit's certificate.** The embedded certificate is Google's reference head-unit certificate (subject O=Google-Linux-Reference, issuer O=Google Automotive Link, RSA-2048, sha256WithRSA, valid 2014-08-12 to 2044-08-11), with the Google Automotive Link root (2014-06-06 to 2044-06-05) and one private key. The key and certificate stay out of git and out of the payload image: the payload will load them from the SD card at runtime.
+
+## Plan for C
 
 1. H.264 decoder: map `h264_vid.c` and the decoder register block from the eCos disassembly (bitstream feed, frame buffers, output format, how frames reach the display layer). Biggest unknown; decides feasibility.
 2. Phone USB port: which controller (EHCI0 at 0x9C102100 is the candidate), generalize usbh.c, AOA switch (control requests 51/52/53).
 3. TLS: mbedTLS client with client-certificate auth; NDS32 bignum speed check (RSA-2048 / ECDHE handshake time at 270 MHz).
 4. AA protocol: version exchange, TLS over the control channel, service discovery, video/audio/input channels.
 5. Audio out.
+
+## Progress
+
+- TLS: Mbed TLS 3.6.2 vendored (`isp/sd-10-net/mbedtls/`, config `aa_tls_config.h`); every library file cross-compiles for NDS32, about 127 KB of code before gc-sections. Not linked yet.
