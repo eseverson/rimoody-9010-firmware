@@ -45,3 +45,25 @@ The certificate for C: Google's phone app only talks to head units presenting a 
 ## Progress
 
 - TLS: Mbed TLS 3.6.2 vendored (`isp/sd-10-net/mbedtls/`, config `aa_tls_config.h`); every library file cross-compiles for NDS32, about 127 KB of code before gc-sections. Not linked yet.
+
+## eCos maps (Haiku passes over ecos.ann.dis, 2026-10-31; addresses are eCos load addresses; not yet checked by hand)
+
+### Phone USB / AOA
+- AOA switch (0x444E9A): GET_PROTOCOL (0xC0, 51, len 2, 500 ms; version <= 0 aborts), SEND_STRING (0x40, 52, wIndex 0..5, string incl. NUL), START (0x40, 53, **wValue 1**). Strings: "Sunplus, Inc." / "DVD" / "Autolink" / "2.0" / "http://support.autolink.top/Autolink.apk" / "0000000012345678" (an alternate set can come from a pointer table at 0x6E298C). No request 58 (audio) here.
+- After re-enumeration: VID 0x18D1, PID 0x2D00..0x2D05 means accessory mode (0x444D7E); a device already in that range is not switched again.
+- Port gate: "accessory not support on port[%d], accessory port[%d]" compares the port with a global (0x6E2BC8); which EHCI the phone port is stays open: check PORTSC of EHCI0 (0x9C102164) with a phone plugged in.
+- Apple devices (VID 0x05AC) take a host-mode branch with a role switch (0x4447EE); not needed for AA.
+- `usb_vbus_ctrl(port, on)` 0x45A390 through a registered function pointer; GPIO unknown.
+
+### H.264 decoder ("MFD", multi-format decoder, with an "SPMP" sub-processor)
+- Entry: `mfd_if_init` 0x430E38, `mfd_if_reset` 0x430D44, `mfd_if_deinit` 0x430F42; `h264_create` 0x436AE0; per-codec dispatch 0x432F9A; `h264_trigger_decode` 0x4147AE; `real_decode_h264_video` 0x4135EA (4.3 KB).
+- Registers 0x9C00C000..0x9C00Exxx. Status 0x9C00DC84 bit 0 ("wait picture end"). Doorbell: 0x9C00D550 = 0x1F8, wait bit 0; poll 0x9C00D570 bit 0 (done, ~500 tries, "spmp processing done timeout"); then 0x9C00D570 = 1, 0x9C00D550 = 0; 0x9C00D558 carries an argument. Config block 0x9C00D640..0x9C00D72C (written at 0x4158A8).
+- Software parses SPS/PPS/slice headers (0x43B3C4..0x43C5C0, 0x43DE28). `H264_SpmpProgramStoreReg` 0x43A602 builds a command ring of byte-swapped words in the decoder context (register IDs like 0x04060000, 0x04200000..0x04300000); how the ring reaches the hardware is open.
+- Frame buffers: luma/chroma address/scan-type programming in 0x42D674; allocation 0x43815C / 0x4330E4. Display likely through the 0x9C150xxx block via the "AV broker" 0x3CF114. Output format unknown.
+- No microcode download found yet; whether the SPMP runs loaded code is open.
+
+## Next steps
+1. TLS glue `aa_tls.c` + host handshake test against `openssl s_server` (no phone needed).
+2. Phone port: with the unit up and a phone plugged in, read both EHCI PORTSCs; generalize usbh.c to that controller; implement the AOA switch and bulk endpoints.
+3. AA protocol framing + version exchange + TLS over the control channel, testable with the phone once 2 works.
+4. Decoder: hand-trace `real_decode_h264_video` and `H264_SpmpProgramStoreReg` for one IDR frame; find how the command ring is submitted and whether the SPMP needs code.
