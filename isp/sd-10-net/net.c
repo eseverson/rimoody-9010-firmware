@@ -2167,7 +2167,8 @@ static void scan_frame(const u8 *f, int len, int rssi)
     }
     c->n++;
     c->ch = cur_ch, c->ds = ds ? ds : cur_ch;
-    if (rssi > c->rssi)
+    if (rssi > c->rssi && rssi < -10)   /* above -10 dBm is a misread (a far node of the mesh once read +1 dBm, won the
+                                           choice over the -60 dBm router next door, and DHCP never answered) */
         c->rssi = rssi;
     c->cap = f[34] | f[35] << 8;
     c->rates[1] = c->xrates[1] = c->rsn[1] = 0;
