@@ -234,6 +234,8 @@ def main():
     p.add_argument('channel', nargs='?', type=int); p.add_argument('ssid', nargs='?'); p.add_argument('psk', nargs='?')
     p = sub.add_parser('vdec', help='hardware H.264 decoder bring-up: status | init | bitread FILE.h264')
     p.add_argument('what', choices=['status', 'init', 'bitread']); p.add_argument('file', nargs='?')
+    p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
+    p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
     p = sub.add_parser('fb'); p.add_argument('what', choices=['status', 'on', 'off', 'scale'])
     p.add_argument('n', nargs='?', type=int, default=2)
@@ -337,6 +339,8 @@ def main():
             print(u.call(OP_VDEC, struct.pack('<BII', 2, LOAD_ADDR, len(data))).decode(errors='replace'))
         else:
             print(u.call(OP_VDEC, bytes([{'status': 0, 'init': 1}[a.what]])).decode(errors='replace'))
+    elif a.op == 'op':
+        print(u.call(a.num, bytes.fromhex(a.payload)).decode(errors='replace'))
     elif a.op == 'rtos':
         print(u.call(OP_RTOS, b'').decode(errors='replace'), end='')
     elif a.op == 'touch':
