@@ -87,12 +87,14 @@ static unsigned int reloc;   /* runtime minus link address of U-Boot */
 typedef int (*ctrl_fn)(void *dev, u32 pipe, u8 req, u8 reqtype, u16 value, u16 index, void *data, u16 size,
                        int timeout);
 static int own_usb;   /* 1: Wi-Fi transfers through ehci.c instead of U-Boot (default after `usb start`; HU1 op 16) */
+static int own_enum;  /* 1: usbh.c enumerated the dongle (U-Boot's USB never started): U-Boot transfers impossible */
 #define ub_ctrl (own_usb ? (ctrl_fn)ehci_ctrl : (ctrl_fn)UB(UB_USB_CONTROL_MSG))
 typedef int (*bulk_fn)(void *dev, u32 pipe, void *data, int len, int *actual, int timeout);
 #define ub_bulk (own_usb ? (bulk_fn)ehci_bulk : (bulk_fn)UB(UB_USB_BULK_MSG))
 
 #include "usbdev.h"
 #include "ehci.h"
+#include "usbh.h"
 
 /* ---- time budget, in ub_ms(0) (which starts ~3 s after U-Boot itself; the unit resets ~150 s after U-Boot) ---- */
 #define EHCI_BULK_MS   5000    /* ehci_submit_async gives up on a bulk TD after 5000 ms, others after 1000 (0xf7e562) */
@@ -2505,6 +2507,8 @@ static int usb_op(int c, int count, char *o)
 {
     if (!wdev)
         return vfmt_n(o, "ERR no Wi-Fi device yet");
+    if ((c == 1 || c == 3) && own_enum)
+        return vfmt_n(o, "ERR the dongle was enumerated by usbh.c; U-Boot's USB is not started");
     if (c)
         ehci_rx_stop();   /* compare and uboot call U-Boot's USB code; rx_once re-queues */
     if (c == 2 || c == 3) {
@@ -2670,7 +2674,7 @@ static void do_exec(void)
 static int wifi_init(void)
 {
     log_s("\n# USB devices\n");
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 32 && !wdev; i++) {
         u8 *d = ub_usb_dev(i);
         if (!d)
             continue;
@@ -2827,8 +2831,19 @@ static void net_task(void *arg)
         vTaskEndScheduler();
     }
 
-    log_s("\n# U-Boot USB\n");
-    run("usb start");
+    log_s("\n# USB (usbh.c)\n");
+    u32 t0 = ub_ms(0);
+    wdev = usbh_start();
+    if (wdev) {
+        own_enum = 1;
+        lprintf("usb: enumerated %04x:%04x in %u ms, portsc %x, otp %x, %u endpoints\n", rd16(wdev + UDEV_DESC + 8),
+                rd16(wdev + UDEV_DESC + 10), ub_ms(t0), usbh_info.portsc, usbh_info.otp, usbh_info.n_eps);
+    } else {
+        lprintf("usb: own enumeration failed at step %u (portsc %x); falling back to U-Boot\n", usbh_info.step,
+                usbh_info.portsc);
+        log_s("\n# U-Boot USB\n");
+        run("usb reset");   /* not "start": after an EXEC U-Boot thinks USB is already started and would skip it */
+    }
     flush("usb start");
     own_usb = 1;   /* from here on every Wi-Fi transfer goes through ehci.c; U-Boot only enumerated (hu.py usb uboot reverts) */
 
