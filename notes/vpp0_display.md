@@ -123,3 +123,18 @@ First read `hu.py vpp status`: the TGEN part lists nonzero registers, so an `af4
 
 Not worth more tries: the 0x9C006F80/0x9C007000 window (rotation only), further DDFCH register variants (eCos's set is fully matched), MOON resets (none in eCos's display path).
 
+
+## Round 2 on the unit (2026-11-01, build 20261101-154444)
+
+`vpp status` first: 0x9C006AF4 reads 0 (absent from the nonzero TGEN list), so the TGEN source select was already right. Probe results (checksums DDFCH 0x7E8 / flags 0x7EC, VSCL 0x9C005E58, DMIX 0x9C006C9C):
+
+| Probe | DDFCH | VSCL | DMIX |
+| --- | --- | --- | --- |
+| 3: init + TGEN source 0 | 0 / 0x20220 | 0 | 0 |
+| 7 with D84 [13:12] = 0, 1, 2, 3 (1 = OSD0 into the scaler) | 0 / 0x20220 | 0 | 0 |
+| 9: VSCL color bar (D84 b7) | 0 / 0x20220 | 0xD86 | 0x51A7 |
+| 0x11: DDFCH latch off (780 = 0) | 0 / 0x20220 | 0 | 0 |
+| 0x23 after clock 0x5B on: TGEN latch mode | 0 / 0x20220 | 0 | 0 |
+| 1 after a TGEN0 reset pulse (0x9C006A84 = 1) | 0 / 0x20220 | 0 | 0 |
+
+So VSCL -> DMIX works (the scaler's own pattern reaches the mixer), and nothing reaches the scaler's input: not DDFCH, and not OSD0 through the [13:12] mux either. DDFCH's checksum stays 0 in every setup and its error flags read 0x20220 right after init (bit 17 new compared with the earlier eCos-style bisect, which read 0). Next candidates: what feeds VSCL's input on this chip besides the [13:12] field (an input enable elsewhere in config1/config2, or the 0x9C005A80 block between DDFCH and VSCL, G181, whose b1/b8/b9/b12 are set but not understood), and why DDFCH sets error bits 5, 9 and 17.
