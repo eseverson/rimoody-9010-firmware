@@ -238,8 +238,8 @@ def main():
     p.add_argument('--pics', type=int, default=1, help='decode: pictures to decode (0: all)'); p.add_argument('--skip', type=lambda x: int(x, 0), default=0)
     p = sub.add_parser('aa', help='wireless Android Auto: status | start [PORT] | connect PHONE_IP[:PORT] (cert/key from AACERT.PEM / AAKEY.PEM on the card)')
     p.add_argument('what', choices=['status', 'start', 'connect']); p.add_argument('target', nargs='?', default='5288')
-    p = sub.add_parser('vpp', help='VPP0 video layer tests: status | bars [SECS [SLOT]] | show [SECS [SLOT]] | restore | poke ADDR VAL')
-    p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk', 'bisect']); p.add_argument('args', nargs='*')
+    p = sub.add_parser('vpp', help='VPP0 video layer tests: status | bars [SECS [SLOT]] | show [SECS [SLOT]] | restore | poke ADDR VAL | probe MASK [PATH] (notes/vpp0_display.md round 2; restore afterwards)')
+    p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk', 'bisect', 'probe']); p.add_argument('args', nargs='*')
     p = sub.add_parser('osdvid', help='video through the OSD layer: status | show [SECS] | on | off')
     p.add_argument('what', choices=['status', 'show', 'on', 'off']); p.add_argument('secs', nargs='?', type=int, default=0)
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
@@ -357,7 +357,7 @@ def main():
             payload = bytes([0])
         print(u.call(OP_AA, payload).decode(errors='replace'))
     elif a.op == 'vpp':
-        c = {'status': 0, 'bars': 1, 'show': 2, 'restore': 3, 'poke': 4, 'clock': 5, 'linear': 6, 'gclk': 7, 'bisect': 8}[a.what]
+        c = {'status': 0, 'bars': 1, 'show': 2, 'restore': 3, 'poke': 4, 'clock': 5, 'linear': 6, 'gclk': 7, 'bisect': 8, 'probe': 9}[a.what]
         if c == 4:
             payload = bytes([4]) + struct.pack('<II', int(a.args[0], 0), int(a.args[1], 0))
         else:

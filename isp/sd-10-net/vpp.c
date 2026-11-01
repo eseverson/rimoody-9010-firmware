@@ -20,8 +20,9 @@ static const struct { u32 base, n; } blocks[] = {
     { 0x9c009c00, 1 },
     { 0x9c005b34, 8 },
     { 0x9c006a80, 1 },    /* TGEN config (pokes) */
+    { 0x9c006af4, 1 },    /* TGEN0 source select (probe) */
 };
-static u32 saved[32 + 1 + 48 + 4 + 1 + 12 + 19 + 2 + 2 + 1 + 1 + 1 + 8 + 1];
+static u32 saved[32 + 1 + 48 + 4 + 1 + 12 + 19 + 2 + 2 + 1 + 1 + 1 + 8 + 1 + 1];
 static int have_saved, active;
 
 static void save(void)
@@ -114,6 +115,15 @@ static void init_fetch(u32 w, u32 h, u32 pitch)
     FL(4);
 }
 
+/* probe (c == 9): wait ~0.2 s, then the checksums of the three stages: DDFCH 0x7E8 (and its error flags 0x7EC), VSCL
+ * 0x9C005E58 (i143 G188.22 vscl0_checksum_result), DMIX 0x9C006C9C (SP7021 G217.07). Nonzero past a stage = data there. */
+static int probe_sample(char *o, vpp_fmt fmt, const char *name)
+{
+    for (volatile int i = 0; i < 4000000; i++)
+        ;
+    return fmt(o, " [%s ddfch %x/%x vscl %x dmix %x]", name, R(0x9c0057e8), R(0x9c0057ec), R(0x9c005e58), R(0x9c006c9c));
+}
+
 int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u32 chroma_idx)
 {
     int c = n ? p[0] : 0;
@@ -189,6 +199,58 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             k0++;
         return k0 + fmt(o + k0, "vpp linear: checksum %x -> %x, error flags %x -> %x, 7f4 %x 7f8 %x 7fc %x, 7bc %x 7c0 %x", c0,
                    R(0x9c0057e8), e0, R(0x9c0057ec), R(0x9c0057f4), R(0x9c0057f8), R(0x9c0057fc), R(0x9c0057bc), R(0x9c0057c0));
+    } else if (c == 9 && n >= 2) {   /* probe (static analysis round 2): where does VPP0's data path break? Samples the DDFCH
+                                      * checksum (0x7E8), VSCL checksum (0x9C005E58, i143 G188.22) and DMIX checksum (0x9C006C9C)
+                                      * after each step; a nonzero value past a stage means that stage has data. p[1] mask:
+                                      *  1 eCos-style init (init_fetch) + DDFCH color bar, VPP0 opaque, OSD0 transparent (DMIX only,
+                                      *    the console stays on in software), commit
+                                      *  2 TGEN0 source select 0x9C006AF4 field 0 (VPP0) <- 0 (eCos 0x52e5fc, SP7021 tgen_source_sel)
+                                      *  4 VSCL path select 0x9C005D84 [13:12] <- p[2] (i143: 0 VPPDMA, 1 OSD0, 2 DDFCH)
+                                      *  8 VSCL color bar, 0x9C005D84 b7 (eCos pattern 0xE, i143 0x80)
+                                      * 16 DDFCH latch_en off (0x9C005780 = 0) and the BIST register rewritten
+                                      * 32 TGEN0 latch mode (0x9C006A80 = 7, SP7021 DRV_TGEN_Init)
+                                      * No auto-restore (the reply must beat hu.py's 2 s timeout): `hu.py vpp restore` afterwards. */
+        u32 m = p[1], path = n >= 3 ? p[2] & 3 : 2;
+        save();
+        int k = fmt(o, "vpp probe %x: before AF4=%x D84=%x C80=%x C84=%x;", m, R(0x9c006af4), R(0x9c005d84), R(0x9c006c80),
+                    R(0x9c006c84));
+#define SAMPLE(name) (k += probe_sample(o + k, fmt, name))
+        if (m & 1) {
+            init_fetch(800, 480, 1920);
+            R(0x9c0057f0) = 0x80801011;
+            setbits(0x9c005788, 0x1c, 0x10);             /* fetch enable (i143 DRV_DDFCH_on 0xD0; eCos per frame) */
+            setbits(0x9c006c84, 0xfu, 2u | 1u << 2);   /* L1 (VPP0) opaque, L2 (OSD0) transparent */
+            R(0x9c005a80) |= 1;
+            SAMPLE("init");
+        }
+        if (m & 2) {
+            setbits(0x9c006af4, 3u, 0);
+            R(0x9c005a80) |= 1;
+            SAMPLE("tgsrc");
+        }
+        if (m & 4) {
+            setbits(0x9c005d84, 3u << 12, path << 12);
+            R(0x9c005a80) |= 1;
+            SAMPLE("path");
+        }
+        if (m & 8) {
+            R(0x9c005d84) |= 1u << 7;
+            R(0x9c005a80) |= 1;
+            SAMPLE("vsclbar");
+        }
+        if (m & 16) {
+            R(0x9c005780) = 0;
+            R(0x9c0057f0) = 0x80801011;
+            R(0x9c005a80) |= 1;
+            SAMPLE("nolatch");
+        }
+        if (m & 32) {
+            R(0x9c006a80) = 7;
+            SAMPLE("tgen7");
+        }
+#undef SAMPLE
+        active = 1;
+        return k + fmt(o + k, " after AF4=%x D84=%x 780=%x", R(0x9c006af4), R(0x9c005d84), R(0x9c005780));
     } else if (c == 8 && n >= 2) {   /* bisect: apply setup parts by mask, wait ~0.3 s, report the error flags */
         u32 m = p[1], f0 = R(0x9c0057ec);
         save();
