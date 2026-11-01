@@ -24,6 +24,36 @@ typedef unsigned char u8;
 static int inited;
 struct vdec_stats vdec_stats;
 
+/* Breadcrumb that survives a reset (DRAM is kept): the step a risky operation is in, written back to memory before
+ * the step runs. The next boot reports it (vdec_crumb_report) so a hang off the network still says where it was. */
+#define CRUMB ((volatile u32 *)0x01F0F000u)
+#define CRUMB_MAGIC 0x56444543u   /* "VDEC" */
+static void crumb(u32 step)
+{
+    CRUMB[0] = CRUMB_MAGIC, CRUMB[1] = step, CRUMB[2] = CRUMB[2] + 1;
+    __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(0x01F0F000u) : "memory");
+}
+static void crumb_clear(void) { CRUMB[0] = 0; __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(0x01F0F000u) : "memory"); }
+
+int vdec_crumb_report(char *o, vdec_fmt fmt)   /* at boot: a step left behind by the previous run, then cleared */
+{
+    if (CRUMB[0] != CRUMB_MAGIC)
+        return 0;
+    u32 step = CRUMB[1];
+    crumb_clear();
+    return fmt(o, "vdec: the previous run stopped during step %u (see vdec.c crumb() calls)\n", step);
+}
+
+/* hold the MFD in reset and release it (eCos 0x432dfa): stops a runaway engine */
+void vdec_hw_reset(void)
+{
+    M(0x58) = 0x80008000u, M(0x6c) = 0x9bd89bd8u, M(0x70) = 0x00030003u;
+    for (volatile int i = 0; i < 64; i++)
+        ;
+    M(0x58) = 0x80000000u, M(0x6c) = 0x9bd80000u, M(0x70) = 0x00030000u;
+    inited = 0;
+}
+
 static int poll(u32 off, u32 mask, u32 want, u32 tries)
 {
     while (tries--)
@@ -254,12 +284,13 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
     }
     if (!have || sh.slice_type != 2)
         return fmt(o, "ERR vdec: need an I slice (have %d, type %u)", have, sh.slice_type);
-    /* bitstream into the EVB */
+    crumb(1);   /* bitstream into the EVB */
     volatile u8 *d = (volatile u8 *)EVB_ADDR;
     for (u32 i = 0; i < len; i++)
         d[i] = s[i];
     plat_sync(EVB_ADDR, len);
     /* read the slice header through the bit reader, then capture the slice-data position (H264_SliceHeaderEnd) */
+    crumb(2);   /* slice header through the bit reader */
     int r = dpfu_start(slice_at, len - slice_at);
     for (u32 left = sh.data_bit_rbsp; left; ) {
         u32 k = left > 31 ? 31 : left;
@@ -268,6 +299,7 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
     }
     u32 save0 = M(0xd894), save1 = M(0xd898);
     M(0xd884) = 0;   /* stop */
+    crumb(3);   /* frame buffers, BG2D */
     /* frame buffers: fill with a marker so untouched memory shows */
     for (u32 i = 0; i < 0x70000; i += 4)
         *(volatile u32 *)(FB_LUMA + i) = 0x55555555;
@@ -276,7 +308,8 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
     plat_sync(FB_LUMA, 0x70000);
     plat_sync(FB_CHROMA, 0x38000);
     u32 pitch = (sps.width + 127) & ~127u;
-    M(0xa380) = (M(0xa380) & 0xffff0000u) | (pitch >> 4) << 8 | (pitch >> 4);   /* "mb size" slots 0 and 1 */
+    u32 a380 = M(0xa380);   /* "mb size" slots: shared with the display; the decoder takes slot 1 for small widths */
+    M(0xa380) = (a380 & ~0xff00u) | (pitch >> 4) << 8;
     bg2d_set(IDX_LUMA, FB_LUMA, 1, 0);
     bg2d_set(IDX_CHROMA, FB_CHROMA, 1, 0);
     bg2d_set(IDX_MVC, FB_MVC, 1, 0);
@@ -324,6 +357,7 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
         put(0);
     put(0xf8000000);                                  /* end of slice */
     plat_sync(SPMP_ADDR, ring_n * 4);
+    crumb(4);   /* kick */
     /* picture decode (h264_trigger_decode / real_decode_h264_video) */
     u32 pre_dc84 = M(0xdc84), pre_eca0 = M(0xeca0);
     M(0xde6c) = 0x18;
@@ -343,12 +377,18 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
     M(0xd558) = 1;
     M(0xd550) = 0;
     M(0xd550) = 1;
-    int k1 = poll(0xd550, 1, 1, 200000);
-    int k2 = poll(0xd570, 1, 1, 2000000);
+    int k1 = poll(0xd550, 1, 1, 20000);
+    int k2 = k1 ? -1 : poll(0xd570, 1, 1, 200000);
     u32 d570 = M(0xd570);
     M(0xd570) = 1;
     M(0xd550) = 0;
-    int k3 = poll(0xdc84, 1, 1, 2000000);
+    int k3 = k2 ? -1 : poll(0xdc84, 1, 1, 200000);
+    u32 st000 = M(0xd000), st04c = M(0xd04c), st0ac = M(0xd0ac), st55c = M(0xd55c), st558 = M(0xd558), st904 = M(0xd904),
+        stc84 = M(0xdc84);
+    if (k1 || k2 || k3)
+        vdec_hw_reset();   /* not finished in a short bound: stop the engine ourselves */
+    M(0xa380) = a380;
+    crumb(5);   /* reading back */
     cache_inval(FB_LUMA, 0x70000);
     cache_inval(FB_CHROMA, 0x38000);
     /* how much of the luma plane changed, and its first bytes */
@@ -359,13 +399,52 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
         sum += (v & 0xff) + (v >> 8 & 0xff) + (v >> 16 & 0xff) + (v >> 24);
     }
     vdec_stats.decodes++;
+    crumb_clear();
     return fmt(o, "vdec decode: slice at %u (header %u bits), DPFU %d save %x/%x; ring %u words; pre DC84 %x ECA0 %x; "
                   "start %s, done %s (D570 %x), picture end %s; D000 %x D04C %x D0AC %x D55C %x D558 %x D904 %x DC84 %x; "
                   "luma words changed %u of %u, mean %u; first %08x %08x",
                slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, pre_dc84, pre_eca0, k1 ? "TIMEOUT" : "ok",
-               k2 ? "TIMEOUT" : "ok", d570, k3 ? "TIMEOUT" : "ok", M(0xd000), M(0xd04c), M(0xd0ac), M(0xd55c), M(0xd558),
-               M(0xd904), M(0xdc84), changed, 0x70000 / 4, sum / 0x70000, *(volatile u32 *)FB_LUMA,
-               *(volatile u32 *)(FB_LUMA + 4));
+               k2 ? "TIMEOUT" : "ok", d570, k3 ? "TIMEOUT" : "ok", st000, st04c, st0ac, st55c, st558, st904, stc84,
+               changed, 0x70000 / 4, sum / 0x70000, *(volatile u32 *)FB_LUMA, *(volatile u32 *)(FB_LUMA + 4));
+}
+
+/* SPMP engine alone: a command block of 16-bit and 32-bit writes to the weight-denominator / SPAR result registers
+ * (harmless outside a decode) and the end marker; kick it like a picture and read the registers back. */
+int vdec_spmp_test(char *o, vdec_fmt fmt)
+{
+    if (!inited)
+        return fmt(o, "ERR vdec: init first");
+    crumb(10);
+    ring_n = 0;
+    w16(0x9c00d188, 0x0005);
+    w16(0x9c00d18c, 0x0003);
+    w32(0x9c00d190, 0x12345678);
+    w32(0x9c00d194, 0x9abcdef0);
+    put(0xf8000000);
+    plat_sync(SPMP_ADDR, ring_n * 4);
+    M(0xd188) = 0, M(0xd18c) = 0, M(0xd190) = 0, M(0xd194) = 0;
+    M(0xd54c) = SPMP_KB << 8 | IDX_SPMP;
+    M(0xd548) = 1;
+    M(0xd048) = 1, M(0xd1a4) = 0, M(0xd558) = 0, M(0xd55c) = 0, M(0xd564) = 0;
+    M(0xd550) = 0x1f8;
+    M(0xd550) = 0;
+    M(0xd554) = ring_n << 21 | 0;
+    M(0xd558) = 1;
+    M(0xd550) = 0;
+    M(0xd550) = 1;
+    crumb(11);
+    int k1 = poll(0xd550, 1, 1, 20000);
+    int k2 = k1 ? -1 : poll(0xd570, 1, 1, 200000);
+    u32 d570 = M(0xd570);
+    M(0xd570) = 1;
+    M(0xd550) = 0;
+    u32 a = M(0xd188), b = M(0xd18c), c = M(0xd190), d = M(0xd194), n55c = M(0xd55c);
+    if (k1 || k2)
+        vdec_hw_reset();
+    crumb_clear();
+    int ok = a == 5 && b == 3 && c == 0x12345678 && d == 0x9abcdef0;
+    return fmt(o, "vdec spmp: start %s, done %s (D570 %x, D55C %x); D188 %x D18C %x D190 %x D194 %x -> %s",
+               k1 ? "TIMEOUT" : "ok", k2 ? "TIMEOUT" : "ok", d570, n55c, a, b, c, d, ok ? "REGISTERS LOADED" : "not loaded");
 }
 
 int vdec_status(char *o, vdec_fmt fmt)

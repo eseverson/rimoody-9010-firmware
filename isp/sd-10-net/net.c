@@ -3261,6 +3261,8 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             return vdec_bitread(le32(p + 1), le32(p + 5), t, vfmt_n);
         if (c == 3 && n >= 9)
             return vdec_decode(le32(p + 1), le32(p + 5), t, vfmt_n);
+        if (c == 4)
+            return vdec_spmp_test(t, vfmt_n);
         return vdec_status(t, vfmt_n);
     }
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */
@@ -3575,7 +3577,13 @@ int payload_entry(int argc, char *const argv[])
             PREV_LOG[i] = LOG_BUF[start + i];
     }
     irq_log_len_ptr = (volatile unsigned int *)&log_len;
+    vdec_hw_reset();   /* a decoder left running by the previous run stops here */
     lprintf("net main, build %s\n", hu_build_id);
+    {
+        static char crumb_msg[96];
+        if (vdec_crumb_report(crumb_msg, vfmt_n))
+            log_s(crumb_msg);
+    }
     mcu_init(&mcu_st);
     report_cpu();
     if (check_uboot())
