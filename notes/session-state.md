@@ -24,3 +24,7 @@
 - Android Auto: own stack chosen (notes/android_auto.md); TLS, AA protocol core, H.264 header parser done and host-tested; decoder mapped (notes/h264_decoder.md), bring-up waiting on the unit.
 - SD/FAT: driver + FatFs behind HU1 op 17 verified live; boot-time use reverted after the unit went offline; fix (scheduler suspended per block) built, untested.
 - Unit offline: needs a power cycle (card = 202707, good).
+
+## 2026-11-01
+- **Card BOOT.BIN = build 20261101-021107 (crc 0d8aae9a)**: hardware watchdog (verified), EXEC config handoff + probation, failure resets, own SD/FAT (HU1 op 17, persist path), plus everything before. Unit IP now 192.168.1.142.
+- Second, bigger border haze after the ~4 h dead period (notes/display_touch.md); owner asked to check it under stock firmware (card out).

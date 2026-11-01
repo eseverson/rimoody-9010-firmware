@@ -65,3 +65,4 @@ Tested 2026-11-01 (build 20261101-021107):
 - Count rate measured ~80 kHz (5009 CNT units/s), not Linux's 90 kHz: 6 s set = ~6.7 s.
 - `hu.py irq hwwdt`: the unit reset ~7 s after feeding stopped and came back on the card's build with the test's crash record. 
 - Self-EXEC: the new image took the config from the handoff ("config: from the previous image (EXEC handoff)") and passed probation (online 11.4 s after start).
+- 2026-11-01 02:40: build 20261101-021107 soaked 10 min (39 rounds) with 90 FatFs reads of BOOT.BIN in parallel (21024 sectors, 0 SD errors / resets: the per-block scheduler suspension holds), then **persisted through our own FAT code** (PERSIST.TMP, verify, rename; rehearsed on TEST.BIN first; U-Boot's `fatload /BOOT.BIN` reads it back with crc 0d8aae9a). Card now boots the build with the hardware watchdog.
