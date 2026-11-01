@@ -16,6 +16,8 @@
  * A finished or stopped IN takes the ring down again (ASYNCLISTADDR back to U-Boot's list), so the descriptors are
  * only ever rewritten with the schedule stopped. ehci_rx_stop must run before U-Boot touches USB or memory is reused.
  *
+ * v3 (ehci_rx_poll): a ring of RQN queued bulk INs instead of one, see below.
+ *
  * DMA buffers: used in place when cache-line aligned in address and length, otherwise through a bounce buffer, so
  * invalidating never throws away another task's writes that share a line. */
 #include "ehci.h"
@@ -273,13 +275,27 @@ static int xfer1(u8 *dev, u32 pipe, const u8 *setup, void *data, u32 len, int ti
     return (int)act;
 }
 
-/* ---- v2: the queued bulk IN ---- */
+/* ---- v3: a ring of queued bulk INs ---- */
+/* RQN transfers of RQ_LEN bytes stay queued on their own async ring (rhead -> rqh -> rhead) with the schedule left
+ * running, so the controller keeps receiving into RAM while the CPU is busy elsewhere (with one queued IN, a few ms of
+ * decrypting and decoding let the dongle's RX FIFO overflow: TCP retransmits, 3 Mbit/s). The dongle sends one frame
+ * per bulk IN (RX aggregation off), so each transfer ends with a short packet; every qTD's alternate pointer equals its
+ * next pointer, so short or full, the controller moves on round the ring. A consumed qTD is re-armed at once: the
+ * controller, parked on an inactive next qTD, picks it up on a later pass (the dummy-qTD scheme Linux uses). The data
+ * toggle lives in the QH overlay (DTC = 0). */
+#define RQN 32
+#define RQ_LEN 4096
+struct rq_slot { struct qtd q; u32 pad[8]; };   /* 64 bytes: a qTD never shares a cache line with another */
 static struct qh rhead __attribute__((aligned(64))), rqh __attribute__((aligned(64)));
-static struct qtd rqtd[2] __attribute__((aligned(64)));   /* [0] only; [1] pads it to its own 64 bytes */
-static int rx_armed;
+static struct rq_slot rq[RQN] __attribute__((aligned(64)));
+#ifdef __nds32__
+static u8 rqbuf[RQN][RQ_LEN] __attribute__((aligned(4096), section(".bigbss")));
+#else
+static u8 rqbuf[RQN][RQ_LEN] __attribute__((aligned(4096)));
+#endif
+static int rx_armed, rq_head;
 static u8 *rx_dev;
-static u32 rx_pipe, rx_len, rx_ep, ub_async;
-static void *rx_buf;
+static u32 rx_pipe, rx_ep, ub_async;
 
 static int sched_stop(void)
 {
@@ -294,12 +310,12 @@ static int sched_start(void)
     return wait_reg(USBSTS, STS_ASS, STS_ASS, 100);
 }
 
-/* Ring stopped: save the endpoint's toggle (only once the controller has fetched the qTD into the overlay) and
- * hand ASYNCLISTADDR back. */
+/* Ring stopped: save the endpoint's toggle from the overlay (once the controller has fetched a qTD) and hand
+ * ASYNCLISTADDR back. Transfers received but not yet polled are dropped. */
 static void rx_down(void)
 {
     INV(&rqh, sizeof rqh);
-    if (rqh.cur == (u32)&rqtd[0])
+    if (rqh.cur)
         RD32(rx_dev + UDEV_TOGGLE) = (RD32(rx_dev + UDEV_TOGGLE) & ~(1u << rx_ep)) | (rqh.ov_token >> 31) << rx_ep;
     REG(ASYNCLA) = ub_async;
     rx_armed = 0;
@@ -313,24 +329,33 @@ void ehci_rx_stop(void)   /* drops a partly received transfer */
     rx_down();
 }
 
-static int rx_arm(u8 *dev, u32 pipe, void *data, u32 len)
+static void rq_fill(int i)
 {
-    u32 devnum = (pipe >> 8) & 0x7f, ep = (pipe >> 15) & 0xf, a = (u32)data;
+    struct qtd *q = &rq[i].q;
+    q->buf[0] = (u32)rqbuf[i];
+    for (int k = 1; k < 5; k++)
+        q->buf[k] = 0;
+    q->token = (u32)RQ_LEN << 16 | 3u << 10 | (u32)PID_IN << 8 | TK_ACTIVE;
+}
+
+static int rx_arm(u8 *dev, u32 pipe)
+{
+    u32 devnum = (pipe >> 8) & 0x7f, ep = (pipe >> 15) & 0xf;
     u32 maxp = RD32(dev + UDEV_EPMAX_IN + 4 * ep);
-    if (RD32(dev + UDEV_SPEED) != 3 || !maxp || maxp > 1024 || (pipe >> 30) != 3 || !(pipe & 0x80) || !len ||
-        ((a | len) & (line() - 1)) || len > 0x5000 - (a & 0xfff) || (REG(USBCMD) & CMD_ASE)) {
+    if (RD32(dev + UDEV_SPEED) != 3 || !maxp || maxp > 1024 || (pipe >> 30) != 3 || !(pipe & 0x80) ||
+        (REG(USBCMD) & CMD_ASE)) {
         ehci_stats.refused++;
         return -1;
     }
-    WBINV(data, len);
+    INV(rqbuf, sizeof rqbuf);
+    for (int i = 0; i < RQN; i++) {
+        u32 nx = (u32)&rq[(i + 1) % RQN].q;
+        rq[i].q.next = nx;
+        rq[i].q.alt = nx;
+        rq_fill(i);
+    }
+    rq_head = 0;
     u32 tg = (RD32(dev + UDEV_TOGGLE) >> ep) & 1;
-    struct qtd *q = &rqtd[0];
-    q->next = T_BIT;
-    q->alt = T_BIT;
-    q->token = tg << 31 | len << 16 | 3u << 10 | (u32)PID_IN << 8 | TK_ACTIVE;
-    q->buf[0] = a;
-    for (int k = 1; k < 5; k++)
-        q->buf[k] = (a & ~0xfffu) + 0x1000u * k;
     rhead.link = (u32)&rqh | TYPE_QH;
     rhead.ep1 = 1u << 15 | 2u << 12;
     rhead.ep2 = 1u << 30;
@@ -339,18 +364,18 @@ static int rx_arm(u8 *dev, u32 pipe, void *data, u32 len)
     rhead.ov_alt = T_BIT;
     rhead.ov_token = TK_HALTED;
     rqh.link = (u32)&rhead | TYPE_QH;
-    rqh.ep1 = 8u << 28 | maxp << 16 | 1u << 14 | 2u << 12 | ep << 8 | devnum;
+    rqh.ep1 = 8u << 28 | maxp << 16 | 2u << 12 | ep << 8 | devnum;   /* DTC = 0: toggle in the overlay */
     rqh.ep2 = 1u << 30;
     rqh.cur = 0;
-    rqh.ov_next = (u32)q;
+    rqh.ov_next = (u32)&rq[0].q;
     rqh.ov_alt = T_BIT;
-    rqh.ov_token = 0;
+    rqh.ov_token = tg << 31;
     for (int k = 0; k < 5; k++)
         rqh.ov_buf[k] = 0;
     WB(&rhead, sizeof rhead);
     WB(&rqh, sizeof rqh);
-    WB(rqtd, sizeof rqtd);
-    rx_dev = dev, rx_pipe = pipe, rx_len = len, rx_ep = ep, rx_buf = data;
+    WB(rq, sizeof rq);
+    rx_dev = dev, rx_pipe = pipe, rx_ep = ep;
     ub_async = REG(ASYNCLA);
     REG(ASYNCLA) = (u32)&rhead;
     rx_armed = 1;
@@ -365,26 +390,36 @@ static int rx_arm(u8 *dev, u32 pipe, void *data, u32 len)
 int ehci_rx_poll(void *dev, u32 pipe, void *data, int len, int *actual)
 {
     *actual = 0;
-    if (rx_armed && (rx_dev != dev || rx_pipe != pipe || rx_buf != data || rx_len != (u32)len))
+    if (rx_armed && (rx_dev != dev || rx_pipe != pipe))
         ehci_rx_stop();
     if (!rx_armed)
-        return rx_arm(dev, pipe, data, (u32)len) ? -1 : -2;
-    INV(rqtd, sizeof rqtd);
-    u32 tk = rqtd[0].token;
+        return rx_arm(dev, pipe) ? -1 : -2;
+    struct qtd *q = &rq[rq_head].q;
+    INV(q, sizeof *q);
+    u32 tk = q->token;
     if (tk & TK_ACTIVE)
         return -2;
-    sched_stop();
-    rx_down();
-    u32 st = status_of(tk), act = rx_len - (tk >> 16 & 0x7fff);
-    if (act)
-        INV(data, act);
+    u32 st = status_of(tk), act = RQ_LEN - (tk >> 16 & 0x7fff);
     RD32((u8 *)dev + UDEV_STATUS) = st;
-    RD32((u8 *)dev + UDEV_ACT_LEN) = act;
-    *actual = (int)act;
-    if (st) {
+    if (st || (tk & TK_HALTED)) {   /* the QH halted: take the ring down; the next poll arms a fresh one */
         ehci_stats.errors++;
+        ehci_rx_stop();
         return -1;
     }
+    if (act > (u32)len)
+        act = (u32)len;
+    if (act) {
+        INV(rqbuf[rq_head], act);
+        const u8 *src = rqbuf[rq_head];
+        u8 *dst = data;
+        for (u32 i = 0; i < act; i++)
+            dst[i] = src[i];
+    }
+    rq_fill(rq_head);   /* back into the ring */
+    WB(q, sizeof *q);
+    rq_head = (rq_head + 1) % RQN;
+    RD32((u8 *)dev + UDEV_ACT_LEN) = act;
+    *actual = (int)act;
     ehci_stats.ok++;
     ehci_stats.rx++;
     return 0;

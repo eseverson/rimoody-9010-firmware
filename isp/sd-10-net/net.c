@@ -1835,12 +1835,17 @@ static void put32le(u8 *p, u32 v) { p[0] = v, p[1] = v >> 8, p[2] = v >> 16, p[3
 
 /* U-Boot's usb_sndbulkpipe: (PIPE_BULK=3) << 30 | devnum << 8 | ep << 15 | maxpacketsize, no 0x80 (usb_storage builds
  * exactly this for its OUT endpoint at 0xf18344) */
+static unsigned long long tx_us;   /* time spent in bulk OUT (each pauses the RX ring) */
+static unsigned long long prof_rx_us, prof_mid_us, prof_lw_us, prof_loop_us, prof_last;   /* net loop profile */
+static u32 prof_iters, prof_rx_n;
 static int usb_tx(int ep, int len)
 {
     u32 pipe = (3u << 30) | pipe_base(wdev, ep);
     for (int i = 0; i < 3; i++) {
         int actual = 0;
+        unsigned long long t0 = clk_us();
         int r = ub_bulk(wdev, pipe, txbuf, len, &actual, 100);
+        tx_us += clk_us() - t0;
         if (r >= 0 && actual == len) {
             tx_count++;
             return 0;
@@ -3083,9 +3088,10 @@ static int usb_op(int c, int count, char *o)
                    count, fail_ub, t_ub, fail_own, t_own, bad, v_own);
         lprintf("%s", o);
     }
-    return k + vfmt_n(o + k, "usb: driver %s, ehci.c ok %u (rx %u) err %u timeout %u busy %u refused %u, portsc %x, status %x",
+    return k + vfmt_n(o + k, "usb: driver %s, ehci.c ok %u (rx %u) err %u timeout %u busy %u refused %u, portsc %x, status %x; tx %u frames, %u ms in bulk OUT; loop %u iterations %u frames, ms in rx %u mlme/ip %u lwip %u all %u",
                   own_usb ? "ehci.c" : "u-boot", ehci_stats.ok, ehci_stats.rx, ehci_stats.errors, ehci_stats.timeouts,
-                  ehci_stats.busy, ehci_stats.refused, ehci_portsc(), rd32(wdev + UDEV_STATUS));
+                  ehci_stats.busy, ehci_stats.refused, ehci_portsc(), rd32(wdev + UDEV_STATUS), tx_count, (u32)(tx_us / 1000), prof_iters, prof_rx_n,
+                  (u32)(prof_rx_us / 1000), (u32)(prof_mid_us / 1000), (u32)(prof_lw_us / 1000), (u32)(prof_loop_us / 1000));
 }
 
 /* ---- HU1 op 17 FS: our own SD + FatFs (helpers above save_log) ---- */
@@ -3462,13 +3468,22 @@ static void net_loop(void)
                 set_state(J_SCAN);
             continue;
         }
-        rx_once();
+        unsigned long long tp0 = clk_us();
+        if (rx_once() == 0)
+            prof_rx_n++;
+        unsigned long long tp1 = clk_us();
         if (jstate == J_AP)
             ap_tick();
         else
             mlme_tick();
         ip_poll();
+        unsigned long long tp2 = clk_us();
         lw_poll();
+        unsigned long long tp3 = clk_us();
+        prof_rx_us += tp1 - tp0, prof_mid_us += tp2 - tp1, prof_lw_us += tp3 - tp2, prof_iters++;
+        if (prof_last)
+            prof_loop_us += tp3 - prof_last;
+        prof_last = tp3;
         if (hwsec_until && (u32)ip_stats[5] > hwsec_cmds)
             hwsec_until = 0;   /* a HU1 command made it through with the chip's crypto: keep it */
         else if (hwsec_until && (int)(ub_ms(0) - hwsec_until) >= 0) {
