@@ -284,51 +284,42 @@ static u32 tiled(u32 x, u32 y)   /* byte offset of luma pixel (x, y) in the deco
 /* short-term reference frames (sliding window; no long-term, no adaptive marking: refused below) */
 static struct { int used; u32 frame_num; } dpb[NSLOT];
 
-struct pic_result { u32 t_us, spins, d570, timeouts, save0, save1, hdr_bits; int dpfu; };
+struct pic_result { u32 nal_bad, t_us, spins, d570, timeouts, save0, save1, hdr_bits; int dpfu; };
 
-/* one picture: the slice NAL (from its header byte) into the EVB, its header through the bit reader, the command block,
- * the kick, and the wait for the last pixel. kick 0 stops before the kick (the ring is left for inspection). */
-static int decode_pic(const u8 *s, u32 len, const struct h264_sps *sps, const struct h264_pps *pps,
-                      const struct h264_slice *sh, int cur, const int *l0, int n0, int kick, u32 skip, struct pic_result *pr)
+struct vslice { const u8 *nal; u32 len; struct h264_slice sh; };
+#define MAX_SLICES 68   /* one per macroblock row at 1088 lines */
+
+/* one picture: its slice NALs (each from its header byte) into the EVB, each slice header through the bit reader and a
+ * command block per slice, the kick, and the wait for the last pixel. kick 0 stops before the kick (the ring is left
+ * for inspection). */
+static int decode_pic(const struct vslice *sl, int ns, const struct h264_sps *sps, const struct h264_pps *pps, int cur,
+                      const int *l0, int n0, int kick, u32 skip, struct pic_result *pr)
 {
     crumb(1);   /* bitstream into the EVB, emulation-prevention bytes removed (00 00 03 -> 00 00): the hardware does not
                    strip them (a noise frame desynced at once); eCos's start-code scanner presumably does on its copy */
     volatile u8 *d = (volatile u8 *)EVB_ADDR;
-    u32 wo = 0, zeros = 0;
-    for (u32 i = 0; i < len; i++) {
-        u8 c = s[i];
-        if (!(skip & 128) && zeros >= 2 && c == 3 && i + 1 < len && s[i + 1] <= 3) {
-            zeros = 0;
-            continue;
+    u32 wo = 0, at[MAX_SLICES], dend[MAX_SLICES], blk[MAX_SLICES + 1];
+    for (int j = 0; j < ns; j++) {
+        const u8 *s = sl[j].nal;
+        u32 len = sl[j].len, zeros = 0;
+        at[j] = wo;
+        for (u32 i = 0; i < len; i++) {
+            u8 c = s[i];
+            if (!(skip & 128) && zeros >= 2 && c == 3 && i + 1 < len && s[i + 1] <= 3) {
+                zeros = 0;
+                continue;
+            }
+            zeros = c ? 0 : zeros + 1;
+            d[wo++] = c;
         }
-        zeros = c ? 0 : zeros + 1;
-        d[wo++] = c;
+        dend[j] = wo;
+        for (u32 i = 0; i < 64; i++)   /* zero tail: the prefetcher reads whole words past the last byte (without it
+                                          the last 4x4 block of a noise frame came out wrong) */
+            d[wo++] = 0;
+        while (wo & 3)   /* the DPFU start is a word address */
+            d[wo++] = 0;
     }
-    for (u32 i = 0; i < 64; i++)   /* zero tail: the prefetcher reads whole words past the last byte (without it the
-                                      last 4x4 block of a noise frame came out wrong) */
-        d[wo + i] = 0;
-    plat_sync(EVB_ADDR, wo + 64);
-    u32 elen = wo + 64;
-    /* the slice header through the bit reader, then the slice-data position (H264_SliceHeaderEnd) */
-    crumb(2);
-    dpfu_flag = (skip & 32) != 0;
-    pr->dpfu = dpfu_start(0, elen);
-    for (u32 left = sh->data_bit_rbsp; left; ) {
-        u32 k = left > 31 ? 31 : left;
-        rd((int)k);
-        left -= k;
-    }
-    pr->hdr_bits = sh->data_bit_rbsp;
-    u32 save0 = M(0xd894), save1 = M(0xd898);
-    M(0xd884) = 2u * (u32)dpfu_flag;   /* "stop" (0), or with flag 1 presumably hand over to the hardware */
-    if (skip & 8) {   /* experiment: reset the DPFU before the engine reprograms it */
-        poll(0xd8a0, 0xc, 0, 0x1f5 * 16);
-        M(0xd8a0) = 1;
-        M(0xd8a0) = 0;
-    }
-    if (skip & 16)    /* experiment: the 0x20 flag every DPFU start value carries */
-        save0 |= 0x20;
-    pr->save0 = save0, pr->save1 = save1;
+    plat_sync(EVB_ADDR, wo);
     crumb(3);   /* BG2D, the completion marker */
     /* completion: the status bits come back long before the macroblocks are done, so wait for the last pixel (bottom
      * right) to leave a 0x55 marker. Only that byte is marked; if the picture's own value there is 0x55 the wait runs
@@ -343,58 +334,85 @@ static int decode_pic(const u8 *s, u32 len, const struct h264_sps *sps, const st
     bg2d_set(0x3c, WORK_3C, 0, 1);
     /* the slice's command block (notes/h264_decoder.md section 3.2) */
     ring_n = 0;
-    if (!(skip & 1)) {   /* slice-data position: read from DPFU1 (D894/D898), handed to DPFU2 (D908/D90C), as eCos
-                            0x43b302 does with ctx+0xAA45A = 1 (set by its decoder reset 0x4350c2); skip bit 64 = DPFU1 */
-        w32((skip & 64) ? 0x9c00d888 : 0x9c00d908, save0);
-        w32((skip & 64) ? 0x9c00d88c : 0x9c00d90c, save1);
+    for (int j = 0; j < ns; j++) {
+        blk[j] = ring_n;
+        const struct h264_slice *sh = &sl[j].sh;
+        int nl0 = sh->slice_type == 0 ? (n0 < (int)sh->num_ref_idx_l0 ? n0 : (int)sh->num_ref_idx_l0) : 0;
+        /* the slice header through the bit reader, then the slice-data position (H264_SliceHeaderEnd) */
+        crumb(2);
+        dpfu_flag = 0;
+        /* the length is the slice's own bytes: counting the zero tail too, the decoder ran past the end of a slice
+         * into the next one's macroblocks (multi-slice pictures desynced at each slice's first row with neighbors) */
+        int dr = dpfu_start(at[j], dend[j] - at[j]);
+        if (rd(8) != sl[j].nal[0])   /* the NAL header byte: checks the DPFU landed on the slice */
+            pr->nal_bad++;
+        for (u32 left = sh->data_bit_rbsp - 8; left; ) {
+            u32 k = left > 31 ? 31 : left;
+            rd((int)k);
+            left -= k;
+        }
+        u32 save0 = M(0xd894), save1 = M(0xd898);
+        M(0xd884) = 2u * (u32)dpfu_flag;   /* "stop" (0), or with flag 1 presumably hand over to the hardware */
+        if (j == 0)
+            pr->save0 = save0, pr->save1 = save1, pr->hdr_bits = sh->data_bit_rbsp, pr->dpfu = dr;
+        if (!(skip & 1)) {   /* slice-data position: read from DPFU1 (D894/D898), handed to DPFU2 (D908/D90C), as eCos
+                                0x43b302 does with ctx+0xAA45A = 1 (set by its decoder reset 0x4350c2); skip bit 64 = DPFU1 */
+            w32((skip & 64) ? 0x9c00d888 : 0x9c00d908, save0);
+            w32((skip & 64) ? 0x9c00d88c : 0x9c00d90c, save1);
+        }
+        w16(0x9c00d018, 0);                               /* field_pic_flag */
+        w16(0x9c00d01c, 1);                               /* !bottom_field_flag */
+        w16(0x9c00d090, sh->direct_spatial_mv_pred);
+        w16(0x9c00d020, 0);                               /* MbaffFrameFlag */
+        w16(0x9c00d014, pps->constrained_intra_pred);
+        w16(0x9c00d080, sh->nal_ref_idc != 0);
+        w16(0x9c00d084, pps->entropy_coding_mode);
+        w16(0x9c00d010, ((u32)pps->chroma_qp_index_offset & 0x3f) | ((u32)pps->second_chroma_qp_index_offset & 0x3f) << 6);
+        w16(0x9c00d0a0, (u32)sh->qp);
+        w16(0x9c00d024, sh->slice_type);
+        w16(0x9c00d008, sps->mb_width);
+        w16(0x9c00d00c, sps->mb_height);
+        {   /* first macroblock: row, column (experiments: skip 16 swaps them, 32 sends the address in D088) */
+            u32 r0 = sh->first_mb / sps->mb_width, c0 = sh->first_mb % sps->mb_width;
+            w16(0x9c00d088, r0);
+            w16(0x9c00d08c, c0);
+
+        }
+        w16(0x9c00d094, sh->num_ref_idx_l0 - 1);
+        w16(0x9c00d098, 0xffff);                          /* l1 for non-B: S+0x39 - 1 with S+0x39 = 0 */
+        w16(0x9c00d0a4, 0);                               /* <= 16 frame buffers, no list 1 */
+        w16(0x9c00d180, pps->weighted_pred);
+        w16(0x9c00d184, pps->weighted_bipred_idc);
+        w16(0x9c00d188, 0);
+        w16(0x9c00d18c, 0);
+        w16(0x9c00d800, sh->disable_deblocking);
+        w16(0x9c00d804, (u32)sh->alpha_offset);
+        w16(0x9c00d808, (u32)sh->beta_offset);
+        w32(0x9c00d028, 0x3bu << 24 | 0x3cu << 16 | (u32)IDX_MVC(cur));
+        w16(0x9c00d02c, (u32)(IDX_LUMA(cur) | IDX_CHROMA(cur) << 8));
+        w16(0x9c00d09c, sh->cabac_init_idc);
+        w16(0x9c00d004, (sps->profile_idc > 99) | (sps->chroma_format_idc & 3) << 1 | (pps->transform_8x8_mode & 1) << 3);
+        if (!(skip & 4))
+            for (u32 a = 0x9c00d190; a <= 0x9c00d19c; a += 4)
+                w32(a, 0xffffffff);
+        if (!(skip & 2)) {
+            /* item 35: list 0 then list 1, 32 entries each, entry = luma index | chroma index << 8 (0x43b1c8..) */
+            put(0x2040003f);
+            for (int i = 0; i < 64; i++)
+                put(i < nl0 ? (u32)(IDX_LUMA(l0[i]) | IDX_CHROMA(l0[i]) << 8) : 0);
+            /* item 36: buffer index -> list position (0x43b15c..0x43b1c6: entry 2 * luma index + a field bit, the
+             * list scanned from the end so the first position wins). For frames the bit's meaning is open, so both
+             * entries of a frame get its position. */
+            u32 inv[64] = { 0 };
+            for (int i = nl0 - 1; i >= 0; i--)
+                inv[2 * IDX_LUMA(l0[i])] = inv[2 * IDX_LUMA(l0[i]) + 1] = (u32)i;
+            put(0x2000003f);
+            for (int i = 0; i < 64; i++)
+                put(inv[i]);
+        }
+        put(0xf8000000);                                  /* end of slice */
     }
-    w16(0x9c00d018, 0);                               /* field_pic_flag */
-    w16(0x9c00d01c, 1);                               /* !bottom_field_flag */
-    w16(0x9c00d090, sh->direct_spatial_mv_pred);
-    w16(0x9c00d020, 0);                               /* MbaffFrameFlag */
-    w16(0x9c00d014, pps->constrained_intra_pred);
-    w16(0x9c00d080, sh->nal_ref_idc != 0);
-    w16(0x9c00d084, pps->entropy_coding_mode);
-    w16(0x9c00d010, ((u32)pps->chroma_qp_index_offset & 0x3f) | ((u32)pps->second_chroma_qp_index_offset & 0x3f) << 6);
-    w16(0x9c00d0a0, (u32)sh->qp);
-    w16(0x9c00d024, sh->slice_type);
-    w16(0x9c00d008, sps->mb_width);
-    w16(0x9c00d00c, sps->mb_height);
-    w16(0x9c00d088, sh->first_mb / sps->mb_width);
-    w16(0x9c00d08c, sh->first_mb % sps->mb_width);
-    w16(0x9c00d094, sh->num_ref_idx_l0 - 1);
-    w16(0x9c00d098, 0xffff);                          /* l1 for non-B: S+0x39 - 1 with S+0x39 = 0 */
-    w16(0x9c00d0a4, 0);                               /* <= 16 frame buffers, no list 1 */
-    w16(0x9c00d180, pps->weighted_pred);
-    w16(0x9c00d184, pps->weighted_bipred_idc);
-    w16(0x9c00d188, 0);
-    w16(0x9c00d18c, 0);
-    w16(0x9c00d800, sh->disable_deblocking);
-    w16(0x9c00d804, (u32)sh->alpha_offset);
-    w16(0x9c00d808, (u32)sh->beta_offset);
-    w32(0x9c00d028, 0x3bu << 24 | 0x3cu << 16 | (u32)IDX_MVC(cur));
-    w16(0x9c00d02c, (u32)(IDX_LUMA(cur) | IDX_CHROMA(cur) << 8));
-    w16(0x9c00d09c, sh->cabac_init_idc);
-    w16(0x9c00d004, (sps->profile_idc > 99) | (sps->chroma_format_idc & 3) << 1 | (pps->transform_8x8_mode & 1) << 3);
-    if (!(skip & 4))
-        for (u32 a = 0x9c00d190; a <= 0x9c00d19c; a += 4)
-            w32(a, 0xffffffff);
-    if (!(skip & 2)) {
-        /* item 35: list 0 then list 1, 32 entries each, entry = luma index | chroma index << 8 (0x43b1c8..) */
-        put(0x2040003f);
-        for (int i = 0; i < 64; i++)
-            put(i < n0 ? (u32)(IDX_LUMA(l0[i]) | IDX_CHROMA(l0[i]) << 8) : 0);
-        /* item 36: buffer index -> list position (0x43b15c..0x43b1c6: entry 2 * luma index + a field bit, the
-         * list scanned from the end so the first position wins). For frames the bit's meaning is open, so both
-         * entries of a frame get its position. */
-        u32 inv[64] = { 0 };
-        for (int i = n0 - 1; i >= 0; i--)
-            inv[2 * IDX_LUMA(l0[i])] = inv[2 * IDX_LUMA(l0[i]) + 1] = (u32)i;
-        put(0x2000003f);
-        for (int i = 0; i < 64; i++)
-            put(inv[i]);
-    }
-    put(0xf8000000);                                  /* end of slice */
+    blk[ns] = ring_n;
     plat_sync(SPMP_ADDR, ring_n * 4);
     if (!kick)
         return 0;
@@ -409,13 +427,14 @@ static int decode_pic(const u8 *s, u32 len, const struct h264_sps *sps, const st
     M(0xd924) = EVB_KB << 8 | IDX_EVB;
     M(0xd54c) = SPMP_KB << 8 | IDX_SPMP;
     M(0xd548) = 1;
+    unsigned long long t_kick = clk_us();
     M(0xd048) = 1, M(0xd1a4) = 0, M(0xd558) = 0, M(0xd55c) = 0, M(0xd564) = 0;
     M(0xd550) = 0x1f8;
     M(0xd550) = 0;
-    M(0xd554) = ring_n << 21 | 0;   /* first slice: length in words, start word 0 */
+    /* the first slice's block: length in words, start word (0x43a2de); the engine finds the following blocks after it */
+    M(0xd554) = blk[1] << 21 | 0;
     M(0xd558) = 1;
     M(0xd550) = 0;
-    unsigned long long t_kick = clk_us();
     M(0xd550) = 1;
     crumb(45);
     int k1 = poll(0xd550, 1, 1, 3000000);   /* eCos waits on this with no timeout; a whole slice may run first */
@@ -424,6 +443,10 @@ static int decode_pic(const u8 *s, u32 len, const struct h264_sps *sps, const st
     pr->d570 = M(0xd570);
     M(0xd570) = 1;
     M(0xd550) = 0;
+    if (ns != 1) {   /* the engine runs the following slices' blocks itself (0x41466a) */
+        M(0xd558) = (u32)ns;
+        M(0xd550) = 0;
+    }
     int k3 = k2 ? -1 : poll(0xdc84, 1, 1, 3000000);
     crumb(48);
     u32 spins = 0;
@@ -476,15 +499,32 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32
         }
         if (t != 5 && t != 1)
             continue;
-        struct h264_slice sh = { 0 };
-        if (!sps.width || h264_parse_slice(s + st, nl, &sps, &pps, &sh))
-            return k + fmt(o + k, " ERR slice %u unparsed", pics);
-        if (sh.first_mb)
-            return k + fmt(o + k, " ERR picture %u has several slices (not yet)", pics);
-        if (sh.slice_type != 0 && sh.slice_type != 2)
-            return k + fmt(o + k, " ERR picture %u: slice type %u (only I and P)", pics, sh.slice_type);
-        if (sh.ref_list_mod || sh.adaptive_marking || sh.long_term_ref)
-            return k + fmt(o + k, " ERR picture %u: list modification / adaptive or long-term marking (not yet)", pics);
+        /* a picture: this slice and the ones after it that do not start at macroblock 0 */
+        static struct vslice sl[MAX_SLICES];
+        int ns = 0, is_p = 0;
+        u32 evb_need = 0;
+        for (u32 p2 = pos, st2 = st, nl2 = nl;;) {
+            struct h264_slice h2 = { 0 };
+            if (!sps.width || h264_parse_slice(s + st2, nl2, &sps, &pps, &h2))
+                return k + fmt(o + k, " ERR picture %u slice %d unparsed", pics, ns);
+            if (ns && !h2.first_mb)
+                break;
+            if (!ns && h2.first_mb)
+                return k + fmt(o + k, " ERR picture %u starts at macroblock %u", pics, h2.first_mb);
+            if (h2.slice_type != 0 && h2.slice_type != 2)
+                return k + fmt(o + k, " ERR picture %u: slice type %u (only I and P)", pics, h2.slice_type);
+            if (h2.ref_list_mod || h2.adaptive_marking || h2.long_term_ref)
+                return k + fmt(o + k, " ERR picture %u: list modification / adaptive or long-term marking (not yet)", pics);
+            if (ns == MAX_SLICES || (evb_need += nl2 + 68) > EVB_KB * 1024)
+                return k + fmt(o + k, " ERR picture %u: too many slices or bytes", pics);
+            sl[ns].nal = s + st2, sl[ns].len = nl2, sl[ns].sh = h2;
+            is_p |= h2.slice_type == 0;
+            ns++;
+            pos = p2;
+            if (!h264_next_nal(s, len, &p2, &st2, &nl2) || ((s[st2] & 31) != 1 && (s[st2] & 31) != 5))
+                break;
+        }
+        const struct h264_slice sh = sl[0].sh;
         if (sps.width > 960 || sps.height > 512)
             return k + fmt(o + k, " ERR %ux%u is larger than the slots", sps.width, sps.height);
         if (t == 5)
@@ -500,17 +540,15 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32
                     l0[j] = l0[j - 1];
                 l0[j] = i;
             }
-        if (sh.slice_type == 0 && !n0)
+        if (is_p && !n0)
             return k + fmt(o + k, " ERR picture %u: P without a reference", pics);
-        if (n0 > (int)sh.num_ref_idx_l0 && sh.slice_type == 0)
-            n0 = (int)sh.num_ref_idx_l0;
         int cur = 0;
         while (cur < NSLOT && dpb[cur].used)
             cur++;
         if (cur == NSLOT)
             return k + fmt(o + k, " ERR no free slot");
         struct pic_result pr = { 0 };
-        int r = decode_pic(s + st, nl, &sps, &pps, &sh, cur, l0, sh.slice_type == 0 ? n0 : 0, kick, skip, &pr);
+        int r = decode_pic(sl, ns, &sps, &pps, cur, l0, n0, kick, skip, &pr);
         M(0xa380) = a380;
         if (!kick) {
             crumb_clear();
@@ -523,9 +561,13 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32
                            pics, pr.timeouts, pr.d570);
         }
         if (pics < 24)
-            k += fmt(o + k, " %c%u/s%d/%u", sh.slice_type ? 'I' : 'P', sh.frame_num, cur, pr.t_us);
+            k += fmt(o + k, " %c%u/s%d/%u", is_p ? 'P' : 'I', sh.frame_num, cur, pr.t_us);
+        if (ns > 1 && pics < 24)
+            k += fmt(o + k, "x%d", ns);
         if (pr.spins >= 2000000)
             k += fmt(o + k, "(marker)");
+        if (pr.nal_bad)
+            k += fmt(o + k, "(%u slices misplaced in the EVB)", pr.nal_bad);
         t_sum += pr.t_us;
         if (pr.t_us > t_max)
             t_max = pr.t_us;
