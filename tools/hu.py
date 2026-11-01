@@ -233,7 +233,7 @@ def main():
     p = sub.add_parser('ap', help='access-point mode: ap [CHANNEL SSID PSK] (no args: status)')
     p.add_argument('channel', nargs='?', type=int); p.add_argument('ssid', nargs='?'); p.add_argument('psk', nargs='?')
     p = sub.add_parser('vdec', help='hardware H.264 decoder bring-up: status | init | bitread FILE.h264')
-    p.add_argument('what', choices=['status', 'init', 'bitread', 'decode', 'spmp']); p.add_argument('file', nargs='?')
+    p.add_argument('what', choices=['status', 'init', 'bitread', 'decode', 'spmp', 'prepare']); p.add_argument('file', nargs='?')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -333,10 +333,10 @@ def main():
             r = u.send_once(OP_AP, bytes([a.channel]) + a.ssid.encode() + b'\0' + a.psk.encode() + b'\0')
             print(r.decode(errors='replace') if r is not None else 'no reply')
     elif a.op == 'vdec':
-        if a.what in ('bitread', 'decode'):   # upload the access unit, then run it through the decoder
+        if a.what in ('bitread', 'decode', 'prepare'):   # upload the access unit, then run it through the decoder
             data = open(a.file, 'rb').read()
             u.write(LOAD_ADDR, data)
-            print(u.call(OP_VDEC, struct.pack('<BII', 2 if a.what == 'bitread' else 3, LOAD_ADDR, len(data))).decode(errors='replace'))
+            print(u.call(OP_VDEC, struct.pack('<BII', {'bitread': 2, 'decode': 3, 'prepare': 5}[a.what], LOAD_ADDR, len(data))).decode(errors='replace'))
         else:
             print(u.call(OP_VDEC, bytes([{'status': 0, 'init': 1, 'spmp': 4}[a.what]])).decode(errors='replace'))
     elif a.op == 'op':
