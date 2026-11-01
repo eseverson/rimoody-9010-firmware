@@ -52,5 +52,6 @@ int ccmp_decrypt(const cu8 tk[16], cu8 *frame, int len, int hdrlen, cu64 *pn);
 int ieee80211_hdrlen(const cu8 *frame);
 
 cu32 crc32_le(const cu8 *p, int n);   /* zlib / IEEE 802.3 CRC-32 */
+cu32 crc32_update(cu32 crc, const cu8 *p, int n);   /* continue a crc32_le over more data (start with 0) */
 
 #endif

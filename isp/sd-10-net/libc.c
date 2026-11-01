@@ -40,3 +40,13 @@ int memcmp(const void *x, const void *y, size_t n)
             return *a - *b;
     return 0;
 }
+
+char *strchr(const char *s, int c)   /* FatFs (invalid-character check on file names) */
+{
+    for (;; s++) {
+        if (*s == (char)c)
+            return (char *)s;
+        if (!*s)
+            return 0;
+    }
+}

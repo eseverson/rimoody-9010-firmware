@@ -464,9 +464,9 @@ int ccmp_decrypt(const cu8 tk[16], cu8 *f, int len, int hdrlen, cu64 *pn)
 }
 
 /* ---------------- CRC-32 ---------------- */
-cu32 crc32_le(const cu8 *p, int n)
+cu32 crc32_update(cu32 crc, const cu8 *p, int n)
 {
-    cu32 c = 0xffffffff;
+    cu32 c = ~crc;
     while (n-- > 0) {
         c ^= *p++;
         for (int k = 0; k < 8; k++)
@@ -474,3 +474,5 @@ cu32 crc32_le(const cu8 *p, int n)
     }
     return ~c;
 }
+
+cu32 crc32_le(const cu8 *p, int n) { return crc32_update(0, p, n); }

@@ -23,6 +23,7 @@ UDP 5151. Requests carry the shared token from WIFI.TXT on the card (`--token` o
                                      `trap` = fatal trap -> crash record at 0x01F00000 + reset (reported by the next run)
   hu.py settime                      set the payload's wall clock (and the MCU's RTC) to this host's local time
   hu.py persist NET.BIN              make it the card's /BOOT.BIN (what power-on runs), read back and CRC-checked
+  hu.py fs status|ls|crc NAME|raw LBA  our own SD/FAT driver (sd.c + FatFs); rawtest/write/rm/load also exist
 
 The target IP comes from --ip, $HU_IP, or the first hello heard. Stdlib only.
 """
@@ -30,7 +31,7 @@ import argparse, os, socket, struct, sys, time, zlib
 
 PORT_CMD, PORT_HELLO = 5151, 5152
 OP_PING, OP_CMD, OP_WRITE, OP_READ, OP_SYNC, OP_LOG = 1, 2, 3, 4, 5, 6
-OP_MCU_TX, OP_MCU_STATE, OP_SETTIME, OP_EXEC, OP_IRQ, OP_FB, OP_SAY, OP_TOUCH, OP_RTOS, OP_USB = 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+OP_MCU_TX, OP_MCU_STATE, OP_SETTIME, OP_EXEC, OP_IRQ, OP_FB, OP_SAY, OP_TOUCH, OP_RTOS, OP_USB, OP_FS = 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
 TRAMP_ADDR = 0x02f00000
 
 # Builds without OP_EXEC that `exec` can still replace: CRC32 of their first 4 KB at 0x1800000 -> addresses of their
@@ -227,6 +228,8 @@ def main():
     sub.add_parser('mcu')
     p = sub.add_parser('mcu-tx'); p.add_argument('bytes', nargs='+', help='payload bytes in hex, e.g. d1 00')
     sub.add_parser('settime')
+    p = sub.add_parser('fs', help='our own SD/FAT driver: status, ls [dir], crc NAME, raw LBA, rawtest NAME SRC, write NAME ADDR LEN, rm NAME, load NAME ADDR MAX')
+    p.add_argument('what', choices=['status', 'ls', 'crc', 'raw', 'rawtest', 'write', 'rm', 'load']); p.add_argument('args', nargs='*')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
     p = sub.add_parser('fb'); p.add_argument('what', choices=['status', 'on', 'off', 'scale'])
     p.add_argument('n', nargs='?', type=int, default=2)
@@ -303,6 +306,20 @@ def main():
     elif a.op == 'usb':
         c = {'status': 0, 'compare': 1, 'own': 2, 'uboot': 3}[a.what]
         print(u.call(OP_USB, struct.pack('<BH', c, a.count)).decode(errors='replace'))
+    elif a.op == 'fs':
+        c = {'status': 0, 'ls': 1, 'crc': 2, 'raw': 3, 'rawtest': 4, 'write': 5, 'rm': 6, 'load': 7}[a.what]
+        args = a.args
+        x = y = 0
+        name = ''
+        if a.what in ('ls', 'crc', 'rm'):
+            name = args[0] if args else ''
+        elif a.what == 'raw':
+            x = int(args[0], 0)
+        elif a.what == 'rawtest':   # name src: 512 bytes already in RAM at src
+            name, x = args[0], int(args[1], 0)
+        elif a.what in ('write', 'load'):   # name addr len
+            name, x, y = args[0], int(args[1], 0), int(args[2], 0)
+        print(u.call(OP_FS, struct.pack('<BII', c, x, y) + name.encode()).decode(errors='replace'))
     elif a.op == 'rtos':
         print(u.call(OP_RTOS, b'').decode(errors='replace'), end='')
     elif a.op == 'touch':
@@ -336,12 +353,19 @@ def do_persist(u, path, name):
     import re
     img = open(path, 'rb').read()
     u.write(LOAD_ADDR, img)
+    want = zlib.crc32(img) & 0xffffffff
+    r = u.call(OP_FS, struct.pack('<BII', 8, LOAD_ADDR, len(img)) + name.encode()).decode(errors='replace')
+    if 'unknown op' not in r and 'sub-op' not in r:   # our own FAT driver (write PERSIST.TMP, verify, rename)
+        m = re.search(r'crc ([0-9a-f]{8})', r)
+        ok = 'persisted' in r and bool(m) and int(m.group(1), 16) == want
+        print(r)
+        print('%s on card: %s (crc %s, image %08x)' % (name, 'persisted' if ok else 'FAILED', m.group(1) if m else '?', want))
+        return 0 if ok else 1
     print(u.cmd('fatrm mmc 0 %s; fatwrite mmc 0 0x%x %s 0x%x' % (name, LOAD_ADDR, name, len(img))).strip())
     check = LOAD_ADDR + 0x200000
     u.cmd('mw.l 0x%x 0 0x%x' % (check, (len(img) + 3) // 4))
     out = u.cmd('fatload mmc 0 0x%x /%s; crc32 0x%x 0x%x' % (check, name, check, len(img)))
     m = re.search(r'==>\s*([0-9a-f]{8})', out)
-    want = zlib.crc32(img) & 0xffffffff
     ok = bool(m) and int(m.group(1), 16) == want
     print('%s on card: %s (crc %s, image %08x)' % (name, 'persisted' if ok else 'MISMATCH', m.group(1) if m else '?',
                                                    want))

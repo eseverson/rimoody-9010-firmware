@@ -95,6 +95,8 @@ typedef int (*bulk_fn)(void *dev, u32 pipe, void *data, int len, int *actual, in
 #include "usbdev.h"
 #include "ehci.h"
 #include "usbh.h"
+#include "sd.h"
+#include "fatfs/ff.h"
 
 /* ---- time budget, in ub_ms(0) (which starts ~3 s after U-Boot itself; the unit resets ~150 s after U-Boot) ---- */
 #define EHCI_BULK_MS   5000    /* ehci_submit_async gives up on a bulk TD after 5000 ms, others after 1000 (0xf7e562) */
@@ -327,6 +329,86 @@ static void flush(const char *why)
 {
     hb_tick();
     lprintf("--- %s t=%u\n", why, ub_ms(0));
+}
+
+/* ---- our own SD + FatFs (sd.c, diskio.c, fatfs/): config, logs, persist, HU1 op 17. Net task only. Every mount
+ * re-reads the volume, so nothing cached goes stale if U-Boot wrote the card in between (HU1 CMD fatwrite). ---- */
+static FATFS fatfs;
+static int fs_mounted;
+
+static int fs_mount(void)
+{
+    fs_mounted = f_mount(&fatfs, "", 1) == FR_OK;
+    return fs_mounted ? 0 : -1;
+}
+
+static u32 fs_crc(const char *name, u32 *len)   /* crc32 of a file, or 0 with *len = 0xffffffff on error */
+{
+    static FIL f;
+    static u8 buf[4096] __attribute__((aligned(4)));
+    UINT got;
+    u32 crc = 0, tot = 0;
+    *len = 0xffffffff;
+    if (f_open(&f, name, FA_READ) != FR_OK)
+        return 0;
+    FRESULT r;
+    while ((r = f_read(&f, buf, sizeof buf, &got)) == FR_OK && got)
+        crc = crc32_update(crc, buf, got), tot += got;
+    f_close(&f);
+    if (r == FR_OK)
+        *len = tot;
+    return crc;
+}
+
+static int fs_load(const char *name, void *dst, u32 max, u32 *len)   /* 0, or FRESULT / -1 */
+{
+    static FIL f;
+    UINT got = 0;
+    *len = 0;
+    if (fs_mount())
+        return -1;
+    FRESULT r = f_open(&f, name, FA_READ);
+    if (r == FR_OK) {
+        r = f_read(&f, dst, max, &got);
+        f_close(&f);
+    }
+    *len = got;
+    return r;
+}
+
+static int fs_save(const char *name, const void *src, u32 len)   /* create or replace; 0, or FRESULT / -1 */
+{
+    static FIL f;
+    UINT put = 0;
+    if (fs_mount())
+        return -1;
+    FRESULT r = f_open(&f, name, FA_CREATE_ALWAYS | FA_WRITE);
+    if (r != FR_OK)
+        return r;
+    r = f_write(&f, src, len, &put);
+    FRESULT r2 = f_close(&f);
+    return r ? r : r2 ? r2 : put != len ? FR_DENIED : 0;
+}
+
+/* Replace `name` with len bytes from src, never leaving it half-written: write PERSIST.TMP, check its CRC, then
+ * delete the old file and rename. Power loss leaves either the old file, or no file plus a complete PERSIST.TMP. */
+static int fs_persist(const char *name, const void *src, u32 len, char *o)
+{
+    u32 want = crc32_le(src, (int)len), got_len, t0 = clk_ms();
+    int r = fs_save("PERSIST.TMP", src, len);
+    if (r)
+        return vfmt_n(o, "ERR persist: write PERSIST.TMP: %d", r);
+    u32 c = fs_crc("PERSIST.TMP", &got_len);
+    if (got_len != len || c != want)
+        return vfmt_n(o, "ERR persist: PERSIST.TMP reads back %u bytes crc %08x, want %u %08x", got_len, c, len, want);
+    r = f_unlink(name);
+    if (r && r != FR_NO_FILE)
+        return vfmt_n(o, "ERR persist: delete old %s: %d (PERSIST.TMP is complete)", name, r);
+    if ((r = f_rename("PERSIST.TMP", name)))
+        return vfmt_n(o, "ERR persist: rename to %s: %d (PERSIST.TMP is complete)", name, r);
+    c = fs_crc(name, &got_len);
+    return vfmt_n(o, "%s %s: %u bytes, crc %08x, %u ms", name, got_len == len && c == want ? "persisted" : "MISMATCH",
+                  got_len, c, clk_ms() - t0);
 }
 
 static void save_log(const char *name)
@@ -2541,6 +2623,89 @@ static int usb_op(int c, int count, char *o)
                   ehci_stats.busy, ehci_stats.refused, ehci_portsc(), rd32(wdev + UDEV_STATUS));
 }
 
+/* ---- HU1 op 17 FS: our own SD + FatFs (helpers above save_log) ---- */
+static int fs_op(const cu8 *p, int n, char *o)
+{
+    static u8 sec[512] __attribute__((aligned(4)));
+    int c = n ? p[0] : 0;
+    u32 a = n >= 5 ? le32(p + 1) : 0, b = n >= 9 ? le32(p + 5) : 0;
+    char name[64];
+    int nl = n > 9 ? n - 9 : 0;
+    if (nl > 63)
+        nl = 63;
+    for (int i = 0; i < nl; i++)
+        name[i] = (char)p[9 + i];
+    name[nl] = 0;
+    int k = 0;
+    if (c == 3) {   /* raw read of one sector (absolute LBA) as hex */
+        if (fs_mount() && sd_init())
+            return vfmt_n(o, "ERR sd_init");
+        if (sd_read(a, sec, 1))
+            return vfmt_n(o, "ERR read lba %u: cc %x d0 %x r1 %x", a, sd_stats.last_cc, sd_stats.last_d0, sd_stats.last_r1);
+        for (int i = 0; i < 512; i++)
+            k += vfmt_n(o + k, "%02x%s", sec[i], (i & 31) == 31 ? "\n" : "");
+        return k;
+    }
+    int m = fs_mount();
+    if (c == 0 || m)
+        return vfmt_n(o, "fs: %s, part lba %u, %s addressing, fat type %u, cluster %u sectors, data at %u; sd reads %u writes %u errors %u resets %u (last cc %x d0 %x r1 %x)",
+                      m ? "NOT MOUNTED" : "mounted", sd_stats.part_lba, sd_stats.addr_shift ? "byte" : "block",
+                      (u32)fatfs.fs_type, (u32)fatfs.csize, (u32)fatfs.database, sd_stats.reads, sd_stats.writes,
+                      sd_stats.errors, sd_stats.resets, sd_stats.last_cc, sd_stats.last_d0, sd_stats.last_r1);
+    static FIL f;
+    FRESULT r;
+    if (c == 1) {   /* ls */
+        static DIR d;
+        static FILINFO fi;
+        if ((r = f_opendir(&d, name[0] ? name : "/")) != FR_OK)
+            return vfmt_n(o, "ERR opendir %d", r);
+        while (f_readdir(&d, &fi) == FR_OK && fi.fname[0] && k < 60000)
+            k += vfmt_n(o + k, "%10u %s%s\n", (u32)fi.fsize, fi.fname, fi.fattrib & AM_DIR ? "/" : "");
+        f_closedir(&d);
+        return k;
+    }
+    if (c == 7) {   /* load a file to RAM a, at most b bytes (the WIFI.TXT path, fs_load) */
+        u32 got, t0 = clk_ms();
+        int e = fs_load(name, (void *)a, b, &got);
+        return vfmt_n(o, "%s: %d, %u bytes, crc %08x, %u ms", name, e, got, e ? 0 : crc32_le((const u8 *)a, (int)got),
+                      clk_ms() - t0);
+    }
+    if (c == 2) {   /* crc of a file */
+        u32 len, t0 = clk_ms(), crc = fs_crc(name, &len);
+        if (len == 0xffffffff)
+            return vfmt_n(o, "ERR read %s", name);
+        return vfmt_n(o, "%s: %u bytes, crc %08x, %u ms", name, len, crc, clk_ms() - t0);
+    }
+    if (c == 4) {   /* raw-write 512 bytes from RAM a into the first data sector of file `name` (write-path test) */
+        if ((r = f_open(&f, name, FA_READ)) != FR_OK)
+            return vfmt_n(o, "ERR open %s: %d", name, r);
+        u32 cl = f.obj.sclust, size = (u32)f.obj.objsize;
+        f_close(&f);
+        if (cl < 2 || size < 512)
+            return vfmt_n(o, "ERR %s: needs at least 512 bytes of data", name);
+        u32 lba = (u32)fatfs.database + (cl - 2) * fatfs.csize;
+        int e = sd_write(lba, (const u8 *)a, 1);
+        return vfmt_n(o, "raw write lba %u (cluster %u of %s): %d", lba, cl, name, e);
+    }
+    if (c == 5) {   /* write file name from RAM a, b bytes */
+        u32 t0 = clk_ms();
+        UINT put = 0;
+        if ((r = f_open(&f, name, FA_CREATE_ALWAYS | FA_WRITE)) != FR_OK)
+            return vfmt_n(o, "ERR create %s: %d", name, r);
+        r = f_write(&f, (const void *)a, b, &put);
+        FRESULT r2 = f_close(&f);
+        return vfmt_n(o, "%s: wrote %u of %u bytes, %u ms, write %d close %d", name, (u32)put, b, clk_ms() - t0, r, r2);
+    }
+    if (c == 6)
+        return vfmt_n(o, "rm %s: %d", name, f_unlink(name));
+    if (c == 8) {   /* persist name from RAM a, b bytes (write temp, verify, replace) */
+        if (b == 0 || b > 0x400000 || !name[0])
+            return vfmt_n(o, "ERR persist: name, 0 < len <= 4 MB");
+        return fs_persist(name, (const void *)a, b, o);
+    }
+    return vfmt_n(o, "ERR fs sub-op");
+}
+
 int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
 {
     char *t = (char *)out;
@@ -2604,6 +2769,8 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
     }
     case 14:   /* TOUCH: gt9.c */
         return gt9_op(p, n, t);
+    case 17:   /* FS: 0 status, 1 ls, 2 crc, 3 raw read, 4 raw write test, 5 write, 6 rm, 7 load, 8 persist */
+        return fs_op(p, n, t);
     case 15:   /* RTOS: task list */
         return rtos_status(t);
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */
