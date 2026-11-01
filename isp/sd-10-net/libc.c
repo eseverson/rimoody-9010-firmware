@@ -58,3 +58,26 @@ size_t strlen(const char *s)
         p++;
     return (size_t)(p - s);
 }
+
+int strncmp(const char *a, const char *b, size_t n)   /* lwIP (def.c) */
+{
+    for (; n; n--, a++, b++) {
+        if (*a != *b)
+            return (unsigned char)*a - (unsigned char)*b;
+        if (!*a)
+            return 0;
+    }
+    return 0;
+}
+
+int atoi(const char *s)   /* lwIP (netif_name_to_index) */
+{
+    int v = 0, neg = 0;
+    while (*s == ' ')
+        s++;
+    if (*s == '-' || *s == '+')
+        neg = *s++ == '-';
+    while (*s >= '0' && *s <= '9')
+        v = v * 10 + (*s++ - '0');
+    return neg ? -v : v;
+}

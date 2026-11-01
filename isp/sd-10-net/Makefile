@@ -7,13 +7,14 @@ OBJDUMP := $(CROSS)objdump
 # $r10 holds U-Boot's gd and must survive into every U-Boot call, so the compiler may not touch it.
 CFLAGS  := -march=v3 -mcpu=n9 -mcmodel=large -mno-ext-perf2 -mno-fp-as-gp -Os -ffreestanding -fno-builtin -nostdlib \
            -fno-pic -fno-common -fno-tree-loop-distribute-patterns -fno-asynchronous-unwind-tables -fno-unwind-tables \
-           '-ffixed-$$r10' -I. -Ifreertos/include -Ifreertos/port -Wall -Wextra -Wno-unused-parameter
+           '-ffixed-$$r10' -I. -Ifreertos/include -Ifreertos/port -Ilwip -Ilwip/arch -Ilwip/src/include -Wall -Wextra -Wno-unused-parameter
 LDFLAGS := -nostdlib -nostartfiles -Wl,--no-relax -Wl,--no-warn-rwx-segments
 LIBS    := -lgcc
 BUILD_ID := $(shell date +%Y%m%d-%H%M%S)
 RTOS    := freertos/tasks.c freertos/list.c freertos/queue.c freertos/timers.c freertos/heap_4.c freertos/port/port.c
-SRCS    := head.S net.c crypto.c wpa.c ip.c mcu.c irq.c irq.S clk.c ehci.c usbh.c sd.c diskio.c fatfs/ff.c wpa_ap.c ap80211.c gt9.c console.c libc.c fw.S tramp_bin.S $(RTOS)
-HDRS    := FreeRTOSConfig.h freertos/port/portmacro.h freertos/port/port_nds32.h crypto.h wpa.h ip.h mcu.h irq.h clk.h ehci.h usbh.h wpa_ap.h ap80211.h sd.h fatfs/ff.h fatfs/ffconf.h fatfs/diskio.h usbdev.h gt9.h console.h font8x16.h ub_sig.h rtl8188f_tables.h rtl8xxxu_regs.h
+LWIP_SRC := $(wildcard lwip/src/core/*.c lwip/src/core/ipv4/*.c) lwip/src/netif/ethernet.c
+SRCS    := head.S net.c crypto.c wpa.c ip.c mcu.c irq.c irq.S clk.c ehci.c usbh.c sd.c diskio.c fatfs/ff.c wpa_ap.c ap80211.c lwnet.c $(LWIP_SRC) gt9.c console.c libc.c fw.S tramp_bin.S $(RTOS)
+HDRS    := FreeRTOSConfig.h freertos/port/portmacro.h freertos/port/port_nds32.h crypto.h wpa.h ip.h mcu.h irq.h clk.h ehci.h usbh.h wpa_ap.h ap80211.h lwnet.h lwip/lwipopts.h sd.h fatfs/ff.h fatfs/ffconf.h fatfs/diskio.h usbdev.h gt9.h console.h font8x16.h ub_sig.h rtl8188f_tables.h rtl8xxxu_regs.h
 
 all: NET.BIN net.dis TRAMP.BIN tramp.dis
 
@@ -46,7 +47,6 @@ test/%_host: test/%_host.c h264p.c h264p.h aa_wl.c aa_wl.h wpa_ap.c wpa_ap.h ap8
 clean:
 	rm -f net.elf NET.BIN net.dis net.map tramp.elf TRAMP.BIN tramp.dis tramp.map test/*_host
 
-LWIP_SRC := $(wildcard lwip/src/core/*.c lwip/src/core/ipv4/*.c) lwip/src/netif/ethernet.c
 test/lwiptcp_host: test/lwiptcp.c lwip/lwipopts.h $(LWIP_SRC)
 	$(HOSTCC) -O2 -w -Ilwip -Ilwip/arch -Ilwip/src/include -o $@ test/lwiptcp.c $(LWIP_SRC)
 test/dhcps_host: test/dhcps.c dhcps.c dhcps.h lwip/lwipopts.h $(LWIP_SRC)

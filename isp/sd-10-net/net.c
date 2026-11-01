@@ -36,6 +36,7 @@ typedef signed char s8;
 #include "wpa.h"
 #include "wpa_ap.h"
 #include "ap80211.h"
+#include "lwnet.h"
 #include "ip.h"
 #include "mcu.h"
 #include "irq.h"
@@ -2158,8 +2159,13 @@ static void data_frame(u8 *f, int len)
     rx_data++;
     if (type == 0x888e)
         eapol_in(body + 8, n - 8);
-    else if (prot && keys_ok && (type == 0x0800 || type == 0x0806))
-        ip_rx(sa, da, type, body + 8, n - 8);
+    else if (prot && keys_ok && (type == 0x0800 || type == 0x0806)) {
+        int lw = lw_wants(type, body + 8, n - 8);   /* TCP and ARP to lwIP; ARP and the rest to ip.c */
+        if (lw)
+            lw_input(sa, da, type, body + 8, n - 8);
+        if (!lw || type == 0x0806)
+            ip_rx(sa, da, type, body + 8, n - 8);
+    }
 }
 
 static void mgmt_frame(const u8 *f, int len, int rssi)
@@ -2572,7 +2578,11 @@ static void ap_data_frame(u8 *f, int len)
             flush("ap station keyed");
         }
     } else if ((f[1] & 0x40) && sta_st == 3 && (type == 0x0800 || type == 0x0806)) {
-        ip_rx(f + 10, f + 16, type, body + 8, n - 8);
+        int lw = lw_wants(type, body + 8, n - 8);
+        if (lw)
+            lw_input(f + 10, f + 16, type, body + 8, n - 8);
+        if (!lw || type == 0x0806)
+            ip_rx(f + 10, f + 16, type, body + 8, n - 8);
     }
 }
 
@@ -2753,8 +2763,10 @@ void plat_ip_event(cu32 ip, cu32 mask, cu32 router, int how)
 {
     if (!how) {
         log_s("ip: address lost\n");
+        lw_set_addr(0, 0, 0);
         return;
     }
+    lw_set_addr(ip, mask, router);
     if (exec_trial && !net_online)
         lprintf("probation passed: online %u ms after start\n", ub_ms(0) - net_task_t0);
     net_online = 1;
@@ -3281,6 +3293,7 @@ static void net_loop(void)
         else
             mlme_tick();
         ip_poll();
+        lw_poll();
         if (ap_start_pending && (int)(ub_ms(0) - deferred_at) >= 0) {
             ap_start_pending = 0;
             ap_start(ap_start_ch, ap_req_ssid, ap_req_psk);
@@ -3395,6 +3408,7 @@ static void net_task(void *arg)
     own_usb = 1;   /* from here on every Wi-Fi transfer goes through ehci.c; U-Boot only enumerated (hu.py usb uboot reverts) */
 
     if (wifi_init() == 0) {
+        lw_init(my_mac);
         ip_init(my_mac, cfg_token, cfg_ip, RBUF);
         net_loop();
         ehci_rx_stop();
