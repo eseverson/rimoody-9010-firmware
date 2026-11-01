@@ -237,7 +237,7 @@ def main():
     p.add_argument('what', choices=['status', 'init', 'bitread', 'decode', 'spmp', 'prepare']); p.add_argument('file', nargs='?')
     p.add_argument('--pics', type=int, default=1, help='decode: pictures to decode (0: all)'); p.add_argument('--skip', type=lambda x: int(x, 0), default=0)
     p = sub.add_parser('aa', help='wireless Android Auto: status | start [PORT] | connect PHONE_IP[:PORT] (cert/key from AACERT.PEM / AAKEY.PEM on the card)')
-    p.add_argument('what', choices=['status', 'start', 'connect']); p.add_argument('target', nargs='?', default='5288')
+    p.add_argument('what', choices=['status', 'start', 'connect']); p.add_argument('target', nargs='?', default='5288'); p.add_argument('extra', nargs='*')
     p = sub.add_parser('vpp', help='VPP0 video layer tests: status | bars [SECS [SLOT]] | show [SECS [SLOT]] | restore | poke ADDR VAL | probe MASK [PATH] (notes/vpp0_display.md round 2; restore afterwards)')
     p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk', 'bisect', 'probe']); p.add_argument('args', nargs='*')
     p = sub.add_parser('osdvid', help='video through the OSD layer: status | show [SECS] | on | off')
@@ -353,6 +353,8 @@ def main():
         elif a.what == 'connect':   # phone running Android Auto's "head unit server" (developer settings), port 5277
             host, _, port = a.target.partition(':')
             payload = bytes([2]) + bytes(int(x) for x in host.split('.')) + struct.pack('<H', int(port or 5277))
+            if a.extra:   # VER_MINOR AUDIO_MASK (bit 0 media, 1 speech, 2 system, 0x80 microphone)
+                payload += bytes([int(a.extra[0], 0), int(a.extra[1], 0)])
         else:
             payload = bytes([0])
         print(u.call(OP_AA, payload).decode(errors='replace'))

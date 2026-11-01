@@ -14,6 +14,8 @@ struct aa_platform {
     const unsigned char *cert, *key;                     /* head-unit certificate and key, PEM incl. NUL */
     size_t cert_len, key_len;
     int dpi;
+    int ver_minor;    /* protocol minor version we ask for (0 = 1) */
+    int audio_mask;   /* audio sinks offered: bit 0 media, 1 speech, 2 system; bit 7 = also a microphone source; 0 = none */
 };
 
 struct aa_status {

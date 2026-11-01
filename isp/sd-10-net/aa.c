@@ -153,9 +153,25 @@ static int send_service_discovery(void)
     pb_close(&b, y);
     pb_close(&b, x);
     pb_close(&b, c);
-    add_audio(&b, CH_MEDIA_AUDIO, 3, 48000, 2);
-    add_audio(&b, CH_SPEECH_AUDIO, 1, 16000, 1);
-    add_audio(&b, CH_SYSTEM_AUDIO, 2, 16000, 1);
+    if (pf->audio_mask & 1)
+        add_audio(&b, CH_MEDIA_AUDIO, 3, 48000, 2);
+    if (pf->audio_mask & 2)
+        add_audio(&b, CH_SPEECH_AUDIO, 1, 16000, 1);
+    if (pf->audio_mask & 4)
+        add_audio(&b, CH_SYSTEM_AUDIO, 2, 16000, 1);
+    if (pf->audio_mask & 0x80) {   /* microphone: AV input channel, PCM 16 kHz mono */
+        c = pb_open(&b, 1);
+        pb_u(&b, 1, CH_MIC);
+        x = pb_open(&b, 5);
+        pb_u(&b, 1, 1);
+        y = pb_open(&b, 2);
+        pb_u(&b, 1, 16000);
+        pb_u(&b, 2, 16);
+        pb_u(&b, 3, 1);
+        pb_close(&b, y);
+        pb_close(&b, x);
+        pb_close(&b, c);
+    }
     /* input: touchscreen in video coordinates */
     c = pb_open(&b, 1);
     pb_u(&b, 1, CH_INPUT);
@@ -500,7 +516,7 @@ int aa_start(const struct aa_platform *p)
         return -1;
     }
     st.state = AA_VERSION;
-    static const u8 ver[] = { 0, 1, 0, 1 };   /* protocol 1.1 */
+    u8 ver[4] = { 0, 1, 0, (u8)(p->ver_minor ? p->ver_minor : 1) };   /* protocol 1.x */
     return send_msg(CH_CONTROL, 0, 0, 1, ver, 4);
 }
 

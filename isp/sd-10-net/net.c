@@ -3192,6 +3192,9 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         static struct aa_platform pf;
         pf.video = aa_video_cb, pf.log = aa_log_cb, pf.now_us = clk_us;
         pf.cert = aa_cert, pf.cert_len = cl + 1, pf.key = aa_key, pf.key_len = kl + 1, pf.dpi = 160;
+        pf.audio_mask = 7, pf.ver_minor = 1;
+        if (c == 2 && n >= 9)   /* connect extras: protocol minor version, audio mask */
+            pf.ver_minor = p[7], pf.audio_mask = p[8];
         gt9_hook = aa_touch_hook;
         if (c == 2) {
             int r = aa_tcp_connect(&pf, ip, port);
