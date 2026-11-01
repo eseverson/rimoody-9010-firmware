@@ -438,7 +438,18 @@ static int decode_pic(const struct vslice *sl, int ns, const struct h264_sps *sp
     M(0xd550) = 0;
     M(0xd550) = 1;
     crumb(45);
-    int k1 = poll(0xd550, 1, 1, 3000000);   /* eCos waits on this with no timeout; a whole slice may run first */
+    /* start acknowledged (D550 bit 0; eCos waits on it with no timeout). It can be missed: once in ~15000 pictures it
+     * never read 1 while the block had already completed (D570 0x2CB), so done (D570 bit 0) counts as acknowledged */
+    int k1 = -1;
+    for (u32 n = 0; n < 3000000; n++)
+        if (M(0xd550) & 1) {
+            k1 = 0;
+            break;
+        } else if (M(0xd570) & 1) {
+            k1 = 0;
+            vdec_stats.ack_missed++;   /* usual: 78% of 18000 pictures; harmless */
+            break;
+        }
     int k2 = k1 ? -1 : poll(0xd570, 1, 1, 3000000);
     crumb(47);
     pr->d570 = M(0xd570);
@@ -636,8 +647,13 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32
  * o and the stream restarts at the next IDR. */
 int vdec_feed(const unsigned char *p, unsigned int n, char *o, vdec_fmt fmt)
 {
-    if (!inited)
-        return fmt(o, "ERR vdec: init first"), -1;
+    if (!inited) {   /* after a reset through MOON0 (a stuck picture): init again, carry on from the next IDR */
+        char m[200];
+        vdec_init(m, fmt);
+        vdec_stats.reinits++;
+        for (int i = 0; i < NSLOT; i++)
+            dpb[i].used = 0;
+    }
     struct feed_out fo = { 0 };
     feed(p, n, 0, 1, 0, o, fmt, &fo);
     if (fo.err) {

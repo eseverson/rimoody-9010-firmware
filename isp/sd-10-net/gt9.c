@@ -259,10 +259,12 @@ static int button(unsigned x, unsigned y)
 }
 
 /* Status 0x814E, first record from 0x814F, acknowledge; logs touch down/up and button presses (not every move). */
+void (*gt9_hook)(int action, unsigned x, unsigned y);
+
 void gt9_tick(u32 now)
 {
     static u32 last;
-    static int down;
+    static int down, down_btn;
     static unsigned lx, ly;
     if (ev_state < 0 || now - last < 25 || !claim())
         return;
@@ -285,6 +287,9 @@ void gt9_tick(u32 now)
         if (np && !down) {
             gt9_down_ms = now ? now : 1;
             int btn = button(x, y);
+            down_btn = btn;
+            if (!btn && gt9_hook)
+                gt9_hook(0, x, y);
             if (btn)
                 plat_fmt(gt9_last, "button %d", btn);
             else
@@ -292,6 +297,10 @@ void gt9_tick(u32 now)
             plat_logf("touch: down %u %u%s%s\n", x, y, btn ? " " : "", btn ? gt9_last : "");
         } else if (!np && down) {
             plat_logf("touch: up %u %u\n", lx, ly);
+            if (!down_btn && gt9_hook)
+                gt9_hook(1, lx, ly);
+        } else if (np && down && !down_btn && (x != lx || y != ly) && gt9_hook) {
+            gt9_hook(2, x, y);
         }
         if (np)
             lx = x, ly = y;

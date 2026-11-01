@@ -138,3 +138,13 @@ Order matters for pop and safety. Confidence drops at each step.
 - What does `e6 00` mean (sent only by power_on)? Which source owns ADC mux inputs 0, 1 and AUX on this board?
 - Is config byte 0x6d7091 (the external `51 …` audio-module protocol) zero on this unit? Is 0x6d7104 zero? Read both live from RAM (bytes 0x006d7091, 0x006d7104) during an eCos boot if a read path is ever available.
 - Why did the source-switch capture show no `d8`, even with Bluetooth audio? Most likely btap needs [0x71eb17] / phonelink state, which wasn't met.
+
+## PCM playback path for AA audio (Haiku pass over ecos.ann.dis, 2026-11-01; addresses read, meanings partly inferred, not yet tried)
+
+- **PCM does not go to a FIFO or DAC register: the CPU writes a DRAM track buffer and an audio DSP core consumes it.** Playback needs the DSP microcode downloaded (`AUDIF_ResetDsp` 0x3aa50a -> `DSP_InitSystem` 0x3bb996 -> download 0x3bafe0 / 0x3baf48 with IDs 0x1d / 0x1c) and mailbox commands.
+- Audio/DSP MMIO 0x9C001700..0x9C0022FF. Reset path: 0x9C001794 &= ~2 (hold), buffer layout 0x3bd5ce (4 KB-scaled bases into 0x9C001744..0x9C001764 and 0x9C001ED0, raw values 0x9C0017C0..0x9C0017D4, 0x9C0017E0), 0x9C001798 = 2, 0x9C001794 |= 2, 0x9C001780 = 1 then 0x10 or 0 by chip ID (0x9C000000 = 0x650 / 0x651).
+- Mailbox (`DSP_SendCmd` 0x3bbf74): p3 -> 0x9C001884, `cmd << 24 | p1 << 16 | p2` -> 0x9C001880, doorbell 0x9C001784 bit 0, wait for 0x9C001880 bit 31 (1 s). Clear routine 0x3bd262 zeroes 0x9C001880..+0x7C and sets 0x9C001880 / 0x9C0018A8 / 0x9C0018F8 to 0x80000000.
+- Sample rate (`AUD_Set_RiscSndFs` 0x3b449e): command 6, p1 = 8, p2 = 1 (48 kHz), 2 (24 kHz), 3 (16 kHz). The track API accepts only "2ch/s16/pcm/pcm_be" (string), so 16 kHz mono speech likely goes out as stereo.
+- Track API: `AUDIF_Track_Init` 0x3a3ef0, `Create_Ext` 0x3a3f8e ("AudioTrack-DEC2"), `Start` 0x3a4636, `Stop` 0x3a47f4, `Write_Blocked` 0x3a5188 (400 ms timeout on "buffer is full"), `SetVolume` 0x3a4b68. The DSP's consume pointer register was not found.
+- Output: an internal DAC path (enable 0x3b4ec2: 0x9C001E14 bits 31:30) and an I2S path (0x3b4bde: 0x9C002280/88/8C) both exist; which one this board uses is open. Mute is an MCU command (`01 xx` payload via 0x31d6d4), consistent with the sections above.
+- Next: find where eCos keeps the DSP code image (pDspCode, IDs 0x1c/0x1d) in the eCos binary, then try a 1 kHz tone (needs someone listening).

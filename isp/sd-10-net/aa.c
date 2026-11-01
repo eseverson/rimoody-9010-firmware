@@ -504,6 +504,8 @@ int aa_start(const struct aa_platform *p)
     return send_msg(CH_CONTROL, 0, 0, 1, ver, 4);
 }
 
+void aa_closed(void) { st.state = AA_CLOSED; }
+
 int aa_touch(int action, int x, int y)
 {
     if (st.state != AA_RUNNING)

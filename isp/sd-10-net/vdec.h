@@ -1,7 +1,7 @@
 /* Hardware H.264 decoder bring-up (vdec.c), HU1 op 19. Net task only. */
 #ifndef VDEC_H
 #define VDEC_H
-struct vdec_stats { unsigned int bitreads, decodes, errors, last_us; };
+struct vdec_stats { unsigned int bitreads, decodes, errors, last_us, reinits, ack_missed; };
 extern struct vdec_stats vdec_stats;
 typedef int (*vdec_fmt)(char *, const char *, ...);
 int vdec_init(char *o, vdec_fmt fmt);

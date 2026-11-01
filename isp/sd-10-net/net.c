@@ -3120,6 +3120,36 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
 }
 static void aa_log_cb(const char *m) { log_s(m); }
 
+/* touches for the phone: queued by the touch task (gt9_hook), sent by the net task (lwIP is single-threaded) */
+static struct { u8 action; u16 x, y; } aa_tq[32];
+static volatile u32 aa_tq_w, aa_tq_r;
+static u32 aa_touch_sent, aa_touch_dropped;
+static void aa_touch_hook(int action, unsigned x, unsigned y)
+{
+    u32 w = aa_tq_w;
+    if (w - aa_tq_r >= 32) {
+        aa_touch_dropped++;
+        return;
+    }
+    aa_tq[w % 32].action = (u8)action;
+    aa_tq[w % 32].x = (u16)(x > 1023 ? 1023 : x);
+    aa_tq[w % 32].y = (u16)(y > 599 ? 599 : y);
+    __asm__ volatile("" ::: "memory");
+    aa_tq_w = w + 1;
+}
+static void aa_touch_poll(void)   /* net task: panel 1024 x 600 -> video 800 x 480 (the scaler fills the panel) */
+{
+    while (aa_tq_r != aa_tq_w) {
+        u32 r = aa_tq_r;
+        int act = aa_tq[r % 32].action;
+        u32 x = aa_tq[r % 32].x * 800u / 1024u, y = aa_tq[r % 32].y * 480u / 600u;
+        __asm__ volatile("" ::: "memory");
+        aa_tq_r = r + 1;
+        if (aa_touch(act, (int)x, (int)y) == 0)
+            aa_touch_sent++;
+    }
+}
+
 static int aa_op(int c, const u8 *p, int n, char *t)
 {
     const struct aa_status *a = aa_status();
@@ -3141,18 +3171,19 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         if (r)
             return vfmt_n(t, "ERR aa: listen on %d failed (%d)", port, r);
         aa_listening = port;
+        gt9_hook = aa_touch_hook;
         return vfmt_n(t, "aa: listening on TCP %d (cert %u B, key %u B); %s", port, cl, kl, vm);
     }
     static const char *const names[] = { "idle", "version", "tls", "authed", "discovery", "running", "closed", "error" };
     unsigned int luma = 0, chroma = 0;
     int slot = vdec_last_slot(&luma, &chroma);
     return vfmt_n(t, "aa: %s, listening %d, connected %d; version %u.%u, rx frames %u msgs %u, tx frames %u (drops %u), "
-                     "channels %u, video %u frames %u B, audio %u, unknown %u, errors %u; vdec decodes %u errors %u last %u us, "
-                     "slot %d luma %x chroma %x; time in decrypt %u ms, video %u ms%s%s",
+                     "channels %u, video %u frames %u B, audio %u, unknown %u, errors %u; vdec decodes %u errors %u reinits %u (done before the start bit %u) last %u us, "
+                     "slot %d luma %x chroma %x; time in decrypt %u ms, video %u ms; touches sent %u dropped %u%s%s",
                   names[a->state], aa_listening, aa_tcp_connected(), a->version_major, a->version_minor, a->rx_frames,
                   a->rx_msgs, a->tx_frames, aa_tcp_tx_drops(), a->channels_open, a->video_frames, a->video_bytes,
-                  a->audio_frames, a->unknown, a->errors, vdec_stats.decodes, vdec_stats.errors, vdec_stats.last_us, slot,
-                  luma, chroma, (u32)(a->decrypt_us / 1000), (u32)(a->video_us / 1000),
+                  a->audio_frames, a->unknown, a->errors, vdec_stats.decodes, vdec_stats.errors, vdec_stats.reinits, vdec_stats.ack_missed, vdec_stats.last_us, slot,
+                  luma, chroma, (u32)(a->decrypt_us / 1000), (u32)(a->video_us / 1000), aa_touch_sent, aa_touch_dropped,
                   aa_vmsg[0] ? "; last video error: " : "", aa_vmsg);
 }
 
@@ -3573,6 +3604,8 @@ static void net_loop(void)
             mlme_tick();
         ip_poll();
         unsigned long long tp2 = clk_us();
+        if (aa_listening)
+            aa_touch_poll();
         lw_poll();
         unsigned long long tp3 = clk_us();
         prof_rx_us += tp1 - tp0, prof_mid_us += tp2 - tp1, prof_lw_us += tp3 - tp2, prof_iters++;

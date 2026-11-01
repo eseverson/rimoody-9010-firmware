@@ -203,12 +203,14 @@ def main():
     ap.add_argument('ip'); ap.add_argument('stream'); ap.add_argument('--port', type=int, default=5288)
     ap.add_argument('--pics', type=int, default=0); ap.add_argument('--fps', type=float, default=30)
     ap.add_argument('--ciphers', help='OpenSSL cipher list the phone side allows, e.g. ECDHE-RSA-AES256-GCM-SHA384')
+    ap.add_argument('--loop', type=int, default=1, help='send the stream this many times (long runs)')
     ap.add_argument('--window', type=int, help='override the max unacked frames the head unit asked for (test only)')
     ap.add_argument('--hu-root', help="CA to verify the head unit's certificate with (the Google Automotive Link root)")
     a = ap.parse_args()
     aus = access_units(open(a.stream, 'rb').read())
     if a.pics:
         aus = aus[:a.pics]
+    aus = aus * a.loop
     with tempfile.TemporaryDirectory() as d:
         subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', d + '/k.pem', '-out',
                         d + '/c.pem', '-days', '1', '-subj', '/CN=aa-phone-test'], check=True, capture_output=True)

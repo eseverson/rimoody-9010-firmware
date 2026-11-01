@@ -28,8 +28,10 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
         tcp_arg(pcb, 0);
         tcp_recv(pcb, 0);
         tcp_close(pcb);
-        if (pcb == conn)
+        if (pcb == conn) {
             conn = 0;
+            aa_closed();
+        }
         return ERR_OK;
     }
     for (struct pbuf *q = p; q; q = q->next)
@@ -43,6 +45,7 @@ static void on_err(void *arg, err_t err)
 {
     (void)arg, (void)err;
     conn = 0;   /* pcb already freed by lwIP */
+    aa_closed();
 }
 
 static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err)
