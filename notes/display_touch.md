@@ -149,3 +149,6 @@ The earlier reboot with `tools/gt9.py` was not these pins. The payload's log for
 2. Add a framebuffer and console text renderer to the payload, using the OSD0 path above (`fb.py` shows every step).
 3. ~~Touch~~: done, see "Live touch". Next is an interrupt- or tick-driven poll in the payload that turns touches and button presses into events.
 4. ~~Keys~~: the front buttons are touch areas; the ADC is not needed for them.
+
+## Second haze event (2026-11-01)
+After the ~4 h dead period that followed the SD test build (SoC hung or powered off by the MCU, 2026-10-31 ~21:00 until the owner's power cycle after 01:00), a bigger and thicker white haze appeared around the screen border and stayed through another >10 s power cycle. Both haze events followed a dead/hung SoC; never normal use or long on-time. Working theory: with the SoC dead (no valid frames) the panel's own rails keep a DC voltage on the liquid crystal, and ionic impurities migrate toward the seal at the edges (border haze). Expected to fade over hours of normal AC drive. Prevention: the hardware watchdog (notes/rtos.md "Lockups") now resets a dead SoC within ~7 s. Discriminating check: boot stock eCos (card out); same haze there = stored in the panel, not our drive.
