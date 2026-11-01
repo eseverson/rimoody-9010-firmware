@@ -41,6 +41,7 @@ typedef signed char s8;
 #include "aa.h"
 #include "aa_tcp.h"
 #include "vpp.h"
+#include "osdvid.h"
 #include "ip.h"
 #include "mcu.h"
 #include "irq.h"
@@ -3102,7 +3103,7 @@ static int usb_op(int c, int count, char *o)
 /* ---- HU1 op 17 FS: our own SD + FatFs (helpers above save_log) ---- */
 /* ---- VPP0 tests (vpp.c, HU1 op 24): the console's OSD layer is off while one runs, everything comes back after
  * vpp_restore_at ---- */
-static u32 vpp_restore_at;
+static u32 vpp_restore_at, osdvid_until;
 static int vpp_osd_was_on;
 static void vpp_restore_now(void)
 {
@@ -3128,7 +3129,11 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
 {
     (void)ts;
     static char m[1024];   /* vfmt_n is unbounded: room for a few pictures of text */
-    if (vdec_feed(p, (u32)n, m, vfmt_n)) {
+    if (!vdec_feed(p, (u32)n, m, vfmt_n)) {
+        unsigned int l, c;
+        if (osdvid_on_now() && vdec_last_slot(&l, &c) >= 0)
+            osdvid_frame(l, c);
+    } else {
         for (u32 i = 0; i < sizeof aa_vmsg - 1; i++)
             aa_vmsg[i] = m[i];
         if (aa_verr_logged++ < 8)
@@ -3471,6 +3476,21 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             vpp_restore_now();
         return k;
     }
+    case 25: {   /* OSDVID: 0 status, 1 show the last decoded picture [u8 seconds, 0 = stay], 2 on (AA video live), 3 off */
+        int c = n ? p[0] : 0;
+        unsigned int l = 0, ch = 0;
+        if (c == 1 || c == 2) {
+            osdvid_on();
+            if (c == 1 && vdec_last_slot(&l, &ch) >= 0)
+                osdvid_frame(l, ch);
+            osdvid_until = c == 1 && n >= 2 && p[1] ? ub_ms(0) + 1000u * p[1] : 0;
+        } else if (c == 3) {
+            osdvid_off();
+            osdvid_until = 0;
+        }
+        return vfmt_n(t, "osdvid: %s, %u frames, last conversion %u us", osdvid_on_now() ? "on" : "off", osdvid_frames(),
+                      osdvid_last_us());
+    }
     case 22:   /* AA: 0 status, 1 start listening [port u16] */
         return aa_op(n ? p[0] : 0, p, n, t);
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */
@@ -3643,6 +3663,8 @@ static void net_loop(void)
             aa_touch_poll();
         if (vpp_restore_at && (int)(ub_ms(0) - vpp_restore_at) >= 0)
             vpp_restore_now();
+        if (osdvid_until && (int)(ub_ms(0) - osdvid_until) >= 0)
+            osdvid_off(), osdvid_until = 0;
         lw_poll();
         unsigned long long tp3 = clk_us();
         prof_rx_us += tp1 - tp0, prof_mid_us += tp2 - tp1, prof_lw_us += tp3 - tp2, prof_iters++;
