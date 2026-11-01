@@ -20,3 +20,4 @@ tools/WIFI.TXT.template
 WIFI.TXT
 
 __pycache__/
+*.nv12
