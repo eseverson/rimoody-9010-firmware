@@ -6,6 +6,7 @@
 #include "vdec.h"
 #include "h264p.h"
 #include "clk.h"
+#include <string.h>
 
 typedef unsigned int u32;
 typedef unsigned char u8;
@@ -469,22 +470,30 @@ static int decode_pic(const struct vslice *sl, int ns, const struct h264_sps *sp
 
 static int frame_num_wrap(u32 fn, u32 cur_fn, u32 max_fn) { return fn > cur_fn ? (int)fn - (int)max_fn : (int)fn; }
 
-/* Decode the access units in [src, src + len): SPS/PPS update the parameters, each slice NAL is one picture. maxpics 0:
- * all. The last picture stays in its slot for reading back (the reply names the addresses). */
-int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32 maxpics)
+/* Stream state, kept across access units (vdec_feed): parameter sets, the DPB, the last picture. */
+static struct h264_sps sps;
+static struct h264_pps pps;
+static int last_slot = -1;
+
+void vdec_stream_reset(void)
 {
-    if (!inited)
-        return fmt(o, "ERR vdec: init first");
-    if (len < 16 || len > 0x400000)
-        return fmt(o, "ERR vdec: 16 bytes .. 4 MB");
-    const u8 *s = (const u8 *)src;
-    struct h264_sps sps = { 0 };
-    struct h264_pps pps = { 0 };
-    u32 pos = 0, st, nl, pics = 0, t_sum = 0, t_max = 0;
-    int last = -1, k = fmt(o, "vdec decode (skip %x):", skip);
-    u32 a380 = M(0xa380);   /* left alone: slot 0 (1920) is what the decoder uses, see FB_PITCH */
+    memset(&sps, 0, sizeof sps);
+    memset(&pps, 0, sizeof pps);
     for (int i = 0; i < NSLOT; i++)
         dpb[i].used = 0;
+    last_slot = -1;
+}
+
+struct feed_out { u32 pics, t_sum, t_max; int err; };
+
+/* Decode the NAL units in [s, s + len): SPS/PPS update the parameters; each slice starting at macroblock 0, with the
+ * slices after it, is one picture. maxpics 0: all. Text (per-picture times, errors) goes to o; returns its length. */
+static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, vdec_fmt fmt, struct feed_out *fo)
+{
+    u32 pos = 0, st, nl, pics = 0;
+    int k = 0;
+    fo->err = 1;
+    u32 a380 = M(0xa380);   /* left alone: slot 0 (1920) is what the decoder uses, see FB_PITCH */
     while (h264_next_nal(s, len, &pos, &st, &nl)) {
         int t = s[st] & 31;
         if (t == 7) {
@@ -568,9 +577,9 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32
             k += fmt(o + k, "(marker)");
         if (pr.nal_bad)
             k += fmt(o + k, "(%u slices misplaced in the EVB)", pr.nal_bad);
-        t_sum += pr.t_us;
-        if (pr.t_us > t_max)
-            t_max = pr.t_us;
+        fo->t_sum += pr.t_us;
+        if (pr.t_us > fo->t_max)
+            fo->t_max = pr.t_us;
         if (sh.nal_ref_idc) {   /* sliding window */
             u32 nmax = sps.num_ref_frames ? sps.num_ref_frames : 1, nused = 0;
             for (int i = 0; i < NSLOT; i++)
@@ -588,19 +597,64 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32
             }
             dpb[cur].used = 1, dpb[cur].frame_num = sh.frame_num;
         }
-        last = cur;
+        last_slot = cur;
         pics++;
+        fo->pics = pics;
         vdec_stats.decodes++;
+        vdec_stats.last_us = pr.t_us;
         if (maxpics && pics >= maxpics)
             break;
     }
     crumb_clear();
-    if (last < 0)
+    fo->err = 0;
+    return k;
+}
+
+/* op 19/3: decode the uploaded stream from a fresh state; the last picture stays in its slot for reading back (the reply
+ * names the addresses). */
+int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32 maxpics)
+{
+    if (!inited)
+        return fmt(o, "ERR vdec: init first");
+    if (len < 16 || len > 0x400000)
+        return fmt(o, "ERR vdec: 16 bytes .. 4 MB");
+    vdec_stream_reset();
+    struct feed_out fo = { 0 };
+    int k = fmt(o, "vdec decode (skip %x):", skip);
+    k += feed((const u8 *)src, len, maxpics, kick, skip, o + k, fmt, &fo);
+    if (fo.err || !kick)
+        return k;
+    if (!fo.pics)
         return k + fmt(o + k, " ERR no picture");
-    cache_inval(SLOT_LUMA(last), FB_LUMA_N);
-    cache_inval(SLOT_CHROMA(last), FB_CHROMA_N);
-    return k + fmt(o + k, "; %u pictures (us each, mean %u, max %u); last in slot %d: luma %x chroma %x", pics,
-                   t_sum / pics, t_max, last, SLOT_LUMA(last), SLOT_CHROMA(last));
+    cache_inval(SLOT_LUMA(last_slot), FB_LUMA_N);
+    cache_inval(SLOT_CHROMA(last_slot), FB_CHROMA_N);
+    return k + fmt(o + k, "; %u pictures (us each, mean %u, max %u); last in slot %d: luma %x chroma %x", fo.pics,
+                   fo.t_sum / fo.pics, fo.t_max, last_slot, SLOT_LUMA(last_slot), SLOT_CHROMA(last_slot));
+}
+
+/* One access unit of a running stream (Android Auto video): decoded at once, state kept. 0 ok; on error the text is in
+ * o and the stream restarts at the next IDR. */
+int vdec_feed(const unsigned char *p, unsigned int n, char *o, vdec_fmt fmt)
+{
+    if (!inited)
+        return fmt(o, "ERR vdec: init first"), -1;
+    struct feed_out fo = { 0 };
+    feed(p, n, 0, 1, 0, o, fmt, &fo);
+    if (fo.err) {
+        vdec_stats.errors++;
+        for (int i = 0; i < NSLOT; i++)   /* references are gone: P pictures fail until the next IDR */
+            dpb[i].used = 0;
+        return -1;
+    }
+    return 0;
+}
+
+int vdec_last_slot(unsigned int *luma, unsigned int *chroma)
+{
+    if (last_slot < 0)
+        return -1;
+    *luma = SLOT_LUMA(last_slot), *chroma = SLOT_CHROMA(last_slot);
+    return last_slot;
 }
 
 

@@ -38,6 +38,8 @@ typedef signed char s8;
 #include "ap80211.h"
 #include "lwnet.h"
 #include "vdec.h"
+#include "aa.h"
+#include "aa_tcp.h"
 #include "ip.h"
 #include "mcu.h"
 #include "irq.h"
@@ -1644,6 +1646,8 @@ static void rng_bytes(u8 *out, int n)
     }
 }
 
+void hu_random(unsigned char *out, int n) { rng_bytes(out, n); }   /* aa_tls.c (mbedtls entropy) */
+
 /* ---- configuration from /WIFI.TXT (never logged, wiped from RAM after parsing) ---- */
 #define WIFI_TXT ((char *)0x02100000)
 static u8 cfg_ssid[33], cfg_pmk[32], cfg_token[32];
@@ -3095,6 +3099,63 @@ static int usb_op(int c, int count, char *o)
 }
 
 /* ---- HU1 op 17 FS: our own SD + FatFs (helpers above save_log) ---- */
+/* ---- wireless Android Auto (aa.c over aa_tcp.c), HU1 op 22. Net task only. The head unit's certificate and key are
+ * read from the SD card (AACERT.PEM, AAKEY.PEM), never built into the image. Video access units go straight to the
+ * hardware decoder (vdec_feed). ---- */
+static u8 aa_cert[8192], aa_key[8192];
+static int aa_listening;
+static char aa_vmsg[160];
+static u32 aa_verr_logged;
+
+static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
+{
+    (void)ts;
+    static char m[1024];   /* vfmt_n is unbounded: room for a few pictures of text */
+    if (vdec_feed(p, (u32)n, m, vfmt_n)) {
+        for (u32 i = 0; i < sizeof aa_vmsg - 1; i++)
+            aa_vmsg[i] = m[i];
+        if (aa_verr_logged++ < 8)
+            lprintf("aa: video: %s\n", aa_vmsg);
+    }
+}
+static void aa_log_cb(const char *m) { log_s(m); }
+
+static int aa_op(int c, const u8 *p, int n, char *t)
+{
+    const struct aa_status *a = aa_status();
+    if (c == 1) {   /* start: [port u16, default 5288] */
+        int port = n >= 3 ? p[1] | p[2] << 8 : 5288;
+        if (aa_listening)
+            return vfmt_n(t, "ERR aa: already listening");
+        u32 cl, kl;
+        if (fs_load("AACERT.PEM", aa_cert, sizeof aa_cert - 1, &cl) || !cl || fs_load("AAKEY.PEM", aa_key, sizeof aa_key - 1, &kl) || !kl)
+            return vfmt_n(t, "ERR aa: AACERT.PEM / AAKEY.PEM not readable on the card");
+        aa_cert[cl] = 0, aa_key[kl] = 0;
+        char vm[200];
+        vdec_init(vm, vfmt_n);
+        vdec_stream_reset();
+        static struct aa_platform pf;
+        pf.video = aa_video_cb, pf.log = aa_log_cb, pf.now_us = clk_us;
+        pf.cert = aa_cert, pf.cert_len = cl + 1, pf.key = aa_key, pf.key_len = kl + 1, pf.dpi = 160;
+        int r = aa_tcp_listen(&pf, 0, port);
+        if (r)
+            return vfmt_n(t, "ERR aa: listen on %d failed (%d)", port, r);
+        aa_listening = port;
+        return vfmt_n(t, "aa: listening on TCP %d (cert %u B, key %u B); %s", port, cl, kl, vm);
+    }
+    static const char *const names[] = { "idle", "version", "tls", "authed", "discovery", "running", "closed", "error" };
+    unsigned int luma = 0, chroma = 0;
+    int slot = vdec_last_slot(&luma, &chroma);
+    return vfmt_n(t, "aa: %s, listening %d, connected %d; version %u.%u, rx frames %u msgs %u, tx frames %u (drops %u), "
+                     "channels %u, video %u frames %u B, audio %u, unknown %u, errors %u; vdec decodes %u errors %u last %u us, "
+                     "slot %d luma %x chroma %x; time in decrypt %u ms, video %u ms%s%s",
+                  names[a->state], aa_listening, aa_tcp_connected(), a->version_major, a->version_minor, a->rx_frames,
+                  a->rx_msgs, a->tx_frames, aa_tcp_tx_drops(), a->channels_open, a->video_frames, a->video_bytes,
+                  a->audio_frames, a->unknown, a->errors, vdec_stats.decodes, vdec_stats.errors, vdec_stats.last_us, slot,
+                  luma, chroma, (u32)(a->decrypt_us / 1000), (u32)(a->video_us / 1000),
+                  aa_vmsg[0] ? "; last video error: " : "", aa_vmsg);
+}
+
 static int fs_op(const cu8 *p, int n, char *o)
 {
     static u8 sec[512] __attribute__((aligned(4)));
@@ -3312,6 +3373,8 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             return vdec_spmp_test(t, vfmt_n, n >= 2 ? p[1] : 0);
         return vdec_status(t, vfmt_n);
     }
+    case 22:   /* AA: 0 status, 1 start listening [port u16] */
+        return aa_op(n ? p[0] : 0, p, n, t);
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */
         return usb_op(n ? p[0] : 0, n >= 3 ? p[1] | p[2] << 8 : 200, t);
     case 10: {   /* EXEC src len: checked here, run from net_loop after this reply has gone out */

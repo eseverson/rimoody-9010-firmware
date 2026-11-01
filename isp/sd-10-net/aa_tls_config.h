@@ -17,6 +17,10 @@
 #define MBEDTLS_CIPHER_C
 #define MBEDTLS_CIPHER_MODE_CBC
 #define MBEDTLS_GCM_C
+#define MBEDTLS_GCM_LARGE_TABLE   /* 8-bit GHASH tables: faster in software */
+#define MBEDTLS_CHACHA20_C
+#define MBEDTLS_POLY1305_C
+#define MBEDTLS_CHACHAPOLY_C
 #define MBEDTLS_MD_C
 #define MBEDTLS_SHA1_C
 #define MBEDTLS_SHA224_C
@@ -48,7 +52,9 @@
 
 #define MBEDTLS_SSL_TLS_C
 #define MBEDTLS_SSL_CLI_C
+#ifdef AA_TLS_HOST   /* the host tests run a TLS server as the phone */
 #define MBEDTLS_SSL_SRV_C
+#endif
 #define MBEDTLS_SSL_PROTO_TLS1_2
 #define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED

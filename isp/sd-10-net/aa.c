@@ -27,7 +27,15 @@ enum { F_FIRST = 1, F_LAST = 2, F_WHOLE = 3, F_CONTROL = 4, F_ENC = 8 };
 
 static const struct aa_platform *pf;
 static struct aa_status st;
-static u8 tx[0x4000 + 64], msg[0x4000 + 16], plain[0x8000];
+#ifndef AA_MAX_UNACKED
+#define AA_MAX_UNACKED 4   /* video/audio frames the phone may send before our ack (1 made it stop-and-wait: 37 ms per frame over Wi-Fi) */
+#endif
+#ifdef __nds32__
+#define AA_BIG __attribute__((section(".bigbss")))   /* payload: outside the 1 MB image window (payload.ld) */
+#else
+#define AA_BIG
+#endif
+static u8 tx[0x4000 + 64], msg[0x4000 + 16], plain[0x8000] AA_BIG;
 
 /* ---- protobuf writer (varints, length-delimited fields, nested messages by back-patching) ---- */
 struct pb { u8 *p, *end; };
@@ -258,9 +266,9 @@ static void on_channel(int ch, int ctrl, const u8 *m, int n)
         return;
     }
     if (ch == CH_VIDEO || ch == CH_MEDIA_AUDIO || ch == CH_SPEECH_AUDIO || ch == CH_SYSTEM_AUDIO) {
-        if (id == 0x8000) {   /* setup -> ready, one unacked frame, config 0 */
+        if (id == 0x8000) {   /* setup -> ready, AA_MAX_UNACKED frames in flight, config 0 */
             pb_u(&b, 1, 2);
-            pb_u(&b, 2, 1);
+            pb_u(&b, 2, AA_MAX_UNACKED);
             pb_u(&b, 3, 0);
             send_pb(ch, 0, 0x8003, &b, buf);
             if (ch == CH_VIDEO) {   /* and take video focus */
@@ -287,9 +295,13 @@ static void on_channel(int ch, int ctrl, const u8 *m, int n)
             if (ch == CH_VIDEO) {
                 st.video_frames++;
                 st.video_bytes += (u32)(bn - off);
-                if (pf->video)
+                ack_media(ch, session[ch]);   /* before decoding: the phone's next frame is on its way meanwhile */
+                if (pf->video) {
+                    u64 t0 = pf->now_us ? pf->now_us() : 0;
                     pf->video(body + off, bn - off, ts);
-                ack_media(ch, session[ch]);
+                    if (pf->now_us)
+                        st.video_us += pf->now_us() - t0;
+                }
             } else {
                 st.audio_frames++;
                 if (pf->audio)
@@ -384,7 +396,10 @@ static void on_payload(int ch, int flags, const u8 *p, int n)
         return;
     }
     for (;;) {
+        u64 t0 = pf->now_us ? pf->now_us() : 0;
         int k = aa_tls_read(plain, sizeof plain);
+        if (pf->now_us)
+            st.decrypt_us += pf->now_us() - t0;
         if (k <= 0) {
             if (k < 0)
                 st.errors++;
@@ -394,13 +409,39 @@ static void on_payload(int ch, int flags, const u8 *p, int n)
     }
 }
 
+/* append one frame's plaintext (decrypted if F_ENC) to dst[at..max); the new length, or -1 (message dropped) */
+static int frame_plain(int flags, const u8 *p, int n, u8 *dst, int at, int max)
+{
+    if (!(flags & F_ENC)) {
+        if (at + n > max)
+            return st.errors++, -1;
+        memcpy(dst + at, p, (size_t)n);
+        return at + n;
+    }
+    if (aa_tls_feed(p, (size_t)n))
+        return st.errors++, -1;
+    u64 t0 = pf->now_us ? pf->now_us() : 0;
+    for (;;) {
+        if (pf->now_us)
+            st.decrypt_us += pf->now_us() - t0, t0 = pf->now_us();
+        int k = aa_tls_read(dst + at, (size_t)(max - at));
+        if (k < 0)
+            return st.errors++, -1;
+        if (k == 0)
+            return at;
+        at += k;
+        if (at == max)
+            return st.errors++, -1;   /* no room left: the rest would not fit */
+    }
+}
+
 /* ---- frame reassembly from the raw bulk byte stream ---- */
-static u8 rxbuf[0x4000 * 2 + 64];
+static u8 rxbuf[0x4000 * 2 + 64] AA_BIG;
 static int rxn;
 #ifndef AA_VIDEO_MSG_MAX
 #define AA_VIDEO_MSG_MAX 0x60000   /* largest multi-frame message (an IDR frame at 800x480 is well under this) */
 #endif
-static u8 big_video[AA_VIDEO_MSG_MAX], big_other[CH_COUNT][0x4000];
+static u8 big_video[AA_VIDEO_MSG_MAX] AA_BIG, big_other[CH_COUNT][0x4000] AA_BIG;
 static int bign[CH_COUNT];
 static u8 *bigbuf(int ch) { return ch == CH_VIDEO ? big_video : big_other[ch]; }
 static int bigmax(int ch) { return ch == CH_VIDEO ? (int)sizeof big_video : (int)sizeof big_other[0]; }
@@ -425,17 +466,15 @@ void aa_rx(const u8 *p, int n)
             } else if ((flags & 3) == F_WHOLE) {
                 on_payload(ch, flags, pay, size);
             } else {
+                /* a message in several frames: each frame of an encrypted one is its own TLS record (at most 16 KB of
+                 * plaintext), so decrypt frame by frame and assemble the plaintext */
                 if ((flags & 3) == F_FIRST)
                     bign[ch] = 0;
-                if (bign[ch] + size <= bigmax(ch)) {
-                    memcpy(bigbuf(ch) + bign[ch], pay, (size_t)size);
-                    bign[ch] += size;
-                } else
-                    st.errors++;
+                if (bign[ch] >= 0)
+                    bign[ch] = frame_plain(flags, pay, size, bigbuf(ch), bign[ch], bigmax(ch));
                 if ((flags & 3) == F_LAST) {
-                    /* encrypted multi-frame messages are TLS records per frame; decrypting the concatenation works
-                     * because records are self-delimiting */
-                    on_payload(ch, flags, bigbuf(ch), bign[ch]);
+                    if (bign[ch] >= 2)
+                        on_message(ch, flags, bigbuf(ch), bign[ch]);
                     bign[ch] = 0;
                 }
             }

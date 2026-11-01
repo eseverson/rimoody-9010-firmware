@@ -21,3 +21,7 @@ WIFI.TXT
 
 __pycache__/
 *.nv12
+
+# mbedtls archive built at -O2
+isp/sd-10-net/obj/
+isp/sd-10-net/mbedtls.a

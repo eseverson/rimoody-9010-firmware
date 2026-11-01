@@ -32,6 +32,7 @@ import argparse, os, socket, struct, sys, time, zlib
 PORT_CMD, PORT_HELLO = 5151, 5152
 OP_PING, OP_CMD, OP_WRITE, OP_READ, OP_SYNC, OP_LOG = 1, 2, 3, 4, 5, 6
 OP_MCU_TX, OP_MCU_STATE, OP_SETTIME, OP_EXEC, OP_IRQ, OP_FB, OP_SAY, OP_TOUCH, OP_RTOS, OP_USB, OP_FS, OP_AP, OP_VDEC = 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+OP_AA = 22
 TRAMP_ADDR = 0x02f00000
 
 # Builds without OP_EXEC that `exec` can still replace: CRC32 of their first 4 KB at 0x1800000 -> addresses of their
@@ -235,6 +236,8 @@ def main():
     p = sub.add_parser('vdec', help='hardware H.264 decoder bring-up: status | init | bitread FILE.h264')
     p.add_argument('what', choices=['status', 'init', 'bitread', 'decode', 'spmp', 'prepare']); p.add_argument('file', nargs='?')
     p.add_argument('--pics', type=int, default=1, help='decode: pictures to decode (0: all)'); p.add_argument('--skip', type=lambda x: int(x, 0), default=0)
+    p = sub.add_parser('aa', help='wireless Android Auto: status | start [PORT] (cert/key from AACERT.PEM / AAKEY.PEM on the card)')
+    p.add_argument('what', choices=['status', 'start']); p.add_argument('port', nargs='?', type=int, default=5288)
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -340,6 +343,9 @@ def main():
             print(u.call(OP_VDEC, struct.pack('<BIIBB', {'bitread': 2, 'decode': 3, 'prepare': 5}[a.what], LOAD_ADDR, len(data), a.skip, a.pics)).decode(errors='replace'))
         else:
             print(u.call(OP_VDEC, bytes([{'status': 0, 'init': 1, 'spmp': 4}[a.what]])).decode(errors='replace'))
+    elif a.op == 'aa':
+        payload = bytes([1]) + struct.pack('<H', a.port) if a.what == 'start' else bytes([0])
+        print(u.call(OP_AA, payload).decode(errors='replace'))
     elif a.op == 'op':
         print(u.call(a.num, bytes.fromhex(a.payload)).decode(errors='replace'))
     elif a.op == 'rtos':

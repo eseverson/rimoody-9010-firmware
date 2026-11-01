@@ -1,7 +1,7 @@
 /* Hardware H.264 decoder bring-up (vdec.c), HU1 op 19. Net task only. */
 #ifndef VDEC_H
 #define VDEC_H
-struct vdec_stats { unsigned int bitreads, decodes; };
+struct vdec_stats { unsigned int bitreads, decodes, errors, last_us; };
 extern struct vdec_stats vdec_stats;
 typedef int (*vdec_fmt)(char *, const char *, ...);
 int vdec_init(char *o, vdec_fmt fmt);
@@ -12,4 +12,7 @@ int vdec_crumb_report(char *o, vdec_fmt fmt);
 void vdec_hw_reset(void);
 int vdec_decode(unsigned int src, unsigned int len, char *o, vdec_fmt fmt, int kick, unsigned int skip,
                 unsigned int maxpics);   /* I and P pictures; kick 0: prepare the first only; maxpics 0: all */
+void vdec_stream_reset(void);
+int vdec_feed(const unsigned char *p, unsigned int n, char *o, vdec_fmt fmt);   /* one access unit, state kept */
+int vdec_last_slot(unsigned int *luma, unsigned int *chroma);
 #endif

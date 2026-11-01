@@ -20,6 +20,7 @@ struct aa_status {
     enum aa_state state;
     unsigned int version_major, version_minor, rx_frames, tx_frames, rx_msgs, channels_open, video_frames, video_bytes,
         audio_frames, unknown, errors;
+    unsigned long long decrypt_us, video_us;   /* time spent decrypting records and in the video callback */
 };
 
 int aa_start(const struct aa_platform *p);   /* sends the version request */

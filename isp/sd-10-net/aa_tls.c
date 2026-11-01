@@ -163,6 +163,26 @@ int aa_tls_init(const unsigned char *crt_pem, size_t crt_len, const unsigned cha
     mbedtls_ssl_conf_rng(&t.conf, mbedtls_ctr_drbg_random, &t.drbg);
     mbedtls_ssl_conf_max_tls_version(&t.conf, MBEDTLS_SSL_VERSION_TLS1_2);
     mbedtls_ssl_conf_min_tls_version(&t.conf, MBEDTLS_SSL_VERSION_TLS1_2);
+    /* Cipher preference: the payload decrypts the whole video stream in software, and AES-256-GCM there runs at ~640
+     * KB/s (5 Mbit/s, 7.3 s of a 12 s test stream). ChaCha20-Poly1305 first (fast in plain C), then AES-128-GCM, then
+     * mbedtls's default list; the phone picks, so offering more costs nothing if it prefers AES. */
+    static int suites[64];
+    if (!suites[0]) {
+        static const int first[] = { MBEDTLS_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+                                     MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 };
+        int n = 0;
+        for (unsigned i = 0; i < sizeof first / sizeof first[0]; i++)
+            suites[n++] = first[i];
+        for (const int *d = mbedtls_ssl_list_ciphersuites(); *d && n < 63; d++) {
+            int dup = 0;
+            for (int i = 0; i < n; i++)
+                dup |= suites[i] == *d;
+            if (!dup)
+                suites[n++] = *d;
+        }
+        suites[n] = 0;
+    }
+    mbedtls_ssl_conf_ciphersuites(&t.conf, suites);
     if ((e = mbedtls_ssl_conf_own_cert(&t.conf, &t.crt, &t.key)))
         return fail("own cert", e);
     if ((e = mbedtls_ssl_setup(&t.ssl, &t.conf)))
