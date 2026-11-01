@@ -1857,8 +1857,8 @@ static int tx_beacon;   /* next tx_frame is the AP beacon: BEACON queue, hardwar
 /* Hardware CCMP (rtl8xxxu set_key/cam_write): the pairwise key in CAM slot 0 (key id 0, the peer's MAC); unicast data is
  * then encrypted by the chip (we insert the CCMP header, TXDESC_SEC_AES, the chip appends the MIC) and arrives
  * decrypted (rx descriptor security != 0 and swdec == 0; CCMP header and MIC left in place, MIC checked: icverr).
- * Group traffic stays in software. Off by default; HU1 op 21 switches it (software CCMP tops out at ~3.4 Mbit/s). */
-static int hwsec, tx_sec, rx_hwdec, rx_icverr;
+ * Group traffic stays in software. On by default; HU1 op 21 switches it (software CCMP tops out at ~3.4 Mbit/s). */
+static int hwsec = 1, tx_sec, rx_hwdec, rx_icverr;   /* on by default since 2026-11-01 (17 Mbit/s in, 0 errors) */
 static u32 hw_tx, hw_rx, hw_icv, hwsec_until, hwsec_cmds;   /* revert unless a HU1 command arrives in 60 s */
 static int tx_frame(int flen, int mgmt)
 {

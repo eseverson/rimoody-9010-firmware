@@ -5,6 +5,7 @@
  * Every poll is bounded; a bus stall would be caught by the hardware watchdog (irq.c). */
 #include "vdec.h"
 #include "h264p.h"
+#include "clk.h"
 
 typedef unsigned int u32;
 typedef unsigned char u8;
@@ -179,6 +180,7 @@ static u32 ue(void)
     return rd(z + 1) - 1;   /* the leading 1 and z bits: value = 2^z - 1 + bits, read as (z+1)-bit number - 1 */
 }
 
+static int dpfu_flag;   /* eCos ctx+0xAA458: D884 = 2*flag + 1 to start, 2*flag at the slice header end */
 static int dpfu_start(u32 pos, u32 len)   /* 0x4340cc */
 {
     M(0xd884) = 0;
@@ -188,7 +190,7 @@ static int dpfu_start(u32 pos, u32 len)   /* 0x4340cc */
     M(0xd8a0) = 0;
     M(0xd888) = (pos >> 2) << 6 | 0x20;
     M(0xd88c) = len > 0x7ffffc ? 0x7ffffc : len;
-    M(0xd884) = 1;
+    M(0xd884) = 2u * (u32)dpfu_flag + 1;
     int r2 = poll(0xd8a0, 2, 2, 0xc351 * 4);
     if (pos & 3)
         rd((int)(pos & 3) * 8);
@@ -293,6 +295,7 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     plat_sync(EVB_ADDR, len);
     /* read the slice header through the bit reader, then capture the slice-data position (H264_SliceHeaderEnd) */
     crumb(2);   /* slice header through the bit reader */
+    dpfu_flag = (skip & 32) != 0;
     int r = dpfu_start(slice_at, len - slice_at);
     for (u32 left = sh.data_bit_rbsp; left; ) {
         u32 k = left > 31 ? 31 : left;
@@ -300,7 +303,7 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
         left -= k;
     }
     u32 save0 = M(0xd894), save1 = M(0xd898);
-    M(0xd884) = 0;   /* stop */
+    M(0xd884) = 2u * (u32)dpfu_flag;   /* "stop" (0), or with flag 1 presumably hand over to the hardware */
     if (skip & 8) {   /* experiment: reset the DPFU before the engine reprograms it */
         poll(0xd8a0, 0xc, 0, 0x1f5 * 16);
         M(0xd8a0) = 1;
@@ -404,15 +407,18 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     M(0xd550) = 0;
     M(0xd550) = 1;
     crumb(45);
-    int k1 = poll(0xd550, 1, 1, 20000);
+    u32 tk0 = clk_ms();
+    int k1 = poll(0xd550, 1, 1, 3000000);   /* eCos waits on this with no timeout; a whole slice may run first */
+    u32 tk1 = clk_ms();
+    CRUMB[11] = tk1 - tk0;
     crumb(46);
-    int k2 = k1 ? -1 : poll(0xd570, 1, 1, 200000);
+    int k2 = k1 ? -1 : poll(0xd570, 1, 1, 3000000);
     crumb(47);
     u32 d570 = M(0xd570);
     M(0xd570) = 1;
     M(0xd550) = 0;
     crumb(48);
-    int k3 = k2 ? -1 : poll(0xdc84, 1, 1, 200000);
+    int k3 = k2 ? -1 : poll(0xdc84, 1, 1, 3000000);
     crumb(49);
     /* results into the breadcrumb first (words 4..11), so a hang in what follows still leaves them */
     CRUMB[4] = (u32)(k1 & 1) | (u32)(k2 & 1) << 1 | (u32)(k3 & 1) << 2, CRUMB[5] = d570;
@@ -422,8 +428,8 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
         crumb(54);
         M(0xa380) = a380;
         crumb_clear();
-        return fmt(o, "vdec decode (skip %x): TIMEOUT (start %d done %d end %d, D570 %x); decoder reset through MOON0, init again",
-                   skip, k1, k2, k3, d570);
+        return fmt(o, "vdec decode (skip %x): TIMEOUT (start %d done %d end %d, D570 %x, start wait %u ms); decoder reset through MOON0, init again",
+                   skip, k1, k2, k3, d570, CRUMB[11]);
     }
     u32 st000 = M(0xd000);
     CRUMB[6] = st000;
