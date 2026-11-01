@@ -19,8 +19,9 @@ static const struct { u32 base, n; } blocks[] = {
     { 0x9c009b80, 1 },
     { 0x9c009c00, 1 },
     { 0x9c005b34, 8 },
+    { 0x9c006a80, 1 },    /* TGEN config (pokes) */
 };
-static u32 saved[32 + 1 + 48 + 4 + 1 + 12 + 19 + 2 + 2 + 1 + 1 + 1 + 8];
+static u32 saved[32 + 1 + 48 + 4 + 1 + 12 + 19 + 2 + 2 + 1 + 1 + 1 + 8 + 1];
 static int have_saved, active;
 
 static void save(void)
@@ -128,6 +129,47 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
         active = 1;
     } else if (c == 3) {
         vpp_restore();
+    } else if (c == 6) {   /* linear NV12 color bars at 0x04E00000, DDFCH as the SP7021 driver (ddfch_setting) */
+        const u32 w = 800, h = 480, pitch = 896, Y = 0x04e00000u, C = Y + pitch * h;
+        static const unsigned char bars[8][3] = { { 235, 128, 128 }, { 210, 16, 146 }, { 170, 166, 16 }, { 145, 54, 34 },
+                                                  { 106, 202, 222 }, { 81, 90, 240 }, { 41, 240, 110 }, { 16, 128, 128 } };
+        for (u32 y = 0; y < h; y++)
+            for (u32 x = 0; x < w; x++)
+                *(volatile unsigned char *)(Y + y * pitch + x) = bars[x / 100][0];
+        for (u32 y = 0; y < h / 2; y++)
+            for (u32 x = 0; x < w; x += 2) {
+                *(volatile unsigned char *)(C + y * pitch + x) = bars[x / 100][1];
+                *(volatile unsigned char *)(C + y * pitch + x + 1) = bars[x / 100][2];
+            }
+        for (u32 a2 = Y & ~31u; a2 < C + pitch * h / 2; a2 += 32)
+            __asm__ volatile("cctl %0, L1D_VA_WB" ::"r"(a2) : "memory");
+        __asm__ volatile("msync all" ::: "memory");
+        save();
+        init_fetch(w, h, pitch);
+        R(0x9c005780) = 1;                       /* latch_en */
+        R(0x9c005784) = n >= 3 && p[2] ? 0x5e000 : 0;   /* mode_option: 0 = NV12 (SP7021); eCos 0x5E000 */
+        R(0x9c005788) = n >= 4 && p[3] ? p[3] : 0xd0;    /* ddfch_enable */
+        R(0x9c005798) = R(0x9c00579c) = R(0x9c0057a0) = Y >> 10;
+        R(0x9c0057a4) = R(0x9c0057a8) = R(0x9c0057ac) = C >> 10;
+        R(0x9c0057d0) = pitch;
+        R(0x9c0057d8) = 0;
+        R(0x9c0057dc) = 0x10000;                 /* config_0 */
+        R(0x9c0057f0) = 0x80801002;              /* bist off */
+        R(0x9c0057d4) = h << 16 | w;
+        setbits(0x9c006c84, 3u, 2u);             /* VPP0 opaque */
+        R(0x9c005a80) |= 1;
+        active = 1;
+        u32 c0 = R(0x9c0057e8), e0 = R(0x9c0057ec);
+        for (volatile int i = 0; i < 3000000; i++)
+            ;
+        return fmt(o, "vpp linear: checksum %x -> %x, error flags %x -> %x, 7f4 %x 7f8 %x 7fc %x, 7bc %x 7c0 %x", c0,
+                   R(0x9c0057e8), e0, R(0x9c0057ec), R(0x9c0057f4), R(0x9c0057f8), R(0x9c0057fc), R(0x9c0057bc), R(0x9c0057c0));
+    } else if (c == 5 && n >= 2) {   /* MOON0 clock enable by ID (0x9C000004 + 4 * (id >> 4), bit | bit << 16) */
+        u32 id = p[1];
+        if (id >= 0x80)
+            return fmt(o, "ERR vpp clock: id < 0x80");
+        R(0x9c000004 + 4 * (id >> 4)) = (1u << (id & 15)) | (1u << ((id & 15) + 16));
+        return fmt(o, "vpp: clock %x on, reg %x = %x", id, 0x9c000004 + 4 * (id >> 4), R(0x9c000004 + 4 * (id >> 4)));
     } else if (c == 4 && n >= 9) {   /* poke: u32 address, u32 value, only within the display blocks */
         u32 a = (u32)p[1] | (u32)p[2] << 8 | (u32)p[3] << 16 | (u32)p[4] << 24;
         u32 v = (u32)p[5] | (u32)p[6] << 8 | (u32)p[7] << 16 | (u32)p[8] << 24;
@@ -143,5 +185,10 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             k += fmt(o + k, " %x=%x", a & 0xfff, R(a));
     k += fmt(o + k, "; A80=%x VSCL D80=%x D84=%x; DMIX C80=%x C84=%x C88=%x; A380=%x", R(0x9c005a80), R(0x9c005d80),
              R(0x9c005d84), R(0x9c006c80), R(0x9c006c84), R(0x9c006c88), R(0x9c00a380));
+    k += fmt(o + k, "; DMIX alpha %x %x %x chksum %x pix_en %x; TGEN", R(0x9c006c8c), R(0x9c006c90), R(0x9c006c94),
+             R(0x9c006c9c), R(0x9c006ce8));
+    for (u32 a = 0x9c006a80; a < 0x9c006b00; a += 4)   /* G213 TGEN (SP7021 layout) */
+        if (R(a))
+            k += fmt(o + k, " %x=%x", a & 0xfff, R(a));
     return k;
 }
