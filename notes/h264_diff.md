@@ -1,0 +1,39 @@
+<!-- eCos decoder setup vs ours, agent trace 2026-11-01: the slice-data position goes to DPFU2 (D908/D90C). -->
+# eCos vs vdec.c: first H.264 decode, differences (static analysis 2026-11-01)
+
+All addresses are eCos load addresses in `isp-re/ecos.ann.dis`. "Inference" marks conclusions not read directly from code. Register names are 0x9C00Dxxx unless written in full. Method: a base-register tracker over the whole disassembly (every load/store whose base came from `sethi 0x9c00c`/`0x9c00a`/`0x9c000`), plus the callers of the SPMP append helpers 0x43a21e / 0x43a25c, which are the only code that writes the command ring.
+
+## 1. The cause (most likely): eCos sends the slice-data position to DPFU2, not DPFU1
+
+- `H264_SliceHeaderEnd` 0x43e2b2..0x43e2fa: if ctx byte +0xAA459 == 0, read D894/D898 (DPFU1 position/length), else D914/D918 (DPFU2). Store at ctx+0x13BF74/+0x13BF78. Then `D884 = 2 * ctx byte +0xAA458`.
+- The pair emitter 0x43b302 (called first thing in the slice commit 0x43696e at 0x436992) branches on **ctx byte +0xAA45A**: when it is 0 it emits `0x16220000 save0, 0x16230000 save1` (D888/D88C, DPFU1, 0x43b338..0x43b34c). When it is nonzero it emits **`0x16420000 save0, 0x16430000 save1` (D908/D90C, DPFU2, 0x43b352..0x43b374)**. It then calls `H264_SpmpProgramStoreReg` 0x43a602 at 0x43b38e.
+- Decoder reset 0x4350c2 sets **+0xAA458 = 0 (0x4350ea), +0xAA459 = 0 (0x4350f6), +0xAA45A = 1 (0x4350fc, r6 = 1 from 0x4350e8)**. It is called from `h264_create` (0x436caa) and from `activate_sps` (0x43cc24). I found no other writer of these three bytes; the only other references are the readers 0x4341ba, 0x43e2b6, 0x43e2ec and 0x43b322.
+- So in normal operation eCos **captures the position from DPFU1 (D894/D898) and hands it to DPFU2 (commands 0x642/0x643 → D908/D90C)**. The notes (h264_decoder.md 2.2/3.2 item 1, h264_fields.md) describe only the 0x622/0x623 branch, which is the one never taken.
+- Supporting evidence: the per-picture kick rewrites only the DPFU2 ring descriptor, `D924 = (EVB_KB<<8)|0x28` (0x4136ec), and never D8A4. Between the slice commit and the kick, eCos keeps parsing through DPFU1: the next NAL's `dpfu_start` 0x4340cc runs, and the previous picture is queued from inside the *next* picture's SliceHeaderEnd (0x43586a / 0x436324 at 0x43de70 / 0x43df0a). So DPFU1 can be running when the engine starts, which only works if the hardware reads slice data through DPFU2 (inference).
+- DPFU2 register map, from other users: D904 = control (0 stop, 1 start), D908 = start (same `(word<<6)|0x20` format as D888, 0x419e72..0x419e82), D90C = length, D920 = status (bit 0 error, cleared by writing D920 = 1 then 0 at 0x4133d4 / 0x4234c4; bit 1 "polling bit ready", 0x413504 / 0x423546; bit 2 "still access dram", 0x4134a8 / 0x4234fa), D924 = ring descriptor, and a bit-reader window at **0x9C00DD00 + 4n** (0x413528, 0x419f02, 0x423576). For H.264, software never writes D904 = 1 on the normal path, so the decoder or SPMP starts DPFU2 itself after loading D908/D90C (inference).
+- Why D888 via SPMP hangs (inference): D570 >> 6 = 1 suggests the engine is stuck at its first command (our block starts with 0x1622), presumably a register write into the DPFU1 block that never completes. That would also explain the bus stall on the next CPU read of D000.
+- **Fix to try:** emit `w32(0x9c00d908, save0); w32(0x9c00d90c, save1);` in place of D888/D88C. Keep capturing from D894/D898 and keep `D884 = 0` after the capture.
+
+## 2. Slice-data position: produce and consume
+
+- The last header syntax element read is slice_beta_offset_div2 (0x43dbb0), or slice_group_change_cycle with FMO (0x43dc18, read through 0x9C00D400 + 4n). The state then moves to 0x43de28 (0x43dc96). No alignment or extra bits are read, either in that state or in 0x43de28 before the capture (no D4xx access between 0x43de28 and 0x43e2cc). CABAC alignment is therefore left to the hardware (inference). This matches our capture.
+- Order in eCos: capture D894, D898 (0x43e2cc, 0x43e2d4) → D884 = 0 (0x43e2fa) → [High profile: scaling lists 0x43a330] → 0x43696e: DPFU pair, register block, `0xF8000000` (0x43a2b0) → **D884 = 0 again** (0x43a32a, at the end of 0x43a2b0). There is no DPFU1 reset (D8A0) after the capture. Our "skip 8" and "skip 16" (OR 0x20) experiments therefore do not match eCos. The flag +0xAA458 is always 0, so `D884 = 2·flag + 1 = 3` (skip 32) does not match either.
+- Block start = ctx+0x2A2D4, copied at a new picture (0x43e36e..0x43e37a) from ctx+0x2A2D8, the ring write offset saved by 0x4352f8 (0x43533e..0x43534a). Descriptor = `(len_words << 21) | start_word`, built only for the picture's first slice (0x43a2d4..0x43a320, gated by +0xAA4A5).
+
+## 3. Status bits
+
+- D550 bit 0: RV prints D550 as `mfd_regs->spar_spmp_ctrl` and reports "spmp handling timeout, spmp still on processing" when bit 0 stays 0 (0x42338c..0x4233dc). So bit 0 = 0 after the start means the SPMP is still processing. The H.264 wait at 0x4145e2..0x41460a first tests the whole D550, then bit 0, with no timeout.
+- D570: bit 0 = SPMP done, cleared by writing D570 = 1 (0x414668), polled for only 0x1F5 tries (0x41460c..0x41465a), so the register load is expected to be quick. Result check 0x4312a2: OK when `(D570 >> 6)` is 0 or 0xB (0x4312cc, 0x4312dc..0x4312e2), plus D55C ≥ D558, D0AC>>8 == 0, D000 bit 0 == 0, **D904 bit 0 == 0 (DPFU2)**, D04C bit 0 == 0, D04C>>4 == 1. D570 = 0x40 means code 1 with bit 0 clear, which counts as a failure. eCos has no string for it. Inference: bits 6+ are the engine state, and 1 = stuck on its first command.
+
+## 4. Handshakes around the kick
+
+- Before the trigger: `DC84 & 1` (0x4147c0) and `ECA0 == 0` (0x414822); DE6C write (0x414a3a). Our pre-reads cover these.
+- No check of D8A0, D920 or the bit reader before the kick. Exact order (0x4136a2..0x41467a): D980 = 1, clear DB00..DB7C (0x41ff1e), D980 = 0, D0B4 = 0xFE, D034 = 1, D924, D54C, D548 = 1, [BG2D per picture 0x414144..0x41454a], D048 = 1, D1A4 = D558 = D55C = D564 = 0, D550 = 0x1F8, D550 = 0, D554, D558 = 1, D550 = 0, D550 = 1, wait on D550, poll D570, D570 = 1, D550 = 0, then (n ≠ 1) D558 = n, D550 = 0. vdec.c matches this order.
+- DPFU2 before the first decode under eCos: only D924 (init 0x434a22, kick 0x4136ec). No D904/D920 handling except the error handler 0x413378 (soft reset 0x41325e, then a dummy DPFU2 start: D908 = 0x20, D90C = 4, D904 = 0/1, wait D920 bit 1, read DD00, D904 = 0, 0x4134c8..0x41352e) and deinit (0x432f9a → 0x41325e). Our init's soft reset leaves D904 = 0, as eCos does.
+
+## 5. Other differences, not the cause
+
+- No picture-start SPMP block exists. The only ring writers are 0x43a330 (scaling lists), 0x43b302 (DPFU pair), 0x43a602 (slice registers) and 0x43a2b0 (end marker); there are no inline ring stores (the only `wsbh` in 0x410000..0x446000 is in 0x43a21e). The SPAR (pred-weight hardware) may also write words into the ring, but only for weighted slices. `MakePicStart_H264` 0x435aec (via 0x435d5c) and 0x436324 are software only (no MFD access, no ring append).
+- `0x432d46` (zero D180..D1AC) is called only by other codecs (0x419800, 0x422e74, 0x42d674, 0x4404e6), never by H.264.
+- BG2D scan type: `mfd_set_bg2d_index` 0x431a70 sets only gp (0) and the address for EVB 0x28, SPMP 0x29 (gp arg 4 & 3 = 0), MVC 0x2A.. and the unique 0x3B..0x3D buffers. So these keep the init value's upper bits from 0x07000000 (b24 = 1, b26:25 = 3, the "type ≠ 0" pattern). vdec.c's `bg2d_set(..., 0)` writes the type-0 pattern instead. It is harmless for EVB/SPMP (proven working); for the MVC and 0x3B/0x3C buffers it may matter after the hang is fixed. Frame buffers get the picture's scan type `pic+0x3098` (0x414120..0x4141be), whose value is open.
+- No MOON0 (clock/reset) writes on the path from mfd_if_init → mfd_init 0x432fe0 → h264_create 0x436ae0 → first kick, confirmed by the tracker.

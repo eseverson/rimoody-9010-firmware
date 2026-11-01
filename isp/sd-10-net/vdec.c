@@ -236,11 +236,17 @@ int vdec_bitread(u32 src, u32 len, char *o, vdec_fmt fmt)
 }
 
 /* ---- step 4: one picture (single-slice I picture) through the SPMP command ring ---- */
-#define FB_LUMA   0x04600000u   /* pitch 896 (800 rounded to 128), 512 rows (480 rounded to 64): 0x70000 */
-#define FB_CHROMA 0x04670000u   /* interleaved CbCr, 896 x 256 */
-#define FB_MVC    0x04700000u
-#define WORK_3B   0x04720000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each) */
-#define WORK_3C   0x04740000u
+/* The decoder lays pictures out with the pitch in BG2D "mb size" slot 0 (0x9C00A380 byte 0 = 0x78: 1920 bytes, set
+ * by the display init and shared with it), in 64-row stripes of 1 KB tiles 16 pixels wide (first decode, 2026-11-01).
+ * So the buffers use that pitch: 1920 x 512 luma, 1920 x 256 interleaved CbCr. */
+#define FB_PITCH  1920u
+#define FB_LUMA   0x04600000u   /* 0xF0000 */
+#define FB_LUMA_N 0xF0000u
+#define FB_CHROMA 0x04700000u   /* 0x78000 */
+#define FB_CHROMA_N 0x78000u
+#define FB_MVC    0x04780000u
+#define WORK_3B   0x047A0000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each) */
+#define WORK_3C   0x047C0000u
 #define IDX_LUMA  0x00
 #define IDX_CHROMA 0x14
 #define IDX_MVC   0x2a
@@ -288,15 +294,30 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     }
     if (!have || sh.slice_type != 2)
         return fmt(o, "ERR vdec: need an I slice (have %d, type %u)", have, sh.slice_type);
-    crumb(1);   /* bitstream into the EVB */
+    crumb(1);   /* bitstream into the EVB, emulation-prevention bytes removed (00 00 03 -> 00 00): the hardware does not
+                   strip them (a noise frame desynced at once); eCos's start-code scanner presumably does on its copy */
     volatile u8 *d = (volatile u8 *)EVB_ADDR;
-    for (u32 i = 0; i < len; i++)
-        d[i] = s[i];
-    plat_sync(EVB_ADDR, len);
+    u32 wo = 0, zeros = 0, slice_out = 0;
+    for (u32 i = 0; i < len; i++) {
+        u8 c = s[i];
+        if (i == slice_at)
+            slice_out = wo;
+        if (!(skip & 128) && zeros >= 2 && c == 3 && i + 1 < len && s[i + 1] <= 3) {
+            zeros = 0;
+            continue;
+        }
+        zeros = c ? 0 : zeros + 1;
+        d[wo++] = c;
+    }
+    for (u32 i = 0; i < 64; i++)   /* zero tail: the prefetcher reads whole words past the last byte (without it the
+                                      last 4x4 block of a noise frame came out wrong) */
+        d[wo + i] = 0;
+    plat_sync(EVB_ADDR, wo + 64);
+    u32 elen = wo + 64;
     /* read the slice header through the bit reader, then capture the slice-data position (H264_SliceHeaderEnd) */
     crumb(2);   /* slice header through the bit reader */
     dpfu_flag = (skip & 32) != 0;
-    int r = dpfu_start(slice_at, len - slice_at);
+    int r = dpfu_start(slice_out, elen - slice_out);
     for (u32 left = sh.data_bit_rbsp; left; ) {
         u32 k = left > 31 ? 31 : left;
         rd((int)k);
@@ -313,25 +334,24 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
         save0 |= 0x20;
     crumb(3);   /* frame buffers, BG2D */
     /* frame buffers: fill with a marker so untouched memory shows */
-    for (u32 i = 0; i < 0x70000; i += 4)
+    for (u32 i = 0; i < FB_LUMA_N; i += 4)
         *(volatile u32 *)(FB_LUMA + i) = 0x55555555;
-    for (u32 i = 0; i < 0x38000; i += 4)
+    for (u32 i = 0; i < FB_CHROMA_N; i += 4)
         *(volatile u32 *)(FB_CHROMA + i) = 0x55555555;
-    plat_sync(FB_LUMA, 0x70000);
-    plat_sync(FB_CHROMA, 0x38000);
-    u32 pitch = (sps.width + 127) & ~127u;
-    u32 a380 = M(0xa380);   /* "mb size" slots: shared with the display; the decoder takes slot 1 for small widths */
-    M(0xa380) = (a380 & ~0xff00u) | (pitch >> 4) << 8;
+    plat_sync(FB_LUMA, FB_LUMA_N);
+    plat_sync(FB_CHROMA, FB_CHROMA_N);
+    u32 a380 = M(0xa380);   /* left alone: slot 0 (1920) is what the decoder uses, see FB_PITCH */
     bg2d_set(IDX_LUMA, FB_LUMA, 1, 0);
     bg2d_set(IDX_CHROMA, FB_CHROMA, 1, 0);
     bg2d_set(IDX_MVC, FB_MVC, 1, 0);
-    bg2d_set(0x3b, WORK_3B, 0, 0);
-    bg2d_set(0x3c, WORK_3C, 0, 0);
+    bg2d_set(0x3b, WORK_3B, 0, 1);   /* working buffers keep the init layout bits ("scan type != 0"), gp 0 (0x431a70) */
+    bg2d_set(0x3c, WORK_3C, 0, 1);
     /* the slice's command block (notes/h264_fields.md "Test IDR command values") */
     ring_n = 0;
-    if (!(skip & 1)) {
-        w32(0x9c00d888, save0);
-        w32(0x9c00d88c, save1);
+    if (!(skip & 1)) {   /* slice-data position: read from DPFU1 (D894/D898), handed to DPFU2 (D908/D90C), as eCos
+                            0x43b302 does with ctx+0xAA45A = 1 (set by its decoder reset 0x4350c2); skip bit 64 = DPFU1 */
+        w32((skip & 64) ? 0x9c00d888 : 0x9c00d908, save0);
+        w32((skip & 64) ? 0x9c00d88c : 0x9c00d90c, save1);
     }
     w16(0x9c00d018, 0);                               /* field_pic_flag */
     w16(0x9c00d01c, 1);                               /* !bottom_field_flag */
@@ -442,11 +462,11 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     crumb(53);
     M(0xa380) = a380;
     crumb(5);   /* reading back */
-    cache_inval(FB_LUMA, 0x70000);
-    cache_inval(FB_CHROMA, 0x38000);
+    cache_inval(FB_LUMA, FB_LUMA_N);
+    cache_inval(FB_CHROMA, FB_CHROMA_N);
     /* how much of the luma plane changed, and its first bytes */
     u32 changed = 0, sum = 0;
-    for (u32 i = 0; i < 0x70000; i += 4) {
+    for (u32 i = 0; i < FB_LUMA_N; i += 4) {
         u32 v = *(volatile u32 *)(FB_LUMA + i);
         changed += v != 0x55555555;
         sum += (v & 0xff) + (v >> 8 & 0xff) + (v >> 16 & 0xff) + (v >> 24);
@@ -458,7 +478,7 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
                   "luma words changed %u of %u, mean %u; first %08x %08x",
                skip, slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, pre_dc84, pre_eca0, k1 ? "TIMEOUT" : "ok",
                k2 ? "TIMEOUT" : "ok", d570, k3 ? "TIMEOUT" : "ok", st000, st04c, st0ac, st55c, st558, st904, stc84,
-               changed, 0x70000 / 4, sum / 0x70000, *(volatile u32 *)FB_LUMA, *(volatile u32 *)(FB_LUMA + 4));
+               changed, FB_LUMA_N / 4, sum / FB_LUMA_N, *(volatile u32 *)FB_LUMA, *(volatile u32 *)(FB_LUMA + 4));
 }
 
 /* SPMP engine alone: a command block of 16-bit and 32-bit writes to the weight-denominator / SPAR result registers
