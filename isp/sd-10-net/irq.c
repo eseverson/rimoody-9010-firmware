@@ -184,7 +184,7 @@ void irq_watchdog(u32 seconds)
 }
 
 /* Hardware watchdog (SP7021-style WDT at 0x9C000630, as in Linux sunplus_wdt.c and U-Boot 0xf00946): a 20-bit
- * down-counter at 90 kHz (max ~11.6 s); CNT holds bits 19:4. The tick ISR reloads it, but only while the software hang
+ * down-counter (measured ~80 kHz here, Linux assumes 90 kHz: 6 s set = ~6.7 s); CNT holds bits 19:4. The tick ISR reloads it, but only while the software hang
  * watchdog above is healthy, so it fires when the tick itself stops (a hang with GIE off, a CPU stalled on the bus,
  * or the payload gone) - the cases the tick-based watchdog cannot see. It must fire before the MCU cuts power for the
  * missing heartbeat (~9 s), which nothing can recover from short of an ignition cycle. */
@@ -207,6 +207,10 @@ void irq_hw_watchdog(u32 seconds)
     REG(WDT_CTRL) = 0xab00;   /* unlock */
     REG(WDT_CNT) = hw_wdt_count;
     REG(WDT_CTRL) = 0xab01;   /* lock */
+    REG(WDT_CTRL) = 0x7482;   /* clear a latched expiry: one left from an earlier unrouted run resets the unit the
+                                 moment routing is enabled (seen 2026-11-01) */
+    REG(0x9c0000f4) = 0x00120012;   /* route the watchdog to system reset (bits 1 and 4, masked write), as U-Boot's
+                                       reset 0xf00920 does first; at boot both are clear and expiry does nothing */
     REG(WDT_CTRL) = 0x4a4b;   /* resume */
     irq_hw_wdt_on = 1;
 }
@@ -289,6 +293,7 @@ int irq_hw_wdt_test_failed(void)
     if (!hw_wdt_starve)
         return 0;
     hw_wdt_starve = 0;
+    REG(WDT_CTRL) = 0x7482;   /* it expired without resetting: clear the latch before anything enables routing */
     ((struct crash *)CRASH)->magic = 0;
     dcache_wb(CRASH_ADDR, sizeof(struct crash));
     return 1;

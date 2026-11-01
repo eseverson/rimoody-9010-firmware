@@ -52,9 +52,16 @@ Decision (owner, 2026-10-31): **FreeRTOS kernel + our own NDS32 port**, grown ou
 
 The SD test build left the unit dead until a power cycle. The only state that stays dead is one where our code stops running with the tick ISR stopped too (a hang with GIE off, a CPU stalled on a bus access to an unclocked block, or the payload gone): then the tick-based hang watchdog cannot fire, the MCU heartbeat stops with it, and the MCU cuts SoC power about 9 s later, which only an ignition cycle undoes. (A payload that simply returns after an EXEC is already caught: the trampoline resets the unit.)
 
-What the payload does about it (build after 20261031-204929; **not yet tested on the unit**):
+What the payload does about it (build 20261101-021107, **tested on the unit 2026-11-01**):
 1. **Hardware watchdog** (SP7021-style WDT at 0x9C000630: STOP 0x3877, UNLOCK 0xAB00, LOCK 0xAB01, RESUME 0x4A4B, CNT 0x9C000634 = bits 19:4 of a 90 kHz down-counter, max ~11.6 s; protocol from Linux sunplus_wdt.c, also used by U-Boot at 0xf00946). Armed at 6 s when the net task starts; reloaded by the tick ISR every 8 ticks, but only while the software hang watchdog has not expired. `irq_disable` stops it (deliberate `hu.py irq off`); EXEC re-arms it just before the trampoline, so the next image must get its tick running within 6 s. `hu.py irq status` shows `hwwdt=on left=… ms`; `hu.py irq hwwdt` stops feeding it and should reset the unit, reported as `crash=hwwdt-test`.
 2. **Config handoff across EXEC**: the parsed SSID, PMK, token and static IP go to RAM at 0x02F0E000 (magic "HUCF" + CRC, cleared when read), so a test build gets back on the network without reading the SD card.
 3. **Probation**: an image started with a handoff that is not online (DHCP/static address) within 90 s resets (`crash=probation`), and the card's build comes back.
 4. **No exits to U-Boot**: no config, Wi-Fi bring-up failure or the network loop stopping now reset (`crash=fail`); if the previous boot also ended that way, the payload stays up without the network (heartbeat on, screen shows why) instead of looping.
 5. Still open: risky register reads (decoder, unclocked blocks) stay behind explicit checks (`tools/vdec_probe.py` refuses without the clocks on).
+
+Tested 2026-11-01 (build 20261101-021107):
+- The WDT only resets the chip with routing enabled: MOON0 0x9C0000F4 bits 1 and 4 (masked write 0x00120012, as U-Boot's reset 0xf00920); after boot both are clear and an expiry does nothing (first test: the counter ran out, no reset).
+- An expiry while unrouted stays latched: enabling routing later resets at once (the next EXEC'd build reset during start-up). Arming now clears it first (CTRL = 0x7482, CLRIRQ) and only then routes and resumes.
+- Count rate measured ~80 kHz (5009 CNT units/s), not Linux's 90 kHz: 6 s set = ~6.7 s.
+- `hu.py irq hwwdt`: the unit reset ~7 s after feeding stopped and came back on the card's build with the test's crash record. 
+- Self-EXEC: the new image took the config from the handoff ("config: from the previous image (EXEC handoff)") and passed probation (online 11.4 s after start).
