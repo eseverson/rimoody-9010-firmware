@@ -38,3 +38,10 @@ Status 2026-11-01: register sequence extracted from eCos (Haiku pass over `ecos.
 1. RAM-free: DDFCH pattern generator to color bar (0x9C0057F0 = 0x80801011) with hal_vpp_init's DDFCH and scaler parts, VPP0 mode 0 in DMIX, OSD0 off for 20 s, then restore. Proves VPP0 -> DMIX -> panel.
 2. Pattern off, index mode on the decoder's slot of a decoded test picture (bars.h264), 800x480 -> 1024x600. Check the picture geometry and colors; try the scan-type and 0x9C0057DC [17:16] variants if it is scrambled.
 3. Wire `vdec_feed` to hand each finished slot to VPP0 at vsync (double buffering through the four slots).
+
+## First tries on the unit (2026-11-01, build 20261101-131847, owner watching)
+
+- U-Boot leaves DDFCH partly set (780=1, 784=0xF000, 788=0xE0, 78C=0xD6D6D6), VSCL off, all four BG2D pitch slots 0x78 (1920). MOON0: every clock on except 0x9C000018 bit 11 (ID 0x5B), no resets held.
+- DMIX 0x9C006C84 field 0 is VPP0 on L1 (U-Boot: 1 = transparent; SP7021 modes 0 blend, 1 transparent, 2 opaque). Field 1 = OSD0 (mode 0, blend). With field 0 = 2 and OSD0 off the panel goes **solid green** (YUV 0,0,0): the layer reaches the panel but carries no data.
+- Still green with: hal_vpp_init's DDFCH, scaler and post blocks (0x9C006080, 0x9C006F80, 0x9C007000, 0x9C009Axx, 0x9C005Bxx); the color-bar pattern (0x80801011); a solid white pattern (0x8080EB21, eCos's format is 0x80801021); the decoder's picture in index mode; 0x9C005788 bit 4 + 0x9C005A80 commit; scaler bypassed (D84 = 0). So DDFCH itself produces nothing.
+- eCos (Haiku pass): its per-frame VPP work runs only when its state word is 2, set by `f_005276d8` (callers 0x50d6e2, 0x50e3c2, 0x512f20, 0x513994, 0x513d46, 0x51459e), not decoded yet. Next: decode `f_005276d8` and the unresolved field-end callees (0x5272c2, 0x5272ec, 0x52acd4, 0x52abf0, 0x5268ee), and try clock ID 0x5B. Do not read 0x9C006000..0x9C00A000 blocks over HU1 wholesale: one of them raised a bus-error exception (crash vec7 at 0x18058aa).
