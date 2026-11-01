@@ -3373,6 +3373,38 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             return vdec_spmp_test(t, vfmt_n, n >= 2 ? p[1] : 0);
         return vdec_status(t, vfmt_n);
     }
+    case 23: {   /* MEMBENCH: read 64 KB 8 times at several regions (cache / DRAM speed), read-only */
+        static const u32 regions[] = { 0x01810000, 0x01d80000, 0x02300000, 0x02800000, 0x03800000, 0x04900000 };
+        int k = vfmt_n(t, "membench (MB/s, 8 x 64 KB reads; first pass excluded):");
+        for (unsigned r = 0; r < sizeof regions / sizeof regions[0]; r++) {
+            volatile const u32 *m = (volatile const u32 *)regions[r];
+            u32 sum = 0;
+            for (u32 i = 0; i < 0x4000; i++)
+                sum += m[i];
+            unsigned long long t0 = clk_us();
+            for (int pass = 0; pass < 8; pass++)
+                for (u32 i = 0; i < 0x4000; i += 4)
+                    sum += m[i] + m[i + 1] + m[i + 2] + m[i + 3];
+            u32 us = (u32)(clk_us() - t0);
+            k += vfmt_n(t + k, " %x: %u", regions[r], us ? 8u * 65536u / us : 0);
+            if (sum == 0x12345678)
+                k += vfmt_n(t + k, "!");
+        }
+        u32 ctl;
+        __asm__ volatile("mfsr %0, $mmu_ctl" : "=r"(ctl));
+        u32 cc;
+        __asm__ volatile("mfsr %0, $cache_ctl" : "=r"(cc));
+        k += vfmt_n(t + k, "; MMU_CTL %x CACHE_CTL %x; MPU", ctl, cc);
+        for (u32 r = 0; r < 8; r++) {   /* the eight 512 MB regions: TLB_VPN / TLB_DATA after a target read */
+            u32 idx = r << 29, vpn, data;
+            __asm__ volatile("tlbop %2, TRD\n\tdsb\n\tmfsr %0, $tlb_vpn\n\tmfsr %1, $tlb_data"
+                             : "=r"(vpn), "=r"(data) : "r"(idx) : "memory");
+            k += vfmt_n(t + k, " %u:%x/%x", r, vpn, data);
+        }
+        k += vfmt_n(t + k, "; ");
+        extern int aa_tls_bench(char *o, int (*fmt)(char *, const char *, ...));
+        return k + aa_tls_bench(t + k, vfmt_n);
+    }
     case 22:   /* AA: 0 status, 1 start listening [port u16] */
         return aa_op(n ? p[0] : 0, p, n, t);
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */

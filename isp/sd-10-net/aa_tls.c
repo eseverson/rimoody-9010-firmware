@@ -244,3 +244,61 @@ int aa_tls_read(unsigned char *p, size_t max)
         return 0;
     return e < 0 ? fail("read", e) : e;
 }
+
+#ifndef AA_TLS_HOST
+/* HU1 op 23: what decrypting a 16 KB record costs, per primitive (issue #3) */
+#include "mbedtls/gcm.h"
+#include "mbedtls/chachapoly.h"
+#include "mbedtls/aes.h"
+#include "clk.h"
+int aa_tls_bench(char *o, int (*fmt)(char *, const char *, ...))
+{
+    static unsigned char buf[16384] __attribute__((aligned(16))), out[16384] __attribute__((aligned(16)));
+    unsigned char key[32] = { 1, 2, 3 }, iv[12] = { 4 }, tag[16];
+    int k = fmt(o, "crypto bench, 16 KB, us:");
+    unsigned long long t0;
+    for (int bits = 128; bits <= 256; bits += 128) {
+        mbedtls_gcm_context g;
+        mbedtls_gcm_init(&g);
+        mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, key, (unsigned)bits);
+        t0 = clk_us();
+        mbedtls_gcm_crypt_and_tag(&g, MBEDTLS_GCM_DECRYPT, sizeof buf, iv, 12, 0, 0, buf, out, 16, tag);
+        k += fmt(o + k, " gcm%d %u", bits, (unsigned)(clk_us() - t0));
+        mbedtls_gcm_free(&g);
+    }
+    mbedtls_aes_context a;
+    mbedtls_aes_init(&a);
+    mbedtls_aes_setkey_enc(&a, key, 128);
+    t0 = clk_us();
+    for (unsigned i = 0; i < sizeof buf; i += 16)
+        mbedtls_aes_crypt_ecb(&a, MBEDTLS_AES_ENCRYPT, buf + i, out + i);
+    k += fmt(o + k, " aes128-ecb %u", (unsigned)(clk_us() - t0));
+    mbedtls_aes_free(&a);
+    mbedtls_chachapoly_context c;
+    mbedtls_chachapoly_init(&c);
+    mbedtls_chachapoly_setkey(&c, key);
+    t0 = clk_us();
+    mbedtls_chachapoly_encrypt_and_tag(&c, sizeof buf, iv, 0, 0, buf, out, tag);
+    k += fmt(o + k, " chachapoly %u", (unsigned)(clk_us() - t0));
+    mbedtls_chachapoly_free(&c);
+    __asm__ volatile("cctl l1d_wball, alevel\n\tcctl l1d_invalall\n\tmsync all" ::: "memory");
+    t0 = clk_us();
+    memcpy(out, buf, sizeof buf);
+    k += fmt(o + k, " memcpy-cold %u", (unsigned)(clk_us() - t0));
+    t0 = clk_us();
+    memcpy(out, buf, sizeof buf);
+    k += fmt(o + k, " again %u", (unsigned)(clk_us() - t0));
+    volatile unsigned int rs = 0;
+    for (unsigned i = 0; i < sizeof out; i += 16)
+        rs += out[i];
+    t0 = clk_us();
+    memcpy(out, buf, sizeof buf);
+    k += fmt(o + k, " after-reading-dst %u", (unsigned)(clk_us() - t0));
+    t0 = clk_us();
+    volatile unsigned int s = 0;
+    for (unsigned i = 0; i < 270000; i++)
+        s += i;
+    k += fmt(o + k, " (270k-iteration loop %u)", (unsigned)(clk_us() - t0));
+    return k;
+}
+#endif
