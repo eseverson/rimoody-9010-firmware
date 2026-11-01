@@ -12,7 +12,7 @@
 - White haze after the hang + power cut: faded on its own; theory and checks in notes/display_touch.md. No screen blanking (owner wants nav always on).
 
 ## RTOS (owner decision 2026-10-31: FreeRTOS + own port)
-- Plan and status: notes/rtos.md (authoritative). **Card BOOT.BIN = build 20261031-201335 (crc 4fd46afc)**: FreeRTOS + console task + clk.c + own EHCI driver with the queued bulk IN (v2); 10-min soak clean. Code is in git (Forgejo me/miata-head-unit, remote `local`). Next: own `usb start` (notes/usb_host.md), SD/FAT.
+- Plan and status: notes/rtos.md (authoritative). **Card BOOT.BIN = build 20261031-202707 (crc 04075e26)**: FreeRTOS + console task + clk.c + own EHCI driver (queued bulk IN) + own USB enumeration (usbh.c); U-Boot's USB stack unused. Code is in git (Forgejo me/miata-head-unit, remote `local`). Next: SD/FAT.
 
 ## Next
 0. RTOS milestone 2 (notes/rtos.md).
