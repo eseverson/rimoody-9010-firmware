@@ -1,0 +1,10 @@
+echo == boot ROM 0x9e000000
+go 0x1800000 walk 9e000000 10000 1000 ROM9E0.BIN
+go 0x1800000 save L1ROM.TXT
+echo == RGST 0x9c000000 by group
+go 0x1800000 walk 9c000000 8000 80 RGST.BIN
+go 0x1800000 save L2RGST.TXT
+echo == RAM 0x0 1M, single write
+go 0x1800000 walk 0 100000 100000 RAM0.BIN
+go 0x1800000 save L3RAM0.TXT
+reset

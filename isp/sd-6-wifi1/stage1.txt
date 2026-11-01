@@ -1,0 +1,16 @@
+setenv isp_all_or_update_done 1
+mw.l 0x9c00317c 0 1
+fatrm $isp_if $isp_dev ISP_UPDT.BIN
+wdt stop all
+if fatload $isp_if $isp_dev 0x1800000 WIFI1.BIN; then setenv load_ok 1; fi
+env export -t 0x1200000
+fatwrite $isp_if $isp_dev 0x1200000 PRE.TXT $filesize
+crc32 0x00f00000 0x100000
+mw.l 0x1500000 0 0x200
+if test -n "$load_ok"; then go 0x1800000 hello && setenv hello_ok 1; fi
+fatwrite $isp_if $isp_dev 0x1500000 HELLO.TXT 0x800
+if test -n "$hello_ok"; then go 0x1800000 main && setenv main_ok 1; fi
+env export -t 0x1200000
+fatwrite $isp_if $isp_dev 0x1200000 POST.TXT $filesize
+if test -n "$load_ok"; then go 0x1800000 alive; fi
+reset

@@ -1,0 +1,10 @@
+mw.l 0x9c0000a4 0x1fe00220
+uartsp init 1 115200
+mw.l 0x9c000980 0xff;mw.l 0x9c000980 0xaa;mw.l 0x9c000980 0x02;mw.l 0x9c000980 0xd1;mw.l 0x9c000980 0x00;mw.l 0x9c000980 0x2d;mw.l 0x9c000980 0xbe;mw.l 0x9c000980 0xba
+mw.l 0x9c00008c 0x00f00050;mw.l 0x9c000100 0x00fc00fc;mw.l 0x9c00010c 0x00fc00fc
+setenv isp_if mmc
+setenv isp_dev 0
+mmc dev 0
+mmc rescan
+if fatload mmc 0 0x1800000 /BOOT.BIN; then setenv hu_ok 1; else mmc dev 1; mmc rescan; if fatload mmc 1 0x1800000 /BOOT.BIN; then setenv isp_dev 1; setenv hu_ok 1; fi; fi
+if test -n "$hu_ok"; then crc32 0x00f00000 0x100000; wdt stop all; go 0x1800000 hello; go 0x1800000 main; fi

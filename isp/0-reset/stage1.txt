@@ -1,0 +1,3 @@
+mw.l 0x9c00317c 0 1
+setenv isp_all_or_update_done 1
+reset

@@ -1,0 +1,6 @@
+setenv isp_all_or_update_done 1
+mw.l 0x9c00317c 0 1
+wdt stop all
+fatwrite $isp_if $isp_dev 0x98010000 XBUT4K.BIN 0x1000
+fatload $isp_if $isp_dev 0x1100000 /ISPBOOOT.BIN 0xe00 0x110000 && source 0x1100000
+reset

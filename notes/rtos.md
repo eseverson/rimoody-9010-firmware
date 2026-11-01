@@ -1,0 +1,44 @@
+# Replacement RTOS: FreeRTOS on the N13 (NDS32 V3)
+
+Decision (owner, 2026-10-31): **FreeRTOS kernel + our own NDS32 port**, grown out of the current payload (isp/sd-10-net). No existing NDS32 FreeRTOS port was found. Rejected: own minimal kernel (same port cost, plus home-grown queues/mutexes/timers to debug with no debugger), Zephyr (no NDS32, weeks of arch work before a first task switch).
+
+## Port design
+
+- **Vectors and entry already exist** (irq.S): every exception/interrupt pushes the full context on the interrupted stack (frame: IPC, IPSW, IFC_LP, r2..r27, fp, gp, lp, r0, r1 = 136 bytes) and calls `hu_trap(vec, frame)`. Interrupts don't nest (GIE is cleared on entry). So the port is a stack-swap port like ARM Cortex-M / RISC-V: a task's saved context *is* that frame on its own stack, and `pxTopOfStack` is the frame pointer.
+- **Context switch**: after `hu_trap` returns, `hu_trap_common` checks a `port_switch_pending` flag; if set, it stores `$sp` into `pxCurrentTCB->pxTopOfStack`, calls `vTaskSwitchContext()`, loads the new task's `$sp`, and restores from there.
+- **Tick**: the existing timer ISR (IRQ 131, 100 Hz) calls `xTaskIncrementTick()`; a pdTRUE return sets `port_switch_pending`.
+- **Yield**: `portYIELD()` = `trap 0x7e58` (general exception, vector 7); hu_trap advances IPC by 4 and sets the flag.
+- **Critical sections**: GIE off/on with a nesting count (`setgie.d` / `setgie.e`).
+- **First task**: `xPortStartScheduler()` enables the tick and does a `trap` that switches into the first task's prepared frame.
+- **Initial frame** (`pxPortInitialiseStack`): IPC = task entry, IPSW = current PSW with GIE set (so iret enables interrupts), r0 = parameter, lp = `prvTaskExitError`, and **r10 and gp copied from the creating context**: U-Boot code (USB, mmc, get_timer) relies on its global-data register; every task inherits the boot context's values.
+
+## Rules while U-Boot still provides drivers
+
+- U-Boot is not reentrant: all U-Boot calls (USB for Wi-Fi, mmc/fat, `parse_string_outer`, `get_timer`, `udelay`) stay in **one task** (the net task: today's main loop, unchanged), until each is replaced by our own driver.
+- Other tasks use our own timing (`port_udelay`, calibrated against the tick timer at boot) and FreeRTOS delays.
+- The hang watchdog keeps being petted only by the net task.
+- Interrupt stack = the interrupted task's stack (as now): every task stack needs ~1 KB headroom for the trap frame + ISR.
+
+## Milestones
+
+1. Port + two tasks (net task = old main loop; touch task polling GT911 every 25 ms with `vTaskDelay`). Proves preemption, yield, delays. Test live with `hu.py exec`, soak, then persist.
+2. Console redraw as its own task; HU1 command handling posts to queues.
+3. Replace U-Boot timing (`get_timer`/`udelay`) with our own, then the USB host (EHCI) under the Wi-Fi driver, then SD/FAT (FreeRTOS-FAT or FatFs), then drop U-Boot entirely (own boot: init DRAM/clock is already done by xboot).
+4. Audio (DSP microcode, notes/audio.md), UI.
+
+## Status
+
+- 2026-10-31: design written; porting milestone 1.
+- 2026-10-31 19:30: **milestone 1 runs on the unit** (build 20261031-192954, live exec, not yet persisted). FreeRTOS V11.1.0 vendored unmodified in `isp/sd-10-net/freertos/` (VERSION file); port in `freertos/port/` (portmacro.h, port.c, port_nds32.h) plus the switch path in `irq.S` (after `hu_trap` returns: save `$sp` to `pxCurrentTCB`, `vTaskSwitchContext`, load the new `$sp`, `hu_trap_restore`). Tasks: `net` (prio 1, 256 KB stack, the old main loop with all U-Boot calls), `touch` (prio 3, 8 KB, `gt9_tick` every 30 ms, `port_udelay` busy waits calibrated against `get_timer` at boot), plus the kernel's idle and timer tasks. Heap: 2 MB heap_4 at 0x02200000 (`.rtos_heap` NOLOAD in payload.ld). Verified: boots, Wi-Fi up, touch events from the touch task while the net task never yields (preemption by tick), HU1 EXEC from the RTOS build to the next image (trampoline runs on the saved boot stack via `port_call_on_stack`, since the next image reuses the heap where the net task's stack lives).
+- Made task-safe: `log_c` (GIE off around the append), `plat_logf` (own buffer), the GT911 bus (`claim()` under GIE off, shared by the touch task and HU1 op 14). Still net-task-only: `lprintf`/`fmtbuf`, console drawing, everything U-Boot.
+- Known limits: `hu.py irq off` stops the tick and so the scheduler (the net task keeps running); HU1 EXEC refused by the trampoline re-enables the tick itself.
+- 2026-10-31 19:46: milestone 1 soak passed (build 192954, 71 rounds of long commands + ping + GT911 reads from the net task while the touch task polls, 15 min, no crash). Persist pending.
+- **Milestone 2 started** (build 194800): console drawing is its own task (prio 2, redraws every 500 ms or within 50 ms of a `fb_last = 0` kick; FB on/off/scale commands take `con_lock`); `lprintf` and `plat_logf` format on the caller's stack and append with GIE off, so any task may log. `hu.py rtos` (HU1 op 15) lists tasks, priorities, states, stack headroom and heap use.
+- **Milestone 3 started**:
+  - `clk.c`: own time base on the counter U-Boot's timer uses (0x9C003180 group, 1 MHz, latch by writing 0x1234 to +0x68, read +0x60 low / +0x64 high; prescaler +0x0C = 0x10D, so the system clock is 270 MHz). U-Boot's get_timer zeroes it at 4294 s; clk_us() folds that in. `ub_ms`/`ub_udelay` in net.c now map to it: our code no longer calls U-Boot for time.
+  - `ehci.c`: own EHCI transfers (v1) on EHCI1 (0x9C104100 / op 0x9C104120, the Wi-Fi bus; EHCI0 is 0x9C102100). Same per-transfer scheme as U-Boot's ehci_submit_async (head QH + one transfer QH, async schedule only during the transfer, ASYNCLISTADDR saved and restored, toggles shared in struct usb_device), bounce buffer for lines it can't own. Verified: 1000 vendor reads identical to U-Boot's and ~25% faster; with `hu.py usb own` the whole Wi-Fi path (bulk IN/OUT, control) runs on it.
+  - Crash on the way: the N13 has no `cctl L1D_VA_WBINVAL` (instruction exception, itype 0xE1); use `L1D_VA_WB` then `L1D_VA_INVAL`.
+- 2026-10-31 20:00: ehci.c soak (Wi-Fi switched to it at runtime, 10 min, 20255 transfers, 0 errors). Build 195947 makes it the default right after `usb start`: firmware download, scan, join and traffic all run on it. Side effects fixed: rx_once treats an ehci.c timeout (UDEV_STATUS = NOT_PROC after 100 ms) as "nothing arrived" (U-Boot's bulk wait ignored the 100 ms and ran 5 s), and the scan dwell no longer ends at the first quiet 100 ms. Seen once: the 128-byte-block firmware download failed at block 0x1380 (status 0x20, transaction error); the existing 64-byte fallback worked. Unknown whether U-Boot's path ever hit it; look at it if it recurs.
+- Still from U-Boot: `usb start` (PHY init, enumeration, the struct usb_device), mmc/FAT (WIFI.TXT, log files, persist), `parse_string_outer` (HU1 CMD), its console (hooked), and the boot itself.
+- 2026-10-31 20:10: build 195947 persisted to the card (crc db3e0dfa) after a clean 6-min soak: the unit now boots into FreeRTOS with Wi-Fi on ehci.c.
+- 2026-10-31 20:15: **EHCI v2** (build 20261031-201335, live exec): `ehci_rx_poll` keeps one bulk IN queued on its own async ring (rhead -> rqh -> rhead) with the schedule left running; rx_once polls the qTD token and never blocks. Every other transfer pauses the ring (ASE off, wait ASS = 0; a partly filled IN stays in the QH overlay), runs the v1 way and resumes it. A finished IN takes the ring down (ASYNCLISTADDR back to U-Boot's list), so descriptors are only rewritten with the schedule stopped. `ehci_rx_stop()` runs before any U-Boot USB use (`run("usb ...")`, `hu.py usb compare/uboot`), before EXEC (no DMA into rxbuf under the next image) and at the end of the net task. ICMP RTT to the unit: 1.6 / 2.3 / 4.1 ms (min/avg/max). `hu.py usb status` shows the rx count. The 128-byte firmware block failure recurred (block 0x1a00, status 0x20 = transaction error, data stage done, so the status stage failed); the 64-byte fallback costs 12 ms, left as is.

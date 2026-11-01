@@ -1,0 +1,6 @@
+mw.l 0x9c00317c 0 1
+setenv isp_all_or_update_done 1
+env export -t 0x1200000
+fatwrite $isp_if $isp_dev 0x1200000 UENV.TXT $filesize
+fatrm $isp_if $isp_dev ISP_UPDT.BIN
+reset
