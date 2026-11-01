@@ -234,7 +234,7 @@ def main():
     p = sub.add_parser('fb'); p.add_argument('what', choices=['status', 'on', 'off', 'scale'])
     p.add_argument('n', nargs='?', type=int, default=2)
     p = sub.add_parser('say'); p.add_argument('text', nargs='+')
-    p = sub.add_parser('irq'); p.add_argument('what', choices=['status', 'on', 'off', 'test', 'trap'])
+    p = sub.add_parser('irq'); p.add_argument('what', choices=['status', 'on', 'off', 'test', 'trap', 'hwwdt'])
     p.add_argument('hz', nargs='?', type=int, default=100)
     p = sub.add_parser('usb', help='own EHCI driver (builds >= 20261031-195)'); p.add_argument('what', choices=['status', 'compare', 'own', 'uboot']); p.add_argument('count', nargs='?', type=int, default=200)
     sub.add_parser('rtos', help='FreeRTOS task list (builds >= 20261031-1930)')
@@ -292,7 +292,7 @@ def main():
     elif a.op == 'say':
         print(u.call(OP_SAY, ' '.join(a.text).encode()[:120]).decode(errors='replace'))
     elif a.op == 'irq':
-        code = {'off': 0, 'on': 1, 'trap': 2, 'test': 3, 'status': 4}[a.what]
+        code = {'off': 0, 'on': 1, 'trap': 2, 'test': 3, 'status': 4, 'hwwdt': 5}[a.what]
         payload = bytes([code]) + (struct.pack('<H', a.hz) if code == 1 else b'')
         if code == 2:   # no retransmit: the unit resets right after replying
             r = u.send_once(OP_IRQ, payload)

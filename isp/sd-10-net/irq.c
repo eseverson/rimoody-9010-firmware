@@ -183,6 +183,43 @@ void irq_watchdog(u32 seconds)
     irq_wd_left = irq_wd_reload;
 }
 
+/* Hardware watchdog (SP7021-style WDT at 0x9C000630, as in Linux sunplus_wdt.c and U-Boot 0xf00946): a 20-bit
+ * down-counter at 90 kHz (max ~11.6 s); CNT holds bits 19:4. The tick ISR reloads it, but only while the software hang
+ * watchdog above is healthy, so it fires when the tick itself stops (a hang with GIE off, a CPU stalled on the bus,
+ * or the payload gone) - the cases the tick-based watchdog cannot see. It must fire before the MCU cuts power for the
+ * missing heartbeat (~9 s), which nothing can recover from short of an ignition cycle. */
+#define WDT_CTRL 0x9c000630u
+#define WDT_CNT  0x9c000634u
+#define HWWDT_TEST_VEC 101
+static u32 hw_wdt_count, hw_wdt_starve;
+volatile u32 irq_hw_wdt_on;
+
+void irq_hw_watchdog(u32 seconds)
+{
+    REG(WDT_CTRL) = 0x3877;   /* stop */
+    irq_hw_wdt_on = 0;
+    if (!seconds)
+        return;
+    if (seconds > 11)
+        seconds = 11;
+    hw_wdt_count = seconds * 90000u >> 4;
+    hw_wdt_starve = 0;
+    REG(WDT_CTRL) = 0xab00;   /* unlock */
+    REG(WDT_CNT) = hw_wdt_count;
+    REG(WDT_CTRL) = 0xab01;   /* lock */
+    REG(WDT_CTRL) = 0x4a4b;   /* resume */
+    irq_hw_wdt_on = 1;
+}
+
+static void hw_wdt_pet(void)
+{
+    REG(WDT_CTRL) = 0xab00;
+    REG(WDT_CNT) = hw_wdt_count;
+    REG(WDT_CTRL) = 0xab01;
+}
+
+u32 irq_hw_wdt_left_ms(void) { return irq_hw_wdt_on ? ((REG(WDT_CNT) & 0xffff) << 4) / 90 : 0; }
+
 static void isr(u32 vec, u32 *frame)
 {
     irq_count[vec - 9]++;
@@ -200,6 +237,8 @@ static void isr(u32 vec, u32 *frame)
         port_tick();
         if (irq_wd_reload && --irq_wd_left == 0)
             crash(WD_VEC, frame);
+        if (irq_hw_wdt_on && !hw_wdt_starve && !(irq_ticks & 7))
+            hw_wdt_pet();
         if (hb_frame && ++hb_cnt >= hb_every) {
             hb_cnt = 0;
             if (hb_pos < 0) {
@@ -228,7 +267,34 @@ static void reset_unit(void)
         ;
 }
 
+static void crash_record(u32 vec, u32 *frame);
 static void crash(u32 vec, u32 *frame)
+{
+    crash_record(vec, frame);
+    REG(TMR_CTRL) = 0;
+    reset_unit();
+}
+
+/* Proof that the hardware watchdog resets the unit: leave a crash record saying so (reported by the next boot as
+ * "hwwdt-test") and stop petting. If the unit is still running seconds later, irq_hw_wdt_test_failed() clears it. */
+void irq_hw_wdt_test(void)
+{
+    static u32 fake[34];
+    crash_record(HWWDT_TEST_VEC, fake);
+    hw_wdt_starve = 1;
+}
+
+int irq_hw_wdt_test_failed(void)
+{
+    if (!hw_wdt_starve)
+        return 0;
+    hw_wdt_starve = 0;
+    ((struct crash *)CRASH)->magic = 0;
+    dcache_wb(CRASH_ADDR, sizeof(struct crash));
+    return 1;
+}
+
+static void crash_record(u32 vec, u32 *frame)
 {
     struct crash *c = CRASH;
     u8 *p = (u8 *)c;
@@ -252,8 +318,6 @@ static void crash(u32 vec, u32 *frame)
             c->stack[i] = ((volatile u32 *)c->sp)[i];
     c->crc = crc32_le(p, (int)((u8 *)&c->crc - p));
     dcache_wb(CRASH_ADDR, sizeof(*c));
-    REG(TMR_CTRL) = 0;
-    reset_unit();
 }
 
 void hu_trap(u32 vec, u32 *frame);
@@ -341,6 +405,7 @@ void irq_disable(void)
 {
     GIE_OFF();
     on = 0;
+    irq_hw_watchdog(0);   /* nothing pets it without the tick; callers that want it re-arm it (EXEC, failure exits) */
     if (!installed)
         return;
     REG(TMR_CTRL) = 0;
@@ -388,12 +453,13 @@ int irq_status(char *o)
 {
     return plat_fmt(o, "irq=%s guard=%u hz=%u ticks=%u hw=%u/%u/%u/%u/%u/%u/%u spurious=%u hb_isr=%u rx_drop=%u traps=%u "
                        "itype=%x ivb=%x(orig %x, fixed %u) psw=%x(orig %x) int_mask=%x int_pend=%x gie_fix=%u "
-                       "tmr=%x/%x/%x cnt=%x intc_mask4=%x pend4=%x/%x",
+                       "tmr=%x/%x/%x cnt=%x intc_mask4=%x pend4=%x/%x hwwdt=%s left=%u ms",
                     on ? "on" : "off", irq_guard, hz_now, irq_ticks, irq_count[0], irq_count[1], irq_count[2], irq_count[3],
                     irq_count[4], irq_count[5], irq_count[6], irq_spurious, irq_hb_sent, irq_rx_drop, irq_test_hits,
                     last_itype, MFSR(IVB), orig_ivb, irq_ivb_fix, MFSR(PSW), orig_psw, MFSR(INT_MASK),
                     MFSR(INT_PEND), irq_gie_fix, REG(TMR_CTRL), REG(TMR_PRESCALE), REG(TMR_RELOAD), REG(TMR_COUNT),
-                    REG(INTC_MASK + TGRP), REG(INTC_EXT0 + TGRP), REG(INTC_EXT1 + TGRP));
+                    REG(INTC_MASK + TGRP), REG(INTC_EXT0 + TGRP), REG(INTC_EXT1 + TGRP),
+                    irq_hw_wdt_on ? (hw_wdt_starve ? "starved" : "on") : "off", irq_hw_wdt_left_ms());
 }
 
 /* a crash record left by an earlier run: text into o (0 if none), then cleared */
@@ -427,6 +493,10 @@ int irq_crash_report(char *o, char *brief)
     k += plat_fmt(o + k, "\n");
     if (c->vec == WD_VEC)
         plat_fmt(brief, "hang@%x%s", c->ipc, ok ? "" : "?");
+    else if (c->vec == HWWDT_TEST_VEC)
+        plat_fmt(brief, "hwwdt-test%s", ok ? "" : "?");
+    else if (c->vec >= 102 && c->vec <= 110)
+        plat_fmt(brief, "%s%s", c->vec == 102 ? "probation" : "fail", ok ? "" : "?");
     else
         plat_fmt(brief, "vec%u/itype%x@%x%s", c->vec, c->itype, c->ipc, ok ? "" : "?");
     c->magic = 0;
@@ -435,3 +505,13 @@ int irq_crash_report(char *o, char *brief)
 }
 
 void irq_crash_now(void) { irq_trap_fatal(); }
+
+/* Planned reset with a crash record (vec 102 probation, 103.. other failures), from task context. */
+void irq_fail_reset(unsigned int vec)
+{
+    static u32 fake[34];
+    GIE_OFF();
+    crash_record(vec, fake);
+    REG(TMR_CTRL) = 0;
+    reset_unit();
+}

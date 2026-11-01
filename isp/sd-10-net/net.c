@@ -1623,8 +1623,67 @@ static u32 cfg_ip;
 
 static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'f' ? (c | 32) - 'a' + 10 : -1; }
 
+/* ---- staying reachable (notes/rtos.md "Lockups"): config handoff across EXEC, probation, failure resets ----
+ * EXEC writes the parsed config (SSID, PMK, token, static IP) to RAM at HANDOFF for the next image, so a test build
+ * gets back on the network without touching the SD card. An image that started that way is on probation: if it is
+ * not online within PROBATION_MS it resets, and the card's build comes back. The block is cleared when read. */
+#define HANDOFF ((struct handoff *)0x02f0e000u)   /* TRAMP_ADDR + 0xe000, below the trampoline's argv */
+#define HANDOFF_MAGIC 0x48554346u   /* "HUCF" */
+#define PROBATION_MS 90000
+struct handoff { u32 magic, ssid_len, ip; u8 ssid[33], pmk[32], token[32]; u8 pad[3]; u32 crc; };
+static int exec_trial, net_online, prev_boot_failed;
+static u32 net_task_t0, hwwdt_test_at;
+
+static void handoff_write(void)
+{
+    struct handoff *h = HANDOFF;
+    h->magic = HANDOFF_MAGIC, h->ssid_len = (u32)cfg_ssid_len, h->ip = cfg_ip;
+    cpy(h->ssid, cfg_ssid, 33);
+    cpy(h->pmk, cfg_pmk, 32);
+    cpy(h->token, cfg_token, 32);
+    h->crc = crc32_le((const u8 *)h, (int)((u8 *)&h->crc - (u8 *)h));
+}
+
+static int handoff_take(void)
+{
+    struct handoff *h = HANDOFF;
+    int ok = h->magic == HANDOFF_MAGIC && h->ssid_len <= 32 &&
+             h->crc == crc32_le((const u8 *)h, (int)((u8 *)&h->crc - (u8 *)h));
+    if (ok) {
+        cfg_ssid_len = (int)h->ssid_len, cfg_ip = h->ip;
+        cpy(cfg_ssid, h->ssid, 33);
+        cpy(cfg_pmk, h->pmk, 32);
+        cpy(cfg_token, h->token, 32);
+    }
+    for (u32 i = 0; i < sizeof *h; i++)   /* secrets do not outlive the handoff */
+        ((u8 *)h)[i] = 0;
+    return ok;
+}
+
+/* A failure that would otherwise end the payload (and with it the MCU heartbeat: the MCU then cuts power). Test
+ * builds and a first failure reset (the card's build retries); a second failure in a row stays up without the
+ * network so the unit keeps power and the screen shows why. */
+static void fail_or_stay(unsigned int vec, const char *why)
+{
+    lprintf("FAILURE: %s%s\n", why, exec_trial || !prev_boot_failed ? ", resetting" : ", staying up without the network");
+    flush("failure");
+    if (exec_trial || !prev_boot_failed)
+        irq_fail_reset(vec);
+    for (;;) {
+        irq_pet();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 static int load_config(void)
 {
+    if (handoff_take()) {
+        exec_trial = 1;
+        char es[80];
+        esc_ssid(es, cfg_ssid, cfg_ssid_len);
+        lprintf("config: from the previous image (EXEC handoff): ssid '%s'; on probation for %u s\n", es, PROBATION_MS / 1000);
+        return 0;
+    }
     for (int i = 0; i < 4096; i++)
         WIFI_TXT[i] = 0;
     /* the stage-1 loads that work use no size argument; U-Boot's own ispsp code names files with a leading slash */
@@ -2431,6 +2490,9 @@ void plat_ip_event(cu32 ip, cu32 mask, cu32 router, int how)
         log_s("ip: address lost\n");
         return;
     }
+    if (exec_trial && !net_online)
+        lprintf("probation passed: online %u ms after start\n", ub_ms(0) - net_task_t0);
+    net_online = 1;
     char *p = HELLO_BUF;
     p += vfmt_n(p, "ip=");
     p += ip_fmt_addr(p, ip);
@@ -2746,7 +2808,7 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         fb_last = 0;
         return vfmt_n(t, "ok");
     }
-    case 11: {   /* IRQ_CTL: 0 off, 1 on [u16 hz], 2 fatal trap (after this reply), 3 resumable trap, 4 status */
+    case 11: {   /* IRQ_CTL: 0 off, 1 on [u16 hz], 2 fatal trap (after this reply), 3 resumable trap, 4 status, 5 hw watchdog test */
         int k = 0, c = n ? p[0] : 4;
         if (c == 0) {
             irq_disable();
@@ -2760,6 +2822,13 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         } else if (c == 2) {
             fatal_pending = 1, deferred_at = ub_ms(0) + 200;
             k = vfmt_n(t, "fatal trap after this reply: crash record, then reset\n");
+        } else if (c == 5) {
+            if (!irq_hw_wdt_on)
+                return vfmt_n(t, "ERR hardware watchdog is not armed\n");
+            irq_hw_wdt_test();
+            hwwdt_test_at = ub_ms(0);
+            log_s("irq: hardware watchdog test: no longer fed, expect a reset within 6 s\n");
+            k = vfmt_n(t, "hardware watchdog no longer fed: the unit should reset within 6 s and report crash=hwwdt-test\n");
         } else if (c == 3) {
             int hit = irq_test_trap();
             lprintf("irq: test trap -> handler %s\n", hit ? "ran, resumed" : "DID NOT RUN");
@@ -2827,6 +2896,8 @@ static void do_exec(void)
     argv[3] = 0;
     int (*tramp)(int, char **) = (int (*)(int, char **))TRAMP_ADDR;
     /* under the scheduler this runs on a task stack inside the RTOS heap, which the next image's heap reuses */
+    handoff_write();
+    irq_hw_watchdog(6);   /* the next image must get its tick running within 6 s, or the unit resets */
     int r = port_running ? port_call_on_stack(tramp, 3, argv, port_boot_sp) : tramp(3, argv);
     install_hook();
     irq_init();
@@ -2925,6 +2996,16 @@ static void net_loop(void)
         mlme_tick();
         ip_poll();
         irq_check();
+        if (hwwdt_test_at && ub_ms(0) - hwwdt_test_at > 15000) {
+            hwwdt_test_at = 0;
+            if (irq_hw_wdt_test_failed())
+                log_s("irq: hardware watchdog test FAILED: still running 15 s later\n");
+        }
+        if (exec_trial && !net_online && ub_ms(0) - net_task_t0 > PROBATION_MS) {
+            lprintf("probation: not online %u s after EXEC, back to the card's build\n", PROBATION_MS / 1000);
+            flush("probation");
+            irq_fail_reset(102);
+        }
         if (exec_pending && (int)(ub_ms(0) - deferred_at) >= 0)
             do_exec();
         if (fatal_pending && (int)(ub_ms(0) - deferred_at) >= 0) {
@@ -2985,18 +3066,18 @@ static void touch_task(void *arg)
 #define NET_STACK_WORDS (64 * 1024)
 static void net_task(void *arg)
 {
+    net_task_t0 = ub_ms(0);
     lprintf("rtos: scheduler running, tick %u Hz (irq.c timer); net task\n", configTICK_RATE_HZ);
     irq_watchdog(90);   /* a hang now reboots (crash=hang@pc) instead of needing a power cycle */
+    irq_hw_watchdog(6);   /* and a dead tick (GIE off, bus stall) resets before the MCU cuts power (~9 s) */
     flush("hooked");
     if (pending_crash_save) {   /* one file per crash, named after the report's CRC */
         char name[16];
         vfmt_n(name, "C%07x.TXT", crc32_le((const u8 *)LOG_BUF, (int)log_len) & 0xfffffff);
         save_log(name);
     }
-    if (load_config()) {
-        flush("no config");
-        vTaskEndScheduler();
-    }
+    if (load_config())
+        fail_or_stay(103, "no config (WIFI.TXT)");
 
     log_s("\n# USB (usbh.c)\n");
     u32 t0 = ub_ms(0);
@@ -3017,9 +3098,11 @@ static void net_task(void *arg)
     if (wifi_init() == 0) {
         ip_init(my_mac, cfg_token, cfg_ip, RBUF);
         net_loop();
+        ehci_rx_stop();
+        fail_or_stay(106, "network loop stopped");
     }
     ehci_rx_stop();
-    vTaskEndScheduler();
+    fail_or_stay(104, "Wi-Fi bring-up failed");
 }
 
 __attribute__((section(".text.entry"), used))
@@ -3055,6 +3138,7 @@ int payload_entry(int argc, char *const argv[])
     {
         static char rep[1024];
         if (irq_crash_report(rep, crash_brief)) {
+            prev_boot_failed = crash_brief[0] == 'f' && crash_brief[1] == 'a';   /* "fail": second failure stays up */
             crash_until = ub_ms(0) + 120000;
             log_s("\n!!!!!!!! previous run crashed !!!!!!!!\n");
             log_s(rep);
@@ -3068,6 +3152,7 @@ int payload_entry(int argc, char *const argv[])
         xTaskCreate(touch_task, "touch", 2048, 0, 3, 0) != pdPASS ||
         xTaskCreate(console_task, "console", 4096, 0, 2, 0) != pdPASS || !(con_lock = xSemaphoreCreateMutex())) {
         flush("rtos: task create failed");
+        irq_hw_watchdog(6);   /* returning to U-Boot ends the heartbeat: reset instead of losing power */
         return 4;
     }
     vTaskStartScheduler();   /* returns when net_task ends the scheduler */

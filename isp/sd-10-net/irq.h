@@ -25,6 +25,12 @@ extern char irq_note[48];   /* e.g. the U-Boot command being run; goes into a cr
 void irq_watchdog(unsigned int seconds);   /* hang watchdog while the tick is on; 0 = off */
 extern volatile unsigned int irq_wd_left, irq_wd_reload;
 #define irq_pet() (irq_wd_left = irq_wd_reload)
+void irq_hw_watchdog(unsigned int seconds);   /* hardware WDT (0x9C000630), fed by the tick while the hang watchdog is fine; 0 = stop */
+unsigned int irq_hw_wdt_left_ms(void);
+extern volatile unsigned int irq_hw_wdt_on;
+void irq_hw_wdt_test(void);         /* crash record "hwwdt-test", stop feeding: the unit should reset */
+int irq_hw_wdt_test_failed(void);   /* still alive: undo the test, returns 1 */
+void irq_fail_reset(unsigned int vec);   /* crash record (102 probation, 103.. failure) and reset */
 
 int plat_fmt(char *out, const char *fmt, ...);
 
