@@ -792,6 +792,28 @@ static int power_on(void)
     return 0;
 }
 
+/* rtl8188fu_power_off without the FIFO flush / LPS steps: brings a chip that a SoC reset left running (the dongle keeps
+ * its power across our resets) back to "disabled", so power_on works again (2026-11-01: after a decoder hang and the
+ * watchdog reset, power_on timed out on APS_FSMCO bit 8 and the unit stayed without Wi-Fi). */
+static void power_off(void)
+{
+    rw8(REG_RF_CTRL, 0);
+    u16 f = rr16(REG_SYS_FUNC);
+    rw16(REG_SYS_FUNC, f & ~SYS_FUNC_CPU_ENABLE);   /* reset the MCU */
+    rw8(REG_MCU_FW_DL, 0);
+    /* rtl8188fu_active_to_emu */
+    rw8(REG_RF_CTRL, 0);
+    rw8(0x4e, rr8(0x4e) & ~BIT(7));
+    rw8(0x27, 0x34);
+    rw8(REG_APS_FSMCO + 1, rr8(REG_APS_FSMCO + 1) | (BIT(9) >> 8));   /* MAC off by the hardware state machine */
+    int r = poll32(REG_APS_FSMCO, BIT(9), 0, 500, 10);
+    /* rtl8188fu_emu_to_disabled */
+    u8 v = rr8(REG_APS_FSMCO + 1);
+    rw8(REG_APS_FSMCO + 1, (v & ~((BIT(10) | BIT(11)) >> 8)) | (BIT(11) >> 8));
+    rw8(0xc4, rr8(0xc4) | BIT(4));
+    lprintf("power off: MAC off %s, APS_FSMCO=%p\n", r ? "TIMED OUT" : "ok", rr32(REG_APS_FSMCO));
+}
+
 /* rtl8xxxu_init_queue_reserved_page + init_queue_priority + RX page boundary, 8188F values */
 static void init_queues(void)
 {
@@ -3375,8 +3397,14 @@ static int wifi_init(void)
         return -1;
     cpy(my_mac, efuse + 0xd7, 6);
     rng_mix(efuse, 512);
-    if (power_on())
-        return -1;
+    if (power_on()) {
+        log_s("power on failed: powering the chip off and trying once more\n");
+        errs = 0;
+        power_off();
+        ub_udelay(20000);
+        if (power_on())
+            return -1;
+    }
     init_queues();
     if (errs || firmware())
         return -1;
