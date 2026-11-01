@@ -75,11 +75,16 @@ static void init_post(void)   /* hal_vpp_init items before the scaler (0x529d7a.
         R(0x9c005b34 + 4 * i) = m[i];
 }
 
+static u32 fl[8];   /* DDFCH error flags (0x7EC) after each setup stage, for bisecting */
+#define FL(i) (fl[i] = R(0x9c0057ec))
 static void init_fetch(u32 w, u32 h, u32 pitch)
 {
+    FL(0);
     init_post();
+    FL(1);
     R(0x9c005d80) = 1;
     setbits(0x9c005d84, 1u << 4 | 1u << 6 | 1u << 9 | 1u << 12, 1u << 4 | 1u << 6);
+    FL(2);
     R(0x9c005780) = 1;
     R(0x9c005784) = 0x5e000;
     R(0x9c00578c) = 0xd6d6d6;
@@ -92,6 +97,7 @@ static void init_fetch(u32 w, u32 h, u32 pitch)
     R(0x9c0057d0) = pitch;
     R(0x9c0057d8) = 0;
     R(0x9c0057d4) = h << 16 | w;
+    FL(3);
     /* scaler: factor ((in - 1) << 22) / (out - 1); filter index 3 / 2 for upscaling (0x529b06) */
     u32 hf = ((w - 1) << 22) / (1024 - 1), vf = ((h - 1) << 22) / (600 - 1);
     R(0x9c005d8c) = w, R(0x9c005d90) = h;            /* input w/h (+0x0C/+0x10) */
@@ -105,6 +111,7 @@ static void init_fetch(u32 w, u32 h, u32 pitch)
     setbits(0x9c005dc8, 0xf0, 3u << 4);
     setbits(0x9c005e00, 0xf0, 2u << 4);
     setbits(0x9c005d84, 0x1f, 1u << 0 | 1u << 1 | (w != 1024) << 2 | (h != 600) << 3 | (h != 600) << 4);
+    FL(4);
 }
 
 int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u32 chroma_idx)
@@ -130,7 +137,7 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
     } else if (c == 3) {
         vpp_restore();
     } else if (c == 6) {   /* linear NV12 color bars at 0x04E00000, DDFCH as the SP7021 driver (ddfch_setting) */
-        const u32 w = 800, h = 480, pitch = 896, Y = 0x04e00000u, C = Y + pitch * h;
+        const u32 w = 800, h = 480, pitch = 896, Y = n >= 5 && p[4] ? 0x03700000u : 0x04e00000u, C = Y + pitch * h;
         static const unsigned char bars[8][3] = { { 235, 128, 128 }, { 210, 16, 146 }, { 170, 166, 16 }, { 145, 54, 34 },
                                                   { 106, 202, 222 }, { 81, 90, 240 }, { 41, 240, 110 }, { 16, 128, 128 } };
         for (u32 y = 0; y < h; y++)
@@ -156,14 +163,28 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
         R(0x9c0057dc) = 0x10000;                 /* config_0 */
         R(0x9c0057f0) = 0x80801002;              /* bist off */
         R(0x9c0057d4) = h << 16 | w;
+        FL(5);
         setbits(0x9c006c84, 3u, 2u);             /* VPP0 opaque */
         R(0x9c005a80) |= 1;
+        FL(6);
         active = 1;
         u32 c0 = R(0x9c0057e8), e0 = R(0x9c0057ec);
         for (volatile int i = 0; i < 3000000; i++)
             ;
-        return fmt(o, "vpp linear: checksum %x -> %x, error flags %x -> %x, 7f4 %x 7f8 %x 7fc %x, 7bc %x 7c0 %x", c0,
+        FL(7);
+        fmt(o, "flags by stage: start %x post %x vscl-on %x ddfch %x scaler %x sp7021-ddfch %x mix+commit %x later %x; ",
+            fl[0], fl[1], fl[2], fl[3], fl[4], fl[5], fl[6], fl[7]);
+        int k0 = 0;
+        while (o[k0])
+            k0++;
+        return k0 + fmt(o + k0, "vpp linear: checksum %x -> %x, error flags %x -> %x, 7f4 %x 7f8 %x 7fc %x, 7bc %x 7c0 %x", c0,
                    R(0x9c0057e8), e0, R(0x9c0057ec), R(0x9c0057f4), R(0x9c0057f8), R(0x9c0057fc), R(0x9c0057bc), R(0x9c0057c0));
+    } else if (c == 7 && n >= 2) {   /* MOON0 gated clock by ID (0x9C00002C + 4 * (id >> 4), eCos 0x313000) */
+        u32 id = p[1], a2 = 0x9c00002c + 4 * (id >> 4);
+        if (id >= 0x80)
+            return fmt(o, "ERR vpp gclk: id < 0x80");
+        R(a2) = 0x10001u << (id & 15);
+        return fmt(o, "vpp: gated clock %x set, reg %x = %x", id, a2, R(a2));
     } else if (c == 5 && n >= 2) {   /* MOON0 clock enable by ID (0x9C000004 + 4 * (id >> 4), bit | bit << 16) */
         u32 id = p[1];
         if (id >= 0x80)
