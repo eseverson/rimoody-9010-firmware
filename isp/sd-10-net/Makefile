@@ -38,7 +38,7 @@ HOSTCC ?= gcc
 test: test/crypto_host test/wpa_host test/ip_host test/mcu_host test/con_host
 	cd test && python3 -I test_crypto.py ./crypto_host && python3 -I test_wpa.py ./wpa_host && \
 	  python3 -I test_ip.py ./ip_host && python3 -I test_mcu.py ./mcu_host && \
-	  python3 -I test_console.py ./con_host
+	  python3 -I test_console.py ./con_host && ./test_tls.sh
 
 test/%_host: test/%_host.c crypto.c crypto.h wpa.c wpa.h ip.c ip.h mcu.c mcu.h console.c console.h font8x16.h
 	$(HOSTCC) -O2 -Wall -Wextra -o $@ $<
