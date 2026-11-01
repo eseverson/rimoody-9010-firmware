@@ -15,7 +15,7 @@ struct h264_pps {
 struct h264_slice {
     unsigned int nal_ref_idc, nal_type, first_mb, slice_type, pps_id, frame_num, idr_pic_id, poc_lsb,
         direct_spatial_mv_pred, num_ref_idx_override, num_ref_idx_l0, num_ref_idx_l1, ref_list_mod, long_term_ref,
-        cabac_init_idc, disable_deblocking, weighted;
+        cabac_init_idc, disable_deblocking, weighted, adaptive_marking;
     int delta_poc_bottom, qp, alpha_offset, beta_offset;
     unsigned int data_bit_rbsp, data_bit_raw;   /* first slice-data bit, from the NAL header byte, without / with EPBs */
 };

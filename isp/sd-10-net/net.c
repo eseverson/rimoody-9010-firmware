@@ -3300,7 +3300,7 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         if (c == 2 && n >= 9)
             return vdec_bitread(le32(p + 1), le32(p + 5), t, vfmt_n);
         if ((c == 3 || c == 5) && n >= 9)
-            return vdec_decode(le32(p + 1), le32(p + 5), t, vfmt_n, c == 3, n >= 10 ? p[9] : 0);
+            return vdec_decode(le32(p + 1), le32(p + 5), t, vfmt_n, c == 3, n >= 10 ? p[9] : 0, n >= 11 ? p[10] : 1);
         if (c == 4)
             return vdec_spmp_test(t, vfmt_n, n >= 2 ? p[1] : 0);
         return vdec_status(t, vfmt_n);

@@ -235,21 +235,26 @@ int vdec_bitread(u32 src, u32 len, char *o, vdec_fmt fmt)
     return k;
 }
 
-/* ---- step 4: one picture (single-slice I picture) through the SPMP command ring ---- */
+/* ---- steps 4 and 5: pictures (one slice each, I and P) through the SPMP command ring ---- */
 /* The decoder lays pictures out with the pitch in BG2D "mb size" slot 0 (0x9C00A380 byte 0 = 0x78: 1920 bytes, set
- * by the display init and shared with it), in 64-row stripes of 1 KB tiles 16 pixels wide (first decode, 2026-11-01).
- * So the buffers use that pitch: 1920 x 512 luma, 1920 x 256 interleaved CbCr. */
-#define FB_PITCH  1920u
-#define FB_LUMA   0x04600000u   /* 0xF0000 */
-#define FB_LUMA_N 0xF0000u
-#define FB_CHROMA 0x04700000u   /* 0x78000 */
+ * by the display init and shared with it), in 64-row stripes of 4 KB macro-tiles 64 pixels wide (notes/h264_decoder.md
+ * "Output layout"). So the buffers use that pitch: 1920 x 512 luma, 1920 x 256 interleaved CbCr.
+ * Four frame slots (DRAM 0x04600000..0x04DA0000; 0x06000000 is in use by something else): luma at +0, CbCr at
+ * +0x100000, co-located motion vectors ("MVC", 0x1A000 for 800x480) at +0x180000. BG2D indices per slot k: luma k,
+ * chroma 0x14 + k, MVC 0x2A + k, as eCos's tables. */
+#define FB_PITCH    1920u
+#define FB_LUMA_N   0xF0000u
 #define FB_CHROMA_N 0x78000u
-#define FB_MVC    0x04780000u
-#define WORK_3B   0x047A0000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each) */
-#define WORK_3C   0x047C0000u
-#define IDX_LUMA  0x00
-#define IDX_CHROMA 0x14
-#define IDX_MVC   0x2a
+#define WORK_3B     0x047A0000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each), after slot 0's MVC */
+#define WORK_3C     0x047C0000u
+#define NSLOT       4
+static const u32 slot_base[NSLOT] = { 0x04600000u, 0x04800000u, 0x04A00000u, 0x04C00000u };
+#define SLOT_LUMA(k)   (slot_base[k])
+#define SLOT_CHROMA(k) (slot_base[k] + 0x100000u)
+#define SLOT_MVC(k)    (slot_base[k] + 0x180000u)
+#define IDX_LUMA(k)    (k)
+#define IDX_CHROMA(k)  (0x14 + (k))
+#define IDX_MVC(k)     (0x2a + (k))
 
 static u32 ring_n;   /* words written in the SPMP ring */
 static void put(u32 w)   /* SPMP words are stored big-endian */
@@ -268,40 +273,30 @@ static void cache_inval(u32 a, u32 n)   /* L1D_VA_INVAL over a range (the decode
     __asm__ volatile("msync all" ::: "memory");
 }
 
-int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
+static u32 tiled(u32 x, u32 y)   /* byte offset of luma pixel (x, y) in the decoder's layout (tools/mfd_detile.py) */
 {
-    if (!inited)
-        return fmt(o, "ERR vdec: init first");
-    if (len < 16 || len > 0x100000)
-        return fmt(o, "ERR vdec: 16 bytes .. 1 MB");
-    const u8 *s = (const u8 *)src;
-    /* host-side parse: SPS, PPS, first slice */
-    struct h264_sps sps = { 0 };
-    struct h264_pps pps = { 0 };
-    struct h264_slice sh = { 0 };
-    u32 pos = 0, st, nl, slice_at = 0;
-    int have = 0;
-    while (h264_next_nal(s, len, &pos, &st, &nl)) {
-        int t = s[st] & 31;
-        if (t == 7)
-            h264_parse_sps(s + st, nl, &sps);
-        else if (t == 8)
-            h264_parse_pps(s + st, nl, &pps);
-        else if ((t == 5 || t == 1) && !have) {
-            have = !h264_parse_slice(s + st, nl, &sps, &pps, &sh);
-            slice_at = st;
-        }
-    }
-    if (!have || sh.slice_type != 2)
-        return fmt(o, "ERR vdec: need an I slice (have %d, type %u)", have, sh.slice_type);
+    u32 st = y / 64, xg = (x / 16) % 4;
+    u32 o = st * FB_PITCH * 64 + (x / 64) * 4096 + (((y & 1) ^ (xg & 1) ^ (st & 1)) * 0x800) + xg * 0x200 +
+            ((y % 64) / 2) * 16 + (x % 16);
+    return (o & ~7u) | (7 - (o & 7));
+}
+
+/* short-term reference frames (sliding window; no long-term, no adaptive marking: refused below) */
+static struct { int used; u32 frame_num; } dpb[NSLOT];
+
+struct pic_result { u32 t_us, spins, d570, timeouts, save0, save1, hdr_bits; int dpfu; };
+
+/* one picture: the slice NAL (from its header byte) into the EVB, its header through the bit reader, the command block,
+ * the kick, and the wait for the last pixel. kick 0 stops before the kick (the ring is left for inspection). */
+static int decode_pic(const u8 *s, u32 len, const struct h264_sps *sps, const struct h264_pps *pps,
+                      const struct h264_slice *sh, int cur, const int *l0, int n0, int kick, u32 skip, struct pic_result *pr)
+{
     crumb(1);   /* bitstream into the EVB, emulation-prevention bytes removed (00 00 03 -> 00 00): the hardware does not
                    strip them (a noise frame desynced at once); eCos's start-code scanner presumably does on its copy */
     volatile u8 *d = (volatile u8 *)EVB_ADDR;
-    u32 wo = 0, zeros = 0, slice_out = 0;
+    u32 wo = 0, zeros = 0;
     for (u32 i = 0; i < len; i++) {
         u8 c = s[i];
-        if (i == slice_at)
-            slice_out = wo;
         if (!(skip & 128) && zeros >= 2 && c == 3 && i + 1 < len && s[i + 1] <= 3) {
             zeros = 0;
             continue;
@@ -314,15 +309,16 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
         d[wo + i] = 0;
     plat_sync(EVB_ADDR, wo + 64);
     u32 elen = wo + 64;
-    /* read the slice header through the bit reader, then capture the slice-data position (H264_SliceHeaderEnd) */
-    crumb(2);   /* slice header through the bit reader */
+    /* the slice header through the bit reader, then the slice-data position (H264_SliceHeaderEnd) */
+    crumb(2);
     dpfu_flag = (skip & 32) != 0;
-    int r = dpfu_start(slice_out, elen - slice_out);
-    for (u32 left = sh.data_bit_rbsp; left; ) {
+    pr->dpfu = dpfu_start(0, elen);
+    for (u32 left = sh->data_bit_rbsp; left; ) {
         u32 k = left > 31 ? 31 : left;
         rd((int)k);
         left -= k;
     }
+    pr->hdr_bits = sh->data_bit_rbsp;
     u32 save0 = M(0xd894), save1 = M(0xd898);
     M(0xd884) = 2u * (u32)dpfu_flag;   /* "stop" (0), or with flag 1 presumably hand over to the hardware */
     if (skip & 8) {   /* experiment: reset the DPFU before the engine reprograms it */
@@ -332,21 +328,20 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     }
     if (skip & 16)    /* experiment: the 0x20 flag every DPFU start value carries */
         save0 |= 0x20;
-    crumb(3);   /* frame buffers, BG2D */
-    /* frame buffers: fill with a marker so untouched memory shows */
-    for (u32 i = 0; i < FB_LUMA_N; i += 4)
-        *(volatile u32 *)(FB_LUMA + i) = 0x55555555;
-    for (u32 i = 0; i < FB_CHROMA_N; i += 4)
-        *(volatile u32 *)(FB_CHROMA + i) = 0x55555555;
-    plat_sync(FB_LUMA, FB_LUMA_N);
-    plat_sync(FB_CHROMA, FB_CHROMA_N);
-    u32 a380 = M(0xa380);   /* left alone: slot 0 (1920) is what the decoder uses, see FB_PITCH */
-    bg2d_set(IDX_LUMA, FB_LUMA, 1, 0);
-    bg2d_set(IDX_CHROMA, FB_CHROMA, 1, 0);
-    bg2d_set(IDX_MVC, FB_MVC, 1, 0);
+    pr->save0 = save0, pr->save1 = save1;
+    crumb(3);   /* BG2D, the completion marker */
+    /* completion: the status bits come back long before the macroblocks are done, so wait for the last pixel (bottom
+     * right) to leave a 0x55 marker. Only that byte is marked; if the picture's own value there is 0x55 the wait runs
+     * out (reported, harmless). */
+    volatile u8 *lastpx = (volatile u8 *)(SLOT_LUMA(cur) + tiled(sps->width - 1, sps->height - 1));
+    *lastpx = 0x55;
+    __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"((u32)lastpx & ~31u) : "memory");
+    bg2d_set(IDX_LUMA(cur), SLOT_LUMA(cur), 1, 0);
+    bg2d_set(IDX_CHROMA(cur), SLOT_CHROMA(cur), 1, 0);
+    bg2d_set(IDX_MVC(cur), SLOT_MVC(cur), 1, 0);
     bg2d_set(0x3b, WORK_3B, 0, 1);   /* working buffers keep the init layout bits ("scan type != 0"), gp 0 (0x431a70) */
     bg2d_set(0x3c, WORK_3C, 0, 1);
-    /* the slice's command block (notes/h264_fields.md "Test IDR command values") */
+    /* the slice's command block (notes/h264_decoder.md section 3.2) */
     ring_n = 0;
     if (!(skip & 1)) {   /* slice-data position: read from DPFU1 (D894/D898), handed to DPFU2 (D908/D90C), as eCos
                             0x43b302 does with ctx+0xAA45A = 1 (set by its decoder reset 0x4350c2); skip bit 64 = DPFU1 */
@@ -355,66 +350,62 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     }
     w16(0x9c00d018, 0);                               /* field_pic_flag */
     w16(0x9c00d01c, 1);                               /* !bottom_field_flag */
-    w16(0x9c00d090, sh.direct_spatial_mv_pred);
+    w16(0x9c00d090, sh->direct_spatial_mv_pred);
     w16(0x9c00d020, 0);                               /* MbaffFrameFlag */
-    w16(0x9c00d014, pps.constrained_intra_pred);
-    w16(0x9c00d080, sh.nal_ref_idc != 0);
-    w16(0x9c00d084, pps.entropy_coding_mode);
-    w16(0x9c00d010, ((u32)pps.chroma_qp_index_offset & 0x3f) | ((u32)pps.second_chroma_qp_index_offset & 0x3f) << 6);
-    w16(0x9c00d0a0, (u32)sh.qp);
-    w16(0x9c00d024, sh.slice_type);
-    w16(0x9c00d008, sps.mb_width);
-    w16(0x9c00d00c, sps.mb_height);
-    w16(0x9c00d088, sh.first_mb / sps.mb_width);
-    w16(0x9c00d08c, sh.first_mb % sps.mb_width);
-    w16(0x9c00d094, sh.num_ref_idx_l0 - 1);
+    w16(0x9c00d014, pps->constrained_intra_pred);
+    w16(0x9c00d080, sh->nal_ref_idc != 0);
+    w16(0x9c00d084, pps->entropy_coding_mode);
+    w16(0x9c00d010, ((u32)pps->chroma_qp_index_offset & 0x3f) | ((u32)pps->second_chroma_qp_index_offset & 0x3f) << 6);
+    w16(0x9c00d0a0, (u32)sh->qp);
+    w16(0x9c00d024, sh->slice_type);
+    w16(0x9c00d008, sps->mb_width);
+    w16(0x9c00d00c, sps->mb_height);
+    w16(0x9c00d088, sh->first_mb / sps->mb_width);
+    w16(0x9c00d08c, sh->first_mb % sps->mb_width);
+    w16(0x9c00d094, sh->num_ref_idx_l0 - 1);
     w16(0x9c00d098, 0xffff);                          /* l1 for non-B: S+0x39 - 1 with S+0x39 = 0 */
-    w16(0x9c00d0a4, 0);
-    w16(0x9c00d180, pps.weighted_pred);
-    w16(0x9c00d184, pps.weighted_bipred_idc);
+    w16(0x9c00d0a4, 0);                               /* <= 16 frame buffers, no list 1 */
+    w16(0x9c00d180, pps->weighted_pred);
+    w16(0x9c00d184, pps->weighted_bipred_idc);
     w16(0x9c00d188, 0);
     w16(0x9c00d18c, 0);
-    w16(0x9c00d800, sh.disable_deblocking);
-    w16(0x9c00d804, (u32)sh.alpha_offset);
-    w16(0x9c00d808, (u32)sh.beta_offset);
-    w32(0x9c00d028, 0x3bu << 24 | 0x3cu << 16 | IDX_MVC);
-    w16(0x9c00d02c, IDX_LUMA | IDX_CHROMA << 8);
-    w16(0x9c00d09c, sh.cabac_init_idc);
-    w16(0x9c00d004, (sps.profile_idc > 99) | (sps.chroma_format_idc & 3) << 1 | (pps.transform_8x8_mode & 1) << 3);
+    w16(0x9c00d800, sh->disable_deblocking);
+    w16(0x9c00d804, (u32)sh->alpha_offset);
+    w16(0x9c00d808, (u32)sh->beta_offset);
+    w32(0x9c00d028, 0x3bu << 24 | 0x3cu << 16 | (u32)IDX_MVC(cur));
+    w16(0x9c00d02c, (u32)(IDX_LUMA(cur) | IDX_CHROMA(cur) << 8));
+    w16(0x9c00d09c, sh->cabac_init_idc);
+    w16(0x9c00d004, (sps->profile_idc > 99) | (sps->chroma_format_idc & 3) << 1 | (pps->transform_8x8_mode & 1) << 3);
     if (!(skip & 4))
         for (u32 a = 0x9c00d190; a <= 0x9c00d19c; a += 4)
             w32(a, 0xffffffff);
     if (!(skip & 2)) {
-        put(0x2040003f);                              /* ref lists (empty for I) */
+        /* item 35: list 0 then list 1, 32 entries each, entry = luma index | chroma index << 8 (0x43b1c8..) */
+        put(0x2040003f);
         for (int i = 0; i < 64; i++)
-            put(0);
-        put(0x2000003f);                              /* inverse map */
+            put(i < n0 ? (u32)(IDX_LUMA(l0[i]) | IDX_CHROMA(l0[i]) << 8) : 0);
+        /* item 36: buffer index -> list position (0x43b15c..0x43b1c6: entry 2 * luma index + a field bit, the
+         * list scanned from the end so the first position wins). For frames the bit's meaning is open, so both
+         * entries of a frame get its position. */
+        u32 inv[64] = { 0 };
+        for (int i = n0 - 1; i >= 0; i--)
+            inv[2 * IDX_LUMA(l0[i])] = inv[2 * IDX_LUMA(l0[i]) + 1] = (u32)i;
+        put(0x2000003f);
         for (int i = 0; i < 64; i++)
-            put(0);
+            put(inv[i]);
     }
     put(0xf8000000);                                  /* end of slice */
     plat_sync(SPMP_ADDR, ring_n * 4);
-    if (!kick) {
-        crumb_clear();
-        return fmt(o, "vdec prepare: slice at %u (header %u bits), DPFU %d save %x/%x; ring %u words; DC84 %x ECA0 %x; "
-                      "A380 %x (was %x); idx00 %x idx14 %x idx2a %x",
-                   slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, M(0xdc84), M(0xeca0), M(0xa380), a380,
-                   M(0xa400), M(0xa400 + 4 * IDX_CHROMA), M(0xa400 + 4 * IDX_MVC));
-    }
-    crumb(4);   /* kick */
-    /* picture decode (h264_trigger_decode / real_decode_h264_video) */
-    u32 pre_dc84 = M(0xdc84), pre_eca0 = M(0xeca0);
-    crumb(40);
+    if (!kick)
+        return 0;
+    crumb(4);   /* kick: picture decode (h264_trigger_decode / real_decode_h264_video) */
     M(0xde6c) = 0x18;
-    crumb(41);
     M(0xd980) = 1;
     for (u32 a = 0xdb00; a <= 0xdb7c; a += 4)
         M(a) = 0;
     M(0xd980) = 0;
-    crumb(42);
     M(0xd0b4) = 0xfe;
     M(0xd034) = 1;
-    crumb(43);
     M(0xd924) = EVB_KB << 8 | IDX_EVB;
     M(0xd54c) = SPMP_KB << 8 | IDX_SPMP;
     M(0xd548) = 1;
@@ -423,78 +414,153 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
     M(0xd550) = 0;
     M(0xd554) = ring_n << 21 | 0;   /* first slice: length in words, start word 0 */
     M(0xd558) = 1;
-    crumb(44);
     M(0xd550) = 0;
-    unsigned long long t_kick_us = clk_us();
+    unsigned long long t_kick = clk_us();
     M(0xd550) = 1;
     crumb(45);
-    u32 tk0 = clk_ms();
     int k1 = poll(0xd550, 1, 1, 3000000);   /* eCos waits on this with no timeout; a whole slice may run first */
-    u32 tk1 = clk_ms();
-    CRUMB[11] = tk1 - tk0;
-    crumb(46);
     int k2 = k1 ? -1 : poll(0xd570, 1, 1, 3000000);
     crumb(47);
-    u32 d570 = M(0xd570);
+    pr->d570 = M(0xd570);
     M(0xd570) = 1;
     M(0xd550) = 0;
-    crumb(48);
     int k3 = k2 ? -1 : poll(0xdc84, 1, 1, 3000000);
-    /* the status bits above come back long before the macroblocks are done: time the decode by the last pixel
-     * (bottom right, tiled address) leaving its 0x55 marker */
-    u32 lx = sps.width - 1, ly = sps.height - 1, lst = ly / 64, xg = (lx / 16) % 4;
-    u32 lo = lst * FB_PITCH * 64 + (lx / 64) * 4096 + (((ly & 1) ^ (xg & 1) ^ (lst & 1)) * 0x800) + xg * 0x200 +
-             ((ly % 64) / 2) * 16 + (lx % 16);
-    lo = (lo & ~7u) | (7 - (lo & 7));
-    volatile u8 *lastpx = (volatile u8 *)(FB_LUMA + lo);
+    crumb(48);
     u32 spins = 0;
     for (; spins < 2000000; spins++) {
         __asm__ volatile("cctl %0, L1D_VA_INVAL\n\tmsync all" ::"r"((u32)lastpx & ~31u) : "memory");
         if (*lastpx != 0x55)
             break;
     }
-    u32 t_done = (u32)(clk_us() - t_kick_us);
+    pr->t_us = (u32)(clk_us() - t_kick);
+    pr->spins = spins;
+    pr->timeouts = (u32)(k1 & 1) | (u32)(k2 & 1) << 1 | (u32)(k3 & 1) << 2;
+    CRUMB[4] = pr->timeouts, CRUMB[5] = pr->d570;
     crumb(49);
-    /* results into the breadcrumb first (words 4..11), so a hang in what follows still leaves them */
-    CRUMB[4] = (u32)(k1 & 1) | (u32)(k2 & 1) << 1 | (u32)(k3 & 1) << 2, CRUMB[5] = d570;
-    crumb(50);
-    if (k1 || k2 || k3) {   /* stuck: its status registers stall the bus when read; reset it through MOON0 */
+    if (pr->timeouts) {   /* stuck: its status registers stall the bus when read; reset it through MOON0 */
         vdec_hw_reset();
-        crumb(54);
-        M(0xa380) = a380;
-        crumb_clear();
-        return fmt(o, "vdec decode (skip %x): TIMEOUT (start %d done %d end %d, D570 %x, start wait %u ms); decoder reset through MOON0, init again",
-                   skip, k1, k2, k3, d570, CRUMB[11]);
+        return -1;
     }
-    u32 st000 = M(0xd000);
-    CRUMB[6] = st000;
-    crumb(51);
-    u32 st04c = M(0xd04c), st0ac = M(0xd0ac), st55c = M(0xd55c), st558 = M(0xd558), st904 = M(0xd904), stc84 = M(0xdc84);
-    CRUMB[7] = st04c, CRUMB[8] = st55c, CRUMB[9] = stc84, CRUMB[10] = st0ac;
-    crumb(52);
-    if (k1 || k2 || k3)
-        soft_reset();   /* the decoder's own reset; asserting its reset lines mid-DMA locked the bus (2026-11-01) */
-    crumb(53);
-    M(0xa380) = a380;
-    crumb(5);   /* reading back */
-    cache_inval(FB_LUMA, FB_LUMA_N);
-    cache_inval(FB_CHROMA, FB_CHROMA_N);
-    /* how much of the luma plane changed, and its first bytes */
-    u32 changed = 0, sum = 0;
-    for (u32 i = 0; i < FB_LUMA_N; i += 4) {
-        u32 v = *(volatile u32 *)(FB_LUMA + i);
-        changed += v != 0x55555555;
-        sum += (v & 0xff) + (v >> 8 & 0xff) + (v >> 16 & 0xff) + (v >> 24);
-    }
-    vdec_stats.decodes++;
-    crumb_clear();
-    return fmt(o, "vdec decode (skip %x) in %u us: slice at %u (header %u bits), DPFU %d save %x/%x; ring %u words; pre DC84 %x ECA0 %x; "
-                  "start %s, done %s (D570 %x), picture end %s; D000 %x D04C %x D0AC %x D55C %x D558 %x D904 %x DC84 %x; "
-                  "luma words changed %u of %u, mean %u; first %08x %08x",
-               skip, t_done, slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, pre_dc84, pre_eca0, k1 ? "TIMEOUT" : "ok",
-               k2 ? "TIMEOUT" : "ok", d570, k3 ? "TIMEOUT" : "ok", st000, st04c, st0ac, st55c, st558, st904, stc84,
-               changed, FB_LUMA_N / 4, sum / FB_LUMA_N, *(volatile u32 *)FB_LUMA, *(volatile u32 *)(FB_LUMA + 4));
+    return 0;
 }
+
+static int frame_num_wrap(u32 fn, u32 cur_fn, u32 max_fn) { return fn > cur_fn ? (int)fn - (int)max_fn : (int)fn; }
+
+/* Decode the access units in [src, src + len): SPS/PPS update the parameters, each slice NAL is one picture. maxpics 0:
+ * all. The last picture stays in its slot for reading back (the reply names the addresses). */
+int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32 maxpics)
+{
+    if (!inited)
+        return fmt(o, "ERR vdec: init first");
+    if (len < 16 || len > 0x400000)
+        return fmt(o, "ERR vdec: 16 bytes .. 4 MB");
+    const u8 *s = (const u8 *)src;
+    struct h264_sps sps = { 0 };
+    struct h264_pps pps = { 0 };
+    u32 pos = 0, st, nl, pics = 0, t_sum = 0, t_max = 0;
+    int last = -1, k = fmt(o, "vdec decode (skip %x):", skip);
+    u32 a380 = M(0xa380);   /* left alone: slot 0 (1920) is what the decoder uses, see FB_PITCH */
+    for (int i = 0; i < NSLOT; i++)
+        dpb[i].used = 0;
+    while (h264_next_nal(s, len, &pos, &st, &nl)) {
+        int t = s[st] & 31;
+        if (t == 7) {
+            if (h264_parse_sps(s + st, nl, &sps))
+                return k + fmt(o + k, " ERR SPS");
+            continue;
+        }
+        if (t == 8) {
+            if (h264_parse_pps(s + st, nl, &pps))
+                return k + fmt(o + k, " ERR PPS");
+            continue;
+        }
+        if (t != 5 && t != 1)
+            continue;
+        struct h264_slice sh = { 0 };
+        if (!sps.width || h264_parse_slice(s + st, nl, &sps, &pps, &sh))
+            return k + fmt(o + k, " ERR slice %u unparsed", pics);
+        if (sh.first_mb)
+            return k + fmt(o + k, " ERR picture %u has several slices (not yet)", pics);
+        if (sh.slice_type != 0 && sh.slice_type != 2)
+            return k + fmt(o + k, " ERR picture %u: slice type %u (only I and P)", pics, sh.slice_type);
+        if (sh.ref_list_mod || sh.adaptive_marking || sh.long_term_ref)
+            return k + fmt(o + k, " ERR picture %u: list modification / adaptive or long-term marking (not yet)", pics);
+        if (sps.width > 960 || sps.height > 512)
+            return k + fmt(o + k, " ERR %ux%u is larger than the slots", sps.width, sps.height);
+        if (t == 5)
+            for (int i = 0; i < NSLOT; i++)
+                dpb[i].used = 0;
+        /* list 0: short-term frames by descending FrameNumWrap (8.2.4.2.1) */
+        u32 max_fn = 1u << sps.log2_max_frame_num;
+        int l0[NSLOT], n0 = 0;
+        for (int i = 0; i < NSLOT; i++)
+            if (dpb[i].used) {
+                int w = frame_num_wrap(dpb[i].frame_num, sh.frame_num, max_fn), j = n0++;
+                for (; j > 0 && frame_num_wrap(dpb[l0[j - 1]].frame_num, sh.frame_num, max_fn) < w; j--)
+                    l0[j] = l0[j - 1];
+                l0[j] = i;
+            }
+        if (sh.slice_type == 0 && !n0)
+            return k + fmt(o + k, " ERR picture %u: P without a reference", pics);
+        if (n0 > (int)sh.num_ref_idx_l0 && sh.slice_type == 0)
+            n0 = (int)sh.num_ref_idx_l0;
+        int cur = 0;
+        while (cur < NSLOT && dpb[cur].used)
+            cur++;
+        if (cur == NSLOT)
+            return k + fmt(o + k, " ERR no free slot");
+        struct pic_result pr = { 0 };
+        int r = decode_pic(s + st, nl, &sps, &pps, &sh, cur, l0, sh.slice_type == 0 ? n0 : 0, kick, skip, &pr);
+        M(0xa380) = a380;
+        if (!kick) {
+            crumb_clear();
+            return k + fmt(o + k, " prepared picture %u (header %u bits, DPFU %d, save %x/%x, ring %u words, slot %d, %d refs)",
+                           pics, pr.hdr_bits, pr.dpfu, pr.save0, pr.save1, ring_n, cur, n0);
+        }
+        if (r) {
+            crumb_clear();
+            return k + fmt(o + k, " picture %u TIMEOUT (start/done/end bits %x, D570 %x); decoder reset through MOON0, init again",
+                           pics, pr.timeouts, pr.d570);
+        }
+        if (pics < 24)
+            k += fmt(o + k, " %c%u/s%d/%u", sh.slice_type ? 'I' : 'P', sh.frame_num, cur, pr.t_us);
+        if (pr.spins >= 2000000)
+            k += fmt(o + k, "(marker)");
+        t_sum += pr.t_us;
+        if (pr.t_us > t_max)
+            t_max = pr.t_us;
+        if (sh.nal_ref_idc) {   /* sliding window */
+            u32 nmax = sps.num_ref_frames ? sps.num_ref_frames : 1, nused = 0;
+            for (int i = 0; i < NSLOT; i++)
+                nused += dpb[i].used;
+            if (nmax > NSLOT - 1)
+                nmax = NSLOT - 1;
+            while (nused >= nmax) {
+                int old = -1;
+                for (int i = 0; i < NSLOT; i++)
+                    if (dpb[i].used && (old < 0 || frame_num_wrap(dpb[i].frame_num, sh.frame_num, max_fn) <
+                                                       frame_num_wrap(dpb[old].frame_num, sh.frame_num, max_fn)))
+                        old = i;
+                dpb[old].used = 0;
+                nused--;
+            }
+            dpb[cur].used = 1, dpb[cur].frame_num = sh.frame_num;
+        }
+        last = cur;
+        pics++;
+        vdec_stats.decodes++;
+        if (maxpics && pics >= maxpics)
+            break;
+    }
+    crumb_clear();
+    if (last < 0)
+        return k + fmt(o + k, " ERR no picture");
+    cache_inval(SLOT_LUMA(last), FB_LUMA_N);
+    cache_inval(SLOT_CHROMA(last), FB_CHROMA_N);
+    return k + fmt(o + k, "; %u pictures (us each, mean %u, max %u); last in slot %d: luma %x chroma %x", pics,
+                   t_sum / pics, t_max, last, SLOT_LUMA(last), SLOT_CHROMA(last));
+}
+
 
 /* SPMP engine alone: a command block of 16-bit and 32-bit writes to the weight-denominator / SPAR result registers
  * (harmless outside a decode) and the end marker; kick it like a picture and read the registers back. */

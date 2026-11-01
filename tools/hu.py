@@ -234,6 +234,7 @@ def main():
     p.add_argument('channel', nargs='?', type=int); p.add_argument('ssid', nargs='?'); p.add_argument('psk', nargs='?')
     p = sub.add_parser('vdec', help='hardware H.264 decoder bring-up: status | init | bitread FILE.h264')
     p.add_argument('what', choices=['status', 'init', 'bitread', 'decode', 'spmp', 'prepare']); p.add_argument('file', nargs='?')
+    p.add_argument('--pics', type=int, default=1, help='decode: pictures to decode (0: all)'); p.add_argument('--skip', type=lambda x: int(x, 0), default=0)
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -336,7 +337,7 @@ def main():
         if a.what in ('bitread', 'decode', 'prepare'):   # upload the access unit, then run it through the decoder
             data = open(a.file, 'rb').read()
             u.write(LOAD_ADDR, data)
-            print(u.call(OP_VDEC, struct.pack('<BII', {'bitread': 2, 'decode': 3, 'prepare': 5}[a.what], LOAD_ADDR, len(data))).decode(errors='replace'))
+            print(u.call(OP_VDEC, struct.pack('<BIIBB', {'bitread': 2, 'decode': 3, 'prepare': 5}[a.what], LOAD_ADDR, len(data), a.skip, a.pics)).decode(errors='replace'))
         else:
             print(u.call(OP_VDEC, bytes([{'status': 0, 'init': 1, 'spmp': 4}[a.what]])).decode(errors='replace'))
     elif a.op == 'op':

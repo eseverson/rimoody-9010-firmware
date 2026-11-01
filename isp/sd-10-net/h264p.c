@@ -242,11 +242,13 @@ int h264_parse_slice(const u8 *nal, u32 n, const struct h264_sps *s, const struc
         }
     }
     h->long_term_ref = 0;
+    h->adaptive_marking = 0;
     if (h->nal_ref_idc) {   /* dec_ref_pic_marking */
         if (h->nal_type == 5) {
             u1(&b);   /* no_output_of_prior_pics */
             h->long_term_ref = u1(&b);
         } else if (u1(&b)) {   /* adaptive marking */
+            h->adaptive_marking = 1;
             u32 op;
             while ((op = ue(&b)) != 0 && !b.err) {
                 if (op == 1 || op == 3)
