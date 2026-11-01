@@ -19,3 +19,8 @@
 1. Use touch events for something: e.g. buttons -> MCU volume/mode frames (only known-safe frames), or a touch-driven console page.
 2. If the haze recurs after a power cut: trace the stock shutdown (backlight `EE FF`, panel power) and replicate before deliberate resets.
 3. Remaining backlog: 172901 heap-corruption crash (likely the vfmt overflow, now fixed), register walk paused at 0x9c000F00, audio DSP.
+
+## 2026-10-31 late
+- Android Auto: own stack chosen (notes/android_auto.md); TLS, AA protocol core, H.264 header parser done and host-tested; decoder mapped (notes/h264_decoder.md), bring-up waiting on the unit.
+- SD/FAT: driver + FatFs behind HU1 op 17 verified live; boot-time use reverted after the unit went offline; fix (scheduler suspended per block) built, untested.
+- Unit offline: needs a power cycle (card = 202707, good).

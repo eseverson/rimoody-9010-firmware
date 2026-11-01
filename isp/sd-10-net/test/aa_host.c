@@ -1,5 +1,6 @@
 /* Run aa.c + aa_tls.c against a real phone from a PC (libusb), before the head unit's phone port works:
  *   aa_host VID:PID|any CERT.pem KEY.pem [seconds] [video.h264]
+ * Build (in test/): gcc -O1 -DAA_TLS_HOST -I.. -I../mbedtls/include '-DMBEDTLS_CONFIG_FILE="aa_tls_config.h"' -o aa_host aa_host.c ../aa.c ../aa_tls.c ../mbedtls/library/*.c -lusb-1.0
  * Switches the phone to Android accessory mode (AOA) if needed, then speaks the AA protocol, logging every state
  * change and saving the H.264 stream. The certificate and key are read from files at run time, never built in. */
 #include "../aa.h"
