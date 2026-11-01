@@ -89,3 +89,12 @@ Consequences for the plan: the USB phone port and AOA work is dropped (`test/aa_
 - Decoder bring-up: `source tools/hu.env && tools/vdec_probe.py` (step 1, read-only), then steps 2..6 of notes/h264_decoder.md section 6.
 - AA protocol: an Android phone on the PC: `cd isp/sd-10-net/test && gcc ... aa_host` (build line in the aa_host.c header comment) then `./aa_host any <cert> <key> 60 out.h264`.
 - Phone port: phone plugged into the unit, read PORTSC of EHCI0 (0x9C102164) and EHCI1.
+
+## Bluetooth RFCOMM through the AC6965A (Haiku map of eCos, 2026-10-31, unverified)
+- RFCOMM runs over the same MCU link as `AC`-prefixed frames (built by 0x31DDF8, sent through 0x31D6D4 / McuCmd). **`ac` is on the banned-frame list: nothing sends an AC frame without the owner's explicit go-ahead.**
+- Out: `RFCOMM_IF_sendData` 0x388918 splits payloads into 50-byte chunks, `AC 2a <len> <handle> <data>` for all but the last, `AC 2b <len> <handle> <data>` for the last (50 ms between chunks).
+- In: chunks `[len][data]` collected by 0x385EA2 (`RFCOMM_DATA_PARSER_IND`) / 0x385EF2 (`END`) into a 256-byte ring; channel state 2 (AA, set beside "wifi AndroidAuto on") hands them to the AA middleware. The inbound frame type that carries them is not identified yet.
+- Connect event (0x3866EC `RFCOMM_CONNECT`): rfc_info +0x0A handle (u32 LE), +0x12 the 16-byte service UUID; the AA UUID constant sits at 0x6C021C. No SoC-to-chip frame carrying the UUID was found: the Jieli firmware probably advertises the AA service itself. After connect eCos sends `AC 29 04 <handle4>`.
+- Stock AA TCP endpoint: IP 192.168.0.1, port 8765 (0x3927C8).
+- Other BT commands go through a selector (0x3887D0) using a flash table near 0x984ACE80; its layout is not decoded yet (the bytes there are 8-byte index/value pairs).
+- Next: watch the MCU link (receive only) while a phone pairs and starts wireless AA under stock firmware, if the stock firmware can be booted with our UART tap; otherwise decode the inbound dispatch.
