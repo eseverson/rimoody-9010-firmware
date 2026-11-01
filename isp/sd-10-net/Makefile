@@ -35,13 +35,17 @@ NET.BIN: net.elf
 
 # host tests (plain gcc + python3 with the `cryptography` package)
 HOSTCC ?= gcc
-test: test/crypto_host test/wpa_host test/ip_host test/mcu_host test/con_host test/h264p_host
+test: test/crypto_host test/wpa_host test/ip_host test/mcu_host test/con_host test/h264p_host test/lwiptcp_host
 	cd test && python3 -I test_crypto.py ./crypto_host && python3 -I test_wpa.py ./wpa_host && \
 	  python3 -I test_ip.py ./ip_host && python3 -I test_mcu.py ./mcu_host && \
-	  python3 -I test_console.py ./con_host && python3 -I test_h264p.py ./h264p_host && ./test_tls.sh
+	  python3 -I test_console.py ./con_host && python3 -I test_h264p.py ./h264p_host && ./lwiptcp_host && ./test_tls.sh
 
 test/%_host: test/%_host.c h264p.c h264p.h crypto.c crypto.h wpa.c wpa.h ip.c ip.h mcu.c mcu.h console.c console.h font8x16.h
 	$(HOSTCC) -O2 -Wall -Wextra -o $@ $<
 
 clean:
 	rm -f net.elf NET.BIN net.dis net.map tramp.elf TRAMP.BIN tramp.dis tramp.map test/*_host
+
+LWIP_SRC := $(wildcard lwip/src/core/*.c lwip/src/core/ipv4/*.c) lwip/src/netif/ethernet.c
+test/lwiptcp_host: test/lwiptcp.c lwip/lwipopts.h $(LWIP_SRC)
+	$(HOSTCC) -O2 -w -Ilwip -Ilwip/arch -Ilwip/src/include -o $@ test/lwiptcp.c $(LWIP_SRC)

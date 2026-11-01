@@ -1,0 +1,1 @@
+lwIP 2.2.0 (download.savannah.nongnu.org/releases/lwip/lwip-2.2.0.zip, sha256 e12c769be5a1da9a1edf1b8f38d645c6c87d52a26a636172cea4b8c63ec04994): src/core (no ipv6), src/include, src/netif/ethernet.c, unmodified; configured by lwipopts.h, port in arch/
