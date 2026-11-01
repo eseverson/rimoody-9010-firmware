@@ -1680,16 +1680,33 @@ static void save_own_log(char tag)
     save_log(name);
 }
 
+/* consecutive failed boots, in RAM that survives a reset (cleared once online): sets the wait before the next try */
+#define FAIL_COUNT ((volatile u32 *)0x01F0F040u)
+#define FAIL_MAGIC 0x4641494cu   /* "FAIL" */
+static u32 fail_count(void) { return FAIL_COUNT[0] == FAIL_MAGIC && FAIL_COUNT[1] < 100 ? FAIL_COUNT[1] : 0; }
+static void fail_count_set(u32 n)
+{
+    FAIL_COUNT[0] = n ? FAIL_MAGIC : 0, FAIL_COUNT[1] = n;
+    __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(0x01F0F040u) : "memory");
+}
+
+/* A failure that would otherwise end the payload (and with it the MCU heartbeat: the MCU then cuts power). Never
+ * stays offline for good (2026-11-01: a unit that stayed up without the network all night could only be reached by
+ * hand): reset at once the first time, then wait 1, 2, 4 .. 30 minutes with the error on screen before each retry. */
 static void fail_or_stay(unsigned int vec, const char *why)
 {
-    lprintf("FAILURE: %s%s\n", why, exec_trial || !prev_boot_failed ? ", resetting" : ", staying up without the network");
+    u32 n = fail_count();
+    u32 wait_s = exec_trial || n == 0 ? 0 : (60u << (n - 1 > 5 ? 5 : n - 1));
+    if (wait_s > 1800)
+        wait_s = 1800;
+    fail_count_set(n + 1);
+    lprintf("FAILURE: %s (failure %u in a row), resetting%s%u s\n", why, n + 1, wait_s ? " in " : " now ", wait_s);
     save_own_log('F');
-    if (exec_trial || !prev_boot_failed)
-        irq_fail_reset(vec);
-    for (;;) {
+    for (u32 t = 0; t < wait_s; t++) {
         irq_pet();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+    irq_fail_reset(vec);
 }
 
 static int load_config(void)
@@ -2855,6 +2872,7 @@ void plat_ip_event(cu32 ip, cu32 mask, cu32 router, int how)
     if (exec_trial && !net_online)
         lprintf("probation passed: online %u ms after start\n", ub_ms(0) - net_task_t0);
     net_online = 1;
+    fail_count_set(0);
     char *p = HELLO_BUF;
     p += vfmt_n(p, "ip=");
     p += ip_fmt_addr(p, ip);
@@ -3259,10 +3277,10 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             return vdec_init(t, vfmt_n);
         if (c == 2 && n >= 9)
             return vdec_bitread(le32(p + 1), le32(p + 5), t, vfmt_n);
-        if (c == 3 && n >= 9)
-            return vdec_decode(le32(p + 1), le32(p + 5), t, vfmt_n);
+        if ((c == 3 || c == 5) && n >= 9)
+            return vdec_decode(le32(p + 1), le32(p + 5), t, vfmt_n, c == 3, n >= 10 ? p[9] : 0);
         if (c == 4)
-            return vdec_spmp_test(t, vfmt_n);
+            return vdec_spmp_test(t, vfmt_n, n >= 2 ? p[1] : 0);
         return vdec_status(t, vfmt_n);
     }
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */

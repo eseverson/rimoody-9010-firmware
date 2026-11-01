@@ -31,7 +31,8 @@ struct vdec_stats vdec_stats;
 static void crumb(u32 step)
 {
     CRUMB[0] = CRUMB_MAGIC, CRUMB[1] = step, CRUMB[2] = CRUMB[2] + 1;
-    __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(0x01F0F000u) : "memory");
+    __asm__ volatile("cctl %0, L1D_VA_WB\n\tcctl %1, L1D_VA_WB\n\tmsync all" ::"r"(0x01F0F000u), "r"(0x01F0F020u)
+                     : "memory");
 }
 static void crumb_clear(void) { CRUMB[0] = 0; __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(0x01F0F000u) : "memory"); }
 
@@ -41,7 +42,8 @@ int vdec_crumb_report(char *o, vdec_fmt fmt)   /* at boot: a step left behind by
         return 0;
     u32 step = CRUMB[1];
     crumb_clear();
-    return fmt(o, "vdec: the previous run stopped during step %u (see vdec.c crumb() calls)\n", step);
+    return fmt(o, "vdec: the previous run stopped during step %u (timeouts %x D570 %x D000 %x D04C %x D55C %x DC84 %x D0AC %x)\n",
+               step, CRUMB[4], CRUMB[5], CRUMB[6], CRUMB[7], CRUMB[8], CRUMB[9], CRUMB[10]);
 }
 
 /* hold the MFD in reset and release it (eCos 0x432dfa): stops a runaway engine */
@@ -258,7 +260,7 @@ static void cache_inval(u32 a, u32 n)   /* L1D_VA_INVAL over a range (the decode
     __asm__ volatile("msync all" ::: "memory");
 }
 
-int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
+int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip)
 {
     if (!inited)
         return fmt(o, "ERR vdec: init first");
@@ -299,6 +301,13 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
     }
     u32 save0 = M(0xd894), save1 = M(0xd898);
     M(0xd884) = 0;   /* stop */
+    if (skip & 8) {   /* experiment: reset the DPFU before the engine reprograms it */
+        poll(0xd8a0, 0xc, 0, 0x1f5 * 16);
+        M(0xd8a0) = 1;
+        M(0xd8a0) = 0;
+    }
+    if (skip & 16)    /* experiment: the 0x20 flag every DPFU start value carries */
+        save0 |= 0x20;
     crumb(3);   /* frame buffers, BG2D */
     /* frame buffers: fill with a marker so untouched memory shows */
     for (u32 i = 0; i < 0x70000; i += 4)
@@ -317,8 +326,10 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
     bg2d_set(0x3c, WORK_3C, 0, 0);
     /* the slice's command block (notes/h264_fields.md "Test IDR command values") */
     ring_n = 0;
-    w32(0x9c00d888, save0);
-    w32(0x9c00d88c, save1);
+    if (!(skip & 1)) {
+        w32(0x9c00d888, save0);
+        w32(0x9c00d88c, save1);
+    }
     w16(0x9c00d018, 0);                               /* field_pic_flag */
     w16(0x9c00d01c, 1);                               /* !bottom_field_flag */
     w16(0x9c00d090, sh.direct_spatial_mv_pred);
@@ -347,26 +358,40 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
     w16(0x9c00d02c, IDX_LUMA | IDX_CHROMA << 8);
     w16(0x9c00d09c, sh.cabac_init_idc);
     w16(0x9c00d004, (sps.profile_idc > 99) | (sps.chroma_format_idc & 3) << 1 | (pps.transform_8x8_mode & 1) << 3);
-    for (u32 a = 0x9c00d190; a <= 0x9c00d19c; a += 4)
-        w32(a, 0xffffffff);
-    put(0x2040003f);                                  /* ref lists (empty for I) */
-    for (int i = 0; i < 64; i++)
-        put(0);
-    put(0x2000003f);                                  /* inverse map */
-    for (int i = 0; i < 64; i++)
-        put(0);
+    if (!(skip & 4))
+        for (u32 a = 0x9c00d190; a <= 0x9c00d19c; a += 4)
+            w32(a, 0xffffffff);
+    if (!(skip & 2)) {
+        put(0x2040003f);                              /* ref lists (empty for I) */
+        for (int i = 0; i < 64; i++)
+            put(0);
+        put(0x2000003f);                              /* inverse map */
+        for (int i = 0; i < 64; i++)
+            put(0);
+    }
     put(0xf8000000);                                  /* end of slice */
     plat_sync(SPMP_ADDR, ring_n * 4);
+    if (!kick) {
+        crumb_clear();
+        return fmt(o, "vdec prepare: slice at %u (header %u bits), DPFU %d save %x/%x; ring %u words; DC84 %x ECA0 %x; "
+                      "A380 %x (was %x); idx00 %x idx14 %x idx2a %x",
+                   slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, M(0xdc84), M(0xeca0), M(0xa380), a380,
+                   M(0xa400), M(0xa400 + 4 * IDX_CHROMA), M(0xa400 + 4 * IDX_MVC));
+    }
     crumb(4);   /* kick */
     /* picture decode (h264_trigger_decode / real_decode_h264_video) */
     u32 pre_dc84 = M(0xdc84), pre_eca0 = M(0xeca0);
+    crumb(40);
     M(0xde6c) = 0x18;
+    crumb(41);
     M(0xd980) = 1;
     for (u32 a = 0xdb00; a <= 0xdb7c; a += 4)
         M(a) = 0;
     M(0xd980) = 0;
+    crumb(42);
     M(0xd0b4) = 0xfe;
     M(0xd034) = 1;
+    crumb(43);
     M(0xd924) = EVB_KB << 8 | IDX_EVB;
     M(0xd54c) = SPMP_KB << 8 | IDX_SPMP;
     M(0xd548) = 1;
@@ -375,18 +400,40 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
     M(0xd550) = 0;
     M(0xd554) = ring_n << 21 | 0;   /* first slice: length in words, start word 0 */
     M(0xd558) = 1;
+    crumb(44);
     M(0xd550) = 0;
     M(0xd550) = 1;
+    crumb(45);
     int k1 = poll(0xd550, 1, 1, 20000);
+    crumb(46);
     int k2 = k1 ? -1 : poll(0xd570, 1, 1, 200000);
+    crumb(47);
     u32 d570 = M(0xd570);
     M(0xd570) = 1;
     M(0xd550) = 0;
+    crumb(48);
     int k3 = k2 ? -1 : poll(0xdc84, 1, 1, 200000);
-    u32 st000 = M(0xd000), st04c = M(0xd04c), st0ac = M(0xd0ac), st55c = M(0xd55c), st558 = M(0xd558), st904 = M(0xd904),
-        stc84 = M(0xdc84);
+    crumb(49);
+    /* results into the breadcrumb first (words 4..11), so a hang in what follows still leaves them */
+    CRUMB[4] = (u32)(k1 & 1) | (u32)(k2 & 1) << 1 | (u32)(k3 & 1) << 2, CRUMB[5] = d570;
+    crumb(50);
+    if (k1 || k2 || k3) {   /* stuck: its status registers stall the bus when read; reset it through MOON0 */
+        vdec_hw_reset();
+        crumb(54);
+        M(0xa380) = a380;
+        crumb_clear();
+        return fmt(o, "vdec decode (skip %x): TIMEOUT (start %d done %d end %d, D570 %x); decoder reset through MOON0, init again",
+                   skip, k1, k2, k3, d570);
+    }
+    u32 st000 = M(0xd000);
+    CRUMB[6] = st000;
+    crumb(51);
+    u32 st04c = M(0xd04c), st0ac = M(0xd0ac), st55c = M(0xd55c), st558 = M(0xd558), st904 = M(0xd904), stc84 = M(0xdc84);
+    CRUMB[7] = st04c, CRUMB[8] = st55c, CRUMB[9] = stc84, CRUMB[10] = st0ac;
+    crumb(52);
     if (k1 || k2 || k3)
-        vdec_hw_reset();   /* not finished in a short bound: stop the engine ourselves */
+        soft_reset();   /* the decoder's own reset; asserting its reset lines mid-DMA locked the bus (2026-11-01) */
+    crumb(53);
     M(0xa380) = a380;
     crumb(5);   /* reading back */
     cache_inval(FB_LUMA, 0x70000);
@@ -400,17 +447,17 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
     }
     vdec_stats.decodes++;
     crumb_clear();
-    return fmt(o, "vdec decode: slice at %u (header %u bits), DPFU %d save %x/%x; ring %u words; pre DC84 %x ECA0 %x; "
+    return fmt(o, "vdec decode (skip %x): slice at %u (header %u bits), DPFU %d save %x/%x; ring %u words; pre DC84 %x ECA0 %x; "
                   "start %s, done %s (D570 %x), picture end %s; D000 %x D04C %x D0AC %x D55C %x D558 %x D904 %x DC84 %x; "
                   "luma words changed %u of %u, mean %u; first %08x %08x",
-               slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, pre_dc84, pre_eca0, k1 ? "TIMEOUT" : "ok",
+               skip, slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, pre_dc84, pre_eca0, k1 ? "TIMEOUT" : "ok",
                k2 ? "TIMEOUT" : "ok", d570, k3 ? "TIMEOUT" : "ok", st000, st04c, st0ac, st55c, st558, st904, stc84,
                changed, 0x70000 / 4, sum / 0x70000, *(volatile u32 *)FB_LUMA, *(volatile u32 *)(FB_LUMA + 4));
 }
 
 /* SPMP engine alone: a command block of 16-bit and 32-bit writes to the weight-denominator / SPAR result registers
  * (harmless outside a decode) and the end marker; kick it like a picture and read the registers back. */
-int vdec_spmp_test(char *o, vdec_fmt fmt)
+int vdec_spmp_test(char *o, vdec_fmt fmt, u32 extras)
 {
     if (!inited)
         return fmt(o, "ERR vdec: init first");
@@ -423,6 +470,23 @@ int vdec_spmp_test(char *o, vdec_fmt fmt)
     put(0xf8000000);
     plat_sync(SPMP_ADDR, ring_n * 4);
     M(0xd188) = 0, M(0xd18c) = 0, M(0xd190) = 0, M(0xd194) = 0;
+    /* the picture-only pre-kick writes of real_decode_h264_video, by bit, to find the one that stops the engine */
+    crumb(12);
+    if (extras & 1)
+        M(0xde6c) = 0x18;
+    if (extras & 2) {
+        M(0xd980) = 1;
+        for (u32 a2 = 0xdb00; a2 <= 0xdb7c; a2 += 4)
+            M(a2) = 0;
+        M(0xd980) = 0;
+    }
+    if (extras & 4)
+        M(0xd0b4) = 0xfe;
+    if (extras & 8)
+        M(0xd034) = 1;
+    if (extras & 16)
+        M(0xd924) = EVB_KB << 8 | IDX_EVB;
+    crumb(13);
     M(0xd54c) = SPMP_KB << 8 | IDX_SPMP;
     M(0xd548) = 1;
     M(0xd048) = 1, M(0xd1a4) = 0, M(0xd558) = 0, M(0xd55c) = 0, M(0xd564) = 0;
@@ -440,11 +504,11 @@ int vdec_spmp_test(char *o, vdec_fmt fmt)
     M(0xd550) = 0;
     u32 a = M(0xd188), b = M(0xd18c), c = M(0xd190), d = M(0xd194), n55c = M(0xd55c);
     if (k1 || k2)
-        vdec_hw_reset();
+        soft_reset();
     crumb_clear();
     int ok = a == 5 && b == 3 && c == 0x12345678 && d == 0x9abcdef0;
-    return fmt(o, "vdec spmp: start %s, done %s (D570 %x, D55C %x); D188 %x D18C %x D190 %x D194 %x -> %s",
-               k1 ? "TIMEOUT" : "ok", k2 ? "TIMEOUT" : "ok", d570, n55c, a, b, c, d, ok ? "REGISTERS LOADED" : "not loaded");
+    return fmt(o, "vdec spmp (extras %x): start %s, done %s (D570 %x, D55C %x); D188 %x D18C %x D190 %x D194 %x -> %s",
+               extras, k1 ? "TIMEOUT" : "ok", k2 ? "TIMEOUT" : "ok", d570, n55c, a, b, c, d, ok ? "REGISTERS LOADED" : "not loaded");
 }
 
 int vdec_status(char *o, vdec_fmt fmt)
