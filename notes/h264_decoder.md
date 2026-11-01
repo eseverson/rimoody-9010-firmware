@@ -379,3 +379,6 @@ Shortcut worth trying before step 4: values for the variable registers could be 
    - Whether DMIX mode 1 hides VPP0.
    - The 0x9C005784 init bits and the 0x9C005A80 / 0x9C006080 blocks.
    - Whether an explicit latch is needed outside the field-end ISR.
+
+## Bring-up log
+- 2026-11-01, step 1 (`tools/vdec_probe.py`, build 20261101-021107 under U-Boot's setup): MOON0 0x9C000004..0x9C000020 read 0xFFFF in the low halves (all clock IDs the MFD path may need are on: 5A, 64, 66, 69, 71); every MFD reset ID released. MFD registers readable without a bus stall: D000 0, D04C 4, D0AC 0, DC84 1 (picture end), D550 1, D570 0, D704 4, D8A0 0, D920 0 (idle). BG2D 0x9C00A380.. holds pitch/swizzle-looking constants (78787878, 83828100, ...); the index table 0x9C00A400 is random (uninitialized SRAM), so step 2 must program it.
