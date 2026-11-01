@@ -124,3 +124,14 @@ Consequences for the plan: the USB phone port and AOA work is dropped (`test/aa_
 - Throughput: first 3.1 Mbit/s / 25 fps. Profiling (`hu.py usb status` net-loop profile, `hu.py aa status` decrypt/video times, a dumpcap trace showing ~30 ms per frame with no TCP ACKs) found **AES-256-GCM in software was 7.3 s of 12 s**. Now ChaCha20-Poly1305 is offered first, then AES-128-GCM, mbedtls is built at -O2 with GCM_LARGE_TABLE and word-wise memcpy: **ChaCha20 67 fps / 8.3 Mbit/s** (decrypt 1.1 s), AES-128-GCM 38 fps / 4.8 Mbit/s (issue #3: still slow if a phone picks AES). The single queued USB bulk IN also let the dongle's RX FIFO overflow while the CPU decrypted (TCP retransmits); ehci.c now keeps a ring of 32 queued INs.
 - Remaining for a real phone: Bluetooth RFCOMM through the AC6965A (`AC 2a/2b/29 04`, aa_wl.c is ready) to hand the phone our AP's SSID/key/IP/port; then display (VPP0), touch to `aa_touch`, audio.
 
+
+## Bluetooth command map (Haiku pass over eCos, 2026-11-01, unverified)
+
+- Every `AC` frame comes from the selector 0x3887d0(cmd, arg). It reads a class byte from flash 0x984ACE80 + cmd*8 + 4 (dump offset 0x4ACE80; cmds 0..59). Class 0 = nothing sent; classes 06/0D/18/19/20/25 send `AC class len string` (0x31dd16); class 1C sends 6 data bytes (0x31dd76); every other class sends `AC class` (0x31dcf0). Direct callers also send `AC 22 str` (0x352218, 0x3522e8, 0x35237e, 0x367eec) and `AC 21 n data` (0x38af54, 0x38d7ca, 0x38d93e).
+- cmd 0x22 -> `AC 19 "CAR-BT-%x%x"` (0x38538c): probably the Bluetooth name, so stock likely shows up as CAR-BT-xxxx.
+- No boot-time "Bluetooth on / visible" command identified yet; the inbound BT event frame bytes (connect, pairing, RFCOMM data) are still unknown. Named handlers: RFCOMM_CONNECT 0x3866ec, RFCOMM_DISCONNECT (log near 0x3863ac), pair_passkey (near 0x38635a), wautolink_onBluetoothPairRequest 0x38a9b2.
+- Under our firmware the phone does not see the unit in a Bluetooth scan (2026-11-01).
+
+## Head unit server mode (2026-11-01)
+
+`hu.py aa connect PHONE_IP` (build 20261101-144044) makes the unit connect out to a phone running Android Auto's developer "Start head unit server" (TCP 5277), skipping Bluetooth. First try: TCP connected and our version request went out, the phone never answered; a PC probe connection just before may have used up the server's one session.
