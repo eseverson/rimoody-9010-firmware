@@ -233,6 +233,66 @@ void ip_link_up(void)
 
 void ip_link_down(void) { link = 0; }
 
+/* ---------------- access-point side: static address + a DHCP server for the stations ---------------- */
+static int ap_dhcps;
+static cu8 lease_mac[4][6];
+static int n_lease;
+
+void ip_ap_start(cu32 ip)
+{
+    link = 1, hello_last = 0, ap_dhcps = 1, n_lease = 0, dhcp_state = D_IDLE;
+    bind_addr(ip, 0xffffff00, 0, 2);
+}
+
+static void dhcps_rx(const cu8 *d, int n)
+{
+    if (n < 244 || d[0] != 1 || be32(d + 236) != 0x63825363)
+        return;
+    int type = 0;
+    cu32 want = be32(d + 12);   /* ciaddr when renewing */
+    for (int i = 240; i + 1 < n && d[i] != 255;) {
+        if (d[i] == 0) { i++; continue; }
+        if (i + 2 + d[i + 1] > n) break;
+        if (d[i] == 53 && d[i + 1] == 1) type = d[i + 2];
+        if (d[i] == 50 && d[i + 1] == 4) want = be32(d + i + 2);
+        i += 2 + d[i + 1];
+    }
+    if (type != 1 && type != 3)
+        return;
+    int k;
+    for (k = 0; k < n_lease && !same(lease_mac[k], d + 28, 6); k++)
+        ;
+    if (k == n_lease) {
+        if (n_lease == 4)
+            return;
+        cpy(lease_mac[n_lease++], d + 28, 6);
+    }
+    cu32 yi = my_ip + 1 + (cu32)k;
+    int reply = type == 1 ? 2 : want == yi ? 5 : 6;   /* OFFER, ACK, or NAK for an address we did not give */
+    cu8 *b = pkt + 28;
+    for (int i = 0; i < 300; i++)
+        b[i] = 0;
+    b[0] = 2, b[1] = 1, b[2] = 6;
+    cpy(b + 4, d + 4, 4);       /* xid */
+    cpy(b + 10, d + 10, 2);     /* flags */
+    if (reply != 6)
+        put32(b + 16, yi);
+    put32(b + 20, my_ip);
+    cpy(b + 28, d + 28, 16);
+    put32(b + 236, 0x63825363);
+    cu8 *o = b + 240;
+    *o++ = 53, *o++ = 1, *o++ = (cu8)reply;
+    *o++ = 54, *o++ = 4, put32(o, my_ip), o += 4;
+    if (reply != 6) {
+        *o++ = 51, *o++ = 4, put32(o, 86400), o += 4;
+        *o++ = 1, *o++ = 4, put32(o, my_mask), o += 4;
+    }
+    *o++ = 255;
+    udp_send(bcast, 0xffffffff, 67, 68, 300);
+    plat_logf("dhcps: %s %u.%u.%u.%u to %02x:%02x:%02x:%02x:%02x:%02x\n", reply == 2 ? "offer" : reply == 5 ? "ack" : "nak",
+              yi >> 24, (yi >> 16) & 255, (yi >> 8) & 255, yi & 255, d[28], d[29], d[30], d[31], d[32], d[33]);
+}
+
 void ip_poll(void)
 {
     if (!link)
@@ -441,7 +501,9 @@ void ip_rx(const cu8 *src, const cu8 *dst, int type, const cu8 *p, int len)
     if (ulen < 8 || ulen > n)
         return;
     ip_stats[S_UDP]++;
-    if (dport == 68 && (bc || ours || !bound || dip == offered_ip))
+    if (dport == 67 && ap_dhcps && (bc || ours))
+        dhcps_rx(l4 + 8, ulen - 8);
+    else if (dport == 68 && !ap_dhcps && (bc || ours || !bound || dip == offered_ip))
         dhcp_rx(l4 + 8, ulen - 8);
     else if (dport == HU_PORT && (ours || bc) && bound)
         cmd_rx(src, sip, sport, l4 + 8, ulen - 8);

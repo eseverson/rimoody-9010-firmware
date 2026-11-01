@@ -13,6 +13,7 @@
 void ip_init(const cu8 mac[6], const cu8 token[32], cu32 static_ip, cu8 *rbuf);   /* rbuf: HU_MAX_REPLY + 256 */
 void ip_link_up(void);     /* associated with keys: start DHCP (or keep the address) */
 void ip_link_down(void);
+void ip_ap_start(cu32 ip);   /* we are the access point: static ip/24, DHCP server for the stations (ip+1..ip+4) */
 void ip_rx(const cu8 *src, const cu8 *dst, int type, const cu8 *p, int len);
 void ip_poll(void);
 cu32 ip_addr(void);

@@ -50,3 +50,11 @@ char *strchr(const char *s, int c)   /* FatFs (invalid-character check on file n
             return 0;
     }
 }
+
+size_t strlen(const char *s)
+{
+    const char *p = s;
+    while (*p)
+        p++;
+    return (size_t)(p - s);
+}

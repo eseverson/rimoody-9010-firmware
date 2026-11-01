@@ -183,5 +183,36 @@ check('no fallback before 10 s', not [l for l in dev2.do('poll') if l[0] == 'eve
 dev2.do('time 10500')
 ev = [l for l in dev2.do('poll') if l[0] == 'event']
 check('static fallback 192.168.1.99 after 10 s', ev and ev[0][1:] == ['c0a80163', 'ffffff00', 'c0a80101', '2'])
+# access point: static 192.168.43.1, DHCP server hands the phone 192.168.43.2
+PHONE = bytes.fromhex('3a0102030405')
+ap = Dev()
+ap.do('ap c0a82b01')
+def bootp(mtype, req_ip=None, xid=b'\x12\x34\x56\x78'):
+    b = bytearray(240)
+    b[0], b[1], b[2] = 1, 1, 6
+    b[4:8] = xid
+    b[28:34] = PHONE
+    b[236:240] = b'\x63\x82\x53\x63'
+    o = bytes([53, 1, mtype]) + (bytes([50, 4]) + req_ip if req_ip else b'') + b'\xff'
+    return bytes(b) + o
+def dhcps_reply(out):
+    for l in out:
+        if l[0] != 'tx':
+            continue
+        dst, typ, p, ok = parse_tx(l)
+        if typ == 0x0800 and p[9] == 17 and struct.unpack('>HH', p[20:24]) == (67, 68):
+            d = p[28:]
+            opts, i = {}, 240
+            while i < len(d) and d[i] != 255:
+                opts[d[i]] = d[i + 2:i + 2 + d[i + 1]]
+                i += 2 + d[i + 1]
+            return ok, dst, d[16:20], opts
+    return None
+r = dhcps_reply(ap.rx(PHONE, b'\xff' * 6, 0x0800, udp(b'\0' * 4, b'\xff' * 4, 68, 67, bootp(1))))
+check('AP DHCP OFFER 192.168.43.2 (broadcast, checksums)', r and r[0] and r[1] == b'\xff' * 6 and r[2] == IP('192.168.43.2') and r[3].get(53) == b'\x02' and r[3].get(54) == IP('192.168.43.1'))
+r = dhcps_reply(ap.rx(PHONE, b'\xff' * 6, 0x0800, udp(b'\0' * 4, b'\xff' * 4, 68, 67, bootp(3, IP('192.168.43.2')))))
+check('AP DHCP ACK with lease and mask', r and r[3].get(53) == b'\x05' and r[3].get(1) == IP('255.255.255.0') and r[3].get(51) == struct.pack('>I', 86400))
+r = dhcps_reply(ap.rx(PHONE, b'\xff' * 6, 0x0800, udp(b'\0' * 4, b'\xff' * 4, 68, 67, bootp(3, IP('192.168.43.9')))))
+check('AP DHCP NAK for an address it did not offer', r and r[3].get(53) == b'\x06' and r[2] == b'\0' * 4)
 print('%d failures' % fails)
 sys.exit(fails)

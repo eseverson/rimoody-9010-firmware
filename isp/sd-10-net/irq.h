@@ -30,7 +30,9 @@ unsigned int irq_hw_wdt_left_ms(void);
 extern volatile unsigned int irq_hw_wdt_on;
 void irq_hw_wdt_test(void);         /* crash record "hwwdt-test", stop feeding: the unit should reset */
 int irq_hw_wdt_test_failed(void);   /* still alive: undo the test, returns 1 */
-void irq_fail_reset(unsigned int vec);   /* crash record (102 probation, 103.. failure) and reset */
+void irq_fail_reset(unsigned int vec);
+extern volatile unsigned int *irq_log_len_ptr;   /* set by the payload: its log length goes into crash records */
+unsigned int irq_prev_log_len(void);   /* previous run's log length from a valid crash record, else 0 */   /* crash record (102 probation, 103.. failure) and reset */
 
 int plat_fmt(char *out, const char *fmt, ...);
 

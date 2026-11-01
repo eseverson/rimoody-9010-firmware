@@ -56,8 +56,10 @@ struct crash {
     char note[48];   /* irq_note at the time: the U-Boot command being run, if any */
     u32 uptime_ms;
     u32 stack[16];   /* words at the interrupted $sp */
+    u32 log_len;     /* v3: length of the run's log at LOG 0x01a00000 (written back before the reset) */
     u32 crc;
 };
+volatile u32 *irq_log_len_ptr;   /* the payload's log length, for the crash record */
 #define CRASH ((struct crash *)CRASH_ADDR)
 
 volatile u32 irq_ticks, irq_hb_sent, irq_count[7], irq_spurious, irq_rx_drop, irq_test_hits, irq_ivb_fix, irq_gie_fix;
@@ -305,7 +307,10 @@ static void crash_record(u32 vec, u32 *frame)
     u8 *p = (u8 *)c;
     for (unsigned i = 0; i < sizeof(*c); i++)
         p[i] = 0;
-    c->magic = CRASH_MAGIC, c->version = 2, c->vec = vec;
+    c->magic = CRASH_MAGIC, c->version = 3, c->vec = vec;
+    c->log_len = irq_log_len_ptr ? *irq_log_len_ptr : 0;
+    if (c->log_len && c->log_len <= 0x000f0000)
+        dcache_wb(0x01a00000u, c->log_len);   /* the next boot saves this run's log to the card */
     c->itype = MFSR(ITYPE), c->ipc = frame[0], c->ipsw = frame[1], c->eva = MFSR(EVA);
     c->p_ipc = MFSR(P_IPC), c->p_ipsw = MFSR(P_IPSW), c->p_itype = MFSR(P_ITYPE), c->p_eva = MFSR(P_EVA);
     c->sp = (u32)frame + 136, c->psw = MFSR(PSW), c->ticks = irq_ticks, c->int_mask = MFSR(INT_MASK);
@@ -468,13 +473,22 @@ int irq_status(char *o)
 }
 
 /* a crash record left by an earlier run: text into o (0 if none), then cleared */
+u32 irq_prev_log_len(void)   /* log length kept in a valid crash record, before anything logs over it */
+{
+    const struct crash *c = CRASH;
+    if (c->magic != CRASH_MAGIC || c->version != 3 ||
+        c->crc != crc32_le((const u8 *)c, (int)((const u8 *)&c->crc - (const u8 *)c)))
+        return 0;
+    return c->log_len <= 0x000f0000 ? c->log_len : 0;
+}
+
 int irq_crash_report(char *o, char *brief)
 {
     struct crash *c = CRASH;
     brief[0] = 0;
     if (c->magic != CRASH_MAGIC)
         return 0;
-    int ok = c->version == 2 && c->crc == crc32_le((const u8 *)c, (int)((const u8 *)&c->crc - (const u8 *)c));
+    int ok = c->version == 3 && c->crc == crc32_le((const u8 *)c, (int)((const u8 *)&c->crc - (const u8 *)c));
     char b[33], note[49];
     for (int i = 0; i < 32; i++)
         b[i] = c->build[i] >= 0x20 && c->build[i] < 0x7f ? c->build[i] : 0;

@@ -34,6 +34,8 @@ typedef signed char s8;
 #include "rtl8xxxu_regs.h"
 #include "crypto.h"
 #include "wpa.h"
+#include "wpa_ap.h"
+#include "ap80211.h"
 #include "ip.h"
 #include "mcu.h"
 #include "irq.h"
@@ -323,6 +325,9 @@ static int run(const char *f, ...)
  * 0xf7707a: an odd source address faulted, and the log ring may move while fatwrite reads it). Used for a crash report
  * and for the MCU's shutdown request only. */
 #define LOG_BOUNCE ((char *)0x01b00000)   /* 0x40000 bytes, after the log (0x01a00000-0x01af0000) */
+#define PREV_LOG ((char *)0x01c00000)     /* the previous run's log tail when it ended in a crash record */
+#define PREV_LOG_MAX 0x40000
+static u32 prev_log_len;
 static void hb_tick(void);
 
 static void flush(const char *why)
@@ -1663,10 +1668,20 @@ static int handoff_take(void)
 /* A failure that would otherwise end the payload (and with it the MCU heartbeat: the MCU then cuts power). Test
  * builds and a first failure reset (the card's build retries); a second failure in a row stays up without the
  * network so the unit keeps power and the screen shows why. */
+static void save_log(const char *name);
+/* this run's log to the card before a planned reset, named <tag><crc>.TXT, so a failure off the network is readable */
+static void save_own_log(char tag)
+{
+    char name[16];
+    vfmt_n(name, "%c%07x.TXT", tag, crc32_le((const u8 *)LOG_BUF, (int)log_len) & 0xfffffff);
+    lprintf("--- saving this run's log as %s before the reset\n", name);
+    save_log(name);
+}
+
 static void fail_or_stay(unsigned int vec, const char *why)
 {
     lprintf("FAILURE: %s%s\n", why, exec_trial || !prev_boot_failed ? ", resetting" : ", staying up without the network");
-    flush("failure");
+    save_own_log('F');
     if (exec_trial || !prev_boot_failed)
         irq_fail_reset(vec);
     for (;;) {
@@ -1797,6 +1812,7 @@ static int usb_tx(int ep, int len)
 
 /* the 802.11 frame is at txbuf + TXDESC_SIZE; mgmt frames go at 1 Mb/s on the MGNT queue (first OUT endpoint, the
  * high queue), data at a fixed 12 Mb/s on BE (second OUT endpoint, the normal queue), as rtl8xxxu maps them */
+static int tx_beacon;   /* next tx_frame is the AP beacon: BEACON queue, hardware sequence number, endpoint 0 */
 static int tx_frame(int flen, int mgmt)
 {
     u8 *d = txbuf, *f = txbuf + TXDESC_SIZE;
@@ -1805,17 +1821,19 @@ static int tx_frame(int flen, int mgmt)
     d[0] = flen, d[1] = flen >> 8, d[2] = TXDESC_SIZE;
     const u8 *da = (f[1] & 1) ? f + 16 : f + 4;   /* ieee80211_get_DA: A3 for ToDS */
     d[3] = TXDESC_OWN | TXDESC_FIRST_SEGMENT | TXDESC_LAST_SEGMENT | (da[0] & 1 ? TXDESC_BROADMULTICAST : 0);
-    put32le(d + 4, (mgmt ? TXDESC_QUEUE_MGNT : TXDESC_QUEUE_BE) << TXDESC_QUEUE_SHIFT);
+    put32le(d + 4, (tx_beacon ? 0x10u : mgmt ? TXDESC_QUEUE_MGNT : TXDESC_QUEUE_BE) << TXDESC_QUEUE_SHIFT);
     put32le(d + 8, TXDESC40_AGG_BREAK);
     put32le(d + 12, TXDESC40_USE_DRIVER_RATE);
     put32le(d + 16, (mgmt ? DESC_RATE_1M : DESC_RATE_12M) | TXDESC40_RETRY_LIMIT_ENABLE |
                         (u32)(mgmt ? 6 : 12) << TXDESC40_RETRY_LIMIT_SHIFT);
     put32le(d + 36, (u32)((f[22] | f[23] << 8) >> 4) << TXDESC40_SEQ_SHIFT);
+    if (tx_beacon)
+        put32le(d + 32, 1u << 15);   /* TXDESC40_HW_SEQ_ENABLE (rtl8xxxu: mac80211 asks ASSIGN_SEQ for beacons) */
     u16 cs = 0;   /* rtl8xxxu_calc_tx_desc_csum: XOR of the first 16 halfwords, csum field (28) zero */
     for (int i = 0; i < 32; i += 2)
         cs ^= d[i] | d[i + 1] << 8;
     d[28] = cs, d[29] = cs >> 8;
-    int ep = n_out_eps >= 2 ? out_ep[mgmt ? 0 : 1] : out_ep[0];
+    int ep = tx_beacon || n_out_eps < 2 ? out_ep[0] : out_ep[mgmt ? 0 : 1];
     return usb_tx(ep, TXDESC_SIZE + flen);
 }
 
@@ -1830,8 +1848,8 @@ struct cand {
 static struct cand cands[MAX_CAND], bss;
 static int n_cands;
 
-enum { J_SCAN, J_WAIT, J_AUTH, J_ASSOC, J_4WAY, J_UP, J_ABORT };
-static const char *const jnames[] = { "scan", "wait", "auth", "assoc", "4-way", "up", "abort" };
+enum { J_SCAN, J_WAIT, J_AUTH, J_ASSOC, J_4WAY, J_UP, J_ABORT, J_AP };
+static const char *const jnames[] = { "scan", "wait", "auth", "assoc", "4-way", "up", "abort", "ap" };
 static int jstate, scanning, cur_ch, aid, j_tries, j_fail, h2c_mbox;
 static u32 j_t, last_beacon, retry_at;
 static s8 rssi_now;
@@ -2207,6 +2225,8 @@ static void mgmt_frame(const u8 *f, int len, int rssi)
 
 static int dumps;
 
+static void ap_mgmt_frame(const u8 *f, int len);
+static void ap_data_frame(u8 *f, int len);
 /* rtl8xxxu_parse_rxdesc24 over one bulk IN transfer, which may hold several packets */
 static void parse_rx(int n)
 {
@@ -2228,7 +2248,12 @@ static void parse_rx(int n)
             int type = (f[0] >> 2) & 3;
             if (phy && (rx_frames & 15) == 1)
                 rng_mix(d, 24 + 8);
-            if (type == 0)
+            if (jstate == J_AP) {
+                if (type == 0)
+                    ap_mgmt_frame(f, pktlen);
+                else if (type == 2)
+                    ap_data_frame(f, pktlen);
+            } else if (type == 0)
                 mgmt_frame(f, pktlen, phy ? signal_dbm(phy, d3 & 0x7f) : 0);
             else if (type == 2 && !scanning)
                 data_frame(f, pktlen);
@@ -2335,6 +2360,243 @@ static void join_start(void)
     send_auth();
 }
 
+/* ---- access-point mode (notes/android_auto.md, wireless AA): we are the AP, one station, WPA2-PSK/CCMP in
+ * software (as in station mode), beacons by the hardware from a frame we upload. Register sequence from Linux
+ * rtl8xxxu (v6.12: rtl8xxxu_add_interface AP case, rtl8xxxu_start_ap, start_tx_beacon, send_beacon_frame). Entered
+ * only by HU1 op 18; if no station has keys and a HU1 command within AP_DEADLINE_MS, the unit resets (back to the
+ * card's build in station mode). ---- */
+#define AP_DEADLINE_MS (5 * 60 * 1000)
+static struct ap_cfg apc;
+static char ap_ssid[33];
+static u8 ap_pmk[32], ap_gtk[16], sta[6], ap_ie[32];
+static int ap_ie_len, sta_st, ap_eapol_tries, ap_ch;   /* sta_st: 0 none, 1 authenticated, 2 associated, 3 keyed */
+static struct wpa_ap wap;
+static u32 ap_t0, sta_t, ap_cmds0;
+static cu64 ap_gtk_pn, sta_rx_pn;
+static u32 ap_probes, ap_beacon_ok;
+int ap_start_pending, ap_start_ch;
+static char ap_req_ssid[33], ap_req_psk[64];
+
+static void ap_h2c_connect(int macid, int role, int connect)   /* rtl8xxxu_gen2_report_connect */
+{
+    int i;
+    for (i = 0; i < 100 && (rr8(REG_HMTFR) & BIT(h2c_mbox)); i++)
+        ;
+    rw32(REG_HMBOX_0 + 4 * h2c_mbox, 0x01 | (u32)((connect ? 1 : 0) | (role << 4)) << 8 | (u32)macid << 16);
+    h2c_mbox = (h2c_mbox + 1) & 3;
+}
+
+static int ap_send(int len) { return tx_frame(len, 1); }
+
+static void ap_upload_beacon(void)
+{
+    rw8(REG_TDECTRL + 2, rr8(REG_TDECTRL + 2) | BIT(0));                     /* BCN_VALID: write 1 to clear */
+    rw8(REG_DWBCN1_CTRL_8723B + 2, rr8(REG_DWBCN1_CTRL_8723B + 2) & ~BIT(4)); /* SW_BCN_SEL: port 0 */
+    int n = ap_beacon(txbuf + TXDESC_SIZE, &apc);
+    tx_beacon = 1;
+    int r = tx_frame(n, 1);
+    tx_beacon = 0;
+    int i;
+    for (i = 0; i < 100 && !(rr8(REG_TDECTRL + 2) & BIT(0)); i++)
+        ub_udelay(20);
+    ap_beacon_ok = i < 100;
+    lprintf("ap: beacon %d bytes uploaded (usb %d), BCN_VALID %s\n", n, r, ap_beacon_ok ? "set" : "NOT set");
+}
+
+static void ap_start(int ch, const char *ssid, const char *psk)
+{
+    if (jstate >= J_AUTH && jstate <= J_UP) {
+        send_deauth(3);
+        h2c_media_status(0);
+    }
+    keys_clear();
+    ip_link_down();
+    scanning = 0;
+    int n = 0;
+    while (ssid[n] && n < 32)
+        ap_ssid[n] = ssid[n], n++;
+    ap_ssid[n] = 0;
+    int pl = 0;
+    while (psk[pl] && pl < 63)
+        pl++;
+    pbkdf2_sha1((const u8 *)psk, pl, (const u8 *)ap_ssid, n, 4096, ap_pmk, 32);
+    rng_bytes(ap_gtk, 16);
+    apc.ssid = ap_ssid;
+    cpy(apc.bssid, my_mac, 6);
+    apc.channel = ap_ch = ch;
+    ap_ie_len = ap_rsn_ie(ap_ie);
+    set_tx_power(ch);
+    config_channel(ch);
+    cur_ch = ch;
+    /* rtl8xxxu_set_linktype(AP) + add_interface(AP) + start_ap */
+    rw8(REG_MSR, (rr8(REG_MSR) & 0x0c) | 3);
+    set_bssid(my_mac);
+    rw8(REG_BEACON_CTRL, BIT(4) | BIT(1));                 /* DISABLE_TSF_UPDATE | MBSSID */
+    rw8(REG_ATIMWND, 0x0c);
+    rw16(REG_TSFTR_SYN_OFFSET, 0x7fff);
+    rw8(REG_DUAL_TSF_RST, BIT(0));                        /* reset TSF0 */
+    rw8(REG_BEACON_CTRL, BIT(4) | BIT(3) | BIT(1) | BIT(2)); /* + FUNCTION_ENABLE, TX_BEACON_RPT */
+    rw16(REG_BCN_INTERVAL, 100);
+    set_rcr(0);   /* no BSSID filtering: station frames are addressed to us as the BSSID */
+    ap_h2c_connect(0, 0, 1);   /* broadcast/multicast MACID 0 */
+    /* rtl8xxxu_start_tx_beacon */
+    rw8(REG_FWHW_TXQ_CTRL + 2, rr8(REG_FWHW_TXQ_CTRL + 2) | BIT(6));
+    rw8(REG_TBTT_PROHIBIT + 1, 0x80);
+    rw8(REG_TBTT_PROHIBIT + 2, rr8(REG_TBTT_PROHIBIT + 2) & 0xf0);
+    ap_upload_beacon();
+    sta_st = 0;
+    ap_gtk_pn = 0;
+    ap_t0 = ub_ms(0);
+    ap_cmds0 = (u32)ip_stats[5];
+    jstate = J_AP;
+    ip_ap_start(0xc0a82b01);   /* 192.168.43.1, DHCP server for the station */
+    char es[80];
+    esc_ssid(es, (const u8 *)ap_ssid, n);
+    lprintf("ap: up, ssid '%s', channel %d, bssid %02x:%02x:%02x:%02x:%02x:%02x, 192.168.43.1; reset in %u s unless a "
+            "station keys up and sends a HU1 command\n", es, ch, my_mac[0], my_mac[1], my_mac[2], my_mac[3], my_mac[4],
+            my_mac[5], AP_DEADLINE_MS / 1000);
+    flush("ap up");
+}
+
+/* 802.11 data frame from us (FromDS) to the station or broadcast */
+static int ap_tx_data(const u8 *dst, int type, const u8 *p, int len, int protect)
+{
+    int mc = dst[0] & 1;
+    if (len > 1500 || (!mc && (sta_st < 2 || !same(dst, sta, 6))))
+        return -1;
+    if (protect && (sta_st < 3))
+        return -1;   /* nothing but EAPOL before the keys */
+    u8 *f = txbuf + TXDESC_SIZE;
+    f[0] = 0x08, f[1] = 0x02, f[2] = f[3] = 0;   /* data, FromDS */
+    cpy(f + 4, dst, 6);
+    cpy(f + 10, my_mac, 6);
+    cpy(f + 16, my_mac, 6);
+    f[22] = tx_seq << 4, f[23] = tx_seq >> 4;
+    tx_seq = (tx_seq + 1) & 0xfff;
+    u8 *body = f + 24 + (protect ? 8 : 0);
+    static const u8 snap[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
+    cpy(body, snap, 6);
+    body[6] = type >> 8, body[7] = type;
+    cpy(body + 8, p, len);
+    int plen = 8 + len;
+    if (type == 0x0800 && (TXDESC_SIZE + 24 + plen + (protect ? 16 : 0)) % 512 == 0)
+        body[plen++] = 0, tx_pad++;
+    int flen = !protect ? 24 + plen : mc ? ccmp_encrypt(ap_gtk, f, 24, plen, ++ap_gtk_pn, 1)
+                                         : ccmp_encrypt(tk, f, 24, plen, ++tx_pn, 0);
+    return tx_frame(flen, 0);
+}
+
+static void ap_eapol_send(void) { ap_tx_data(sta, 0x888e, wap.tx, wap.tx_len, 0); }
+
+static void ap_mgmt_frame(const u8 *f, int len)
+{
+    struct ap_rx r;
+    int t = ap_parse(f, len, &apc, &r);
+    u8 *o = txbuf + TXDESC_SIZE;
+    if (t == AP_RX_PROBE) {
+        ap_probes++;
+        ap_send(ap_probe_resp(o, &apc, r.sa, (tx_seq = (tx_seq + 1) & 0xfff)));
+    } else if (t == AP_RX_AUTH) {
+        if (sta_st && !same(r.sa, sta, 6) && ub_ms(0) - sta_t < 30000)
+            return;   /* one station at a time */
+        cpy(sta, r.sa, 6);
+        sta_st = 1, sta_t = ub_ms(0);
+        ap_send(ap_auth_resp(o, &apc, r.sa, (tx_seq = (tx_seq + 1) & 0xfff), r.auth_alg == 0 ? 0 : 13));
+        lprintf("ap: auth from %02x:%02x:%02x:%02x:%02x:%02x (alg %d)\n", r.sa[0], r.sa[1], r.sa[2], r.sa[3], r.sa[4],
+                r.sa[5], r.auth_alg);
+    } else if (t == AP_RX_ASSOC && sta_st >= 1 && same(r.sa, sta, 6)) {
+        ap_send(ap_assoc_resp(o, &apc, r.sa, (tx_seq = (tx_seq + 1) & 0xfff), 0, 1, r.reassoc));
+        sta_st = 2, sta_t = ub_ms(0);
+        keys_clear();
+        u8 anonce[32];
+        rng_bytes(anonce, 32);
+        wpa_ap_init(&wap, ap_pmk, my_mac, sta, ap_ie, ap_ie_len, anonce, ap_gtk, 1);
+        wpa_ap_start(&wap);
+        ap_eapol_tries = 1;
+        ap_eapol_send();
+        lprintf("ap: %sassociated (rsn ie %d bytes, ht %d), 4-way 1/4 sent\n", r.reassoc ? "re" : "", r.rsn_len, r.ht);
+    } else if (t == AP_RX_LEAVE && sta_st && same(r.sa, sta, 6)) {
+        lprintf("ap: station left (reason %d)\n", r.reason);
+        sta_st = 0;
+        keys_clear();
+    }
+}
+
+static void ap_data_frame(u8 *f, int len)
+{
+    if ((f[1] & 3) != 1 || !same(f + 4, my_mac, 6) || !sta_st || !same(f + 10, sta, 6) || (f[0] & 0x40))
+        return;   /* ToDS to us from our station only; no null data */
+    int hl = ieee80211_hdrlen(f);
+    if (len < hl + 8)
+        return;
+    u8 *body;
+    int n;
+    if (f[1] & 0x40) {
+        if (sta_st < 3)
+            return;
+        cu64 pn;
+        n = ccmp_decrypt(tk, f, len, hl, &pn);
+        if (n < 0) {
+            if (dec_fail++ < 10)
+                lprintf("ap: CCMP MIC failure from the station (%d bytes)\n", len);
+            return;
+        }
+        if (pn <= sta_rx_pn) {
+            replays++;
+            return;
+        }
+        sta_rx_pn = pn;
+        body = f + hl + 8;
+    } else {
+        body = f + hl, n = len - hl;
+    }
+    static const u8 snap[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
+    if (n < 8 || !same(body, snap, 6))
+        return;
+    int type = be16(body + 6);
+    rx_data++;
+    if (type == 0x888e && sta_st == 2) {
+        int a = wpa_ap_rx(&wap, body + 8, n - 8);
+        if (a & WPA_AP_BADMIC)
+            lprintf("ap: 4-way 2/4 MIC mismatch: the station has another passphrase\n");
+        if (a & WPA_AP_TX) {
+            ap_eapol_send();
+            ap_eapol_tries = 1;
+            log_s("ap: 4-way 2/4 ok, 3/4 sent\n");
+        }
+        if (a & WPA_AP_DONE) {
+            cpy(tk, wap.ptk + 32, 16);
+            tk_ok = keys_ok = 1, tx_pn = 0, sta_rx_pn = 0;
+            sta_st = 3;
+            lprintf("ap: 4-way done, station keyed t=%u\n", ub_ms(0));
+            flush("ap station keyed");
+        }
+    } else if ((f[1] & 0x40) && sta_st == 3 && (type == 0x0800 || type == 0x0806)) {
+        ip_rx(f + 10, f + 16, type, body + 8, n - 8);
+    }
+}
+
+static void ap_tick(void)
+{
+    u32 now = ub_ms(0);
+    if (sta_st == 2 && now - sta_t > 1000 * (u32)ap_eapol_tries) {   /* EAPOL retransmit */
+        if (ap_eapol_tries >= 4) {
+            log_s("ap: 4-way handshake timed out\n");
+            sta_st = 0;
+            return;
+        }
+        ap_eapol_tries++;
+        if (wap.state == 1)
+            wpa_ap_start(&wap);   /* 1/4 again, next replay counter */
+        ap_eapol_send();          /* (3/4 goes out again as built: the station never saw it) */
+    }
+    if ((u32)ip_stats[5] == ap_cmds0 && now - ap_t0 > AP_DEADLINE_MS) {
+        lprintf("ap: no station with a HU1 command within %u s, resetting to station mode\n", AP_DEADLINE_MS / 1000);
+        save_own_log('A');
+        irq_fail_reset(107);
+    }
+}
+
 static void mlme_tick(void)
 {
     u32 now = ub_ms(0);
@@ -2379,9 +2641,12 @@ int plat_fmt(char *out, const char *fmt, ...)
     return n;
 }
 
+static int ap_tx_data(const u8 *dst, int type, const u8 *p, int len, int protect);
 void plat_eth_send(const cu8 dst[6], int type, const cu8 *p, int len)
 {
-    if (keys_ok)
+    if (jstate == J_AP)
+        ap_tx_data(dst, type, p, len, 1);
+    else if (keys_ok)
         tx_data(dst, type, p, len, 1);
 }
 
@@ -2842,6 +3107,24 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         return fs_op(p, n, t);
     case 15:   /* RTOS: task list */
         return rtos_status(t);
+    case 18: {   /* AP: start access-point mode: ch u8, ssid NUL, psk NUL (after this reply; leaves the current network) */
+        if (n < 3)
+            return vfmt_n(t, "ap: %s, channel %d, station %d, probes %u, beacon %s, dhcp/ip via 192.168.43.1",
+                          jstate == J_AP ? "up" : "off", ap_ch, sta_st, ap_probes, ap_beacon_ok ? "ok" : "-");
+        int ch = p[0], i = 1, k = 0;
+        while (i < n && p[i] && k < 32)
+            ap_req_ssid[k++] = (char)p[i++];
+        ap_req_ssid[k] = 0;
+        i++;
+        k = 0;
+        while (i < n && p[i] && k < 63)
+            ap_req_psk[k++] = (char)p[i++];
+        ap_req_psk[k] = 0;
+        if (ch < 1 || ch > 13 || !ap_req_ssid[0] || k < 8)
+            return vfmt_n(t, "ERR ap: channel 1..13, ssid, psk 8..63 chars");
+        ap_start_ch = ch, ap_start_pending = 1, deferred_at = ub_ms(0) + 300;
+        return vfmt_n(t, "ap: starting on channel %d as '%s' after this reply; this network connection ends", ch, ap_req_ssid);
+    }
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */
         return usb_op(n ? p[0] : 0, n >= 3 ? p[1] | p[2] << 8 : 200, t);
     case 10: {   /* EXEC src len: checked here, run from net_loop after this reply has gone out */
@@ -2993,8 +3276,17 @@ static void net_loop(void)
             continue;
         }
         rx_once();
-        mlme_tick();
+        if (jstate == J_AP)
+            ap_tick();
+        else
+            mlme_tick();
         ip_poll();
+        if (ap_start_pending && (int)(ub_ms(0) - deferred_at) >= 0) {
+            ap_start_pending = 0;
+            ap_start(ap_start_ch, ap_req_ssid, ap_req_psk);
+            for (int i = 0; i < (int)sizeof ap_req_psk; i++)
+                ap_req_psk[i] = 0;
+        }
         irq_check();
         if (hwwdt_test_at && ub_ms(0) - hwwdt_test_at > 15000) {
             hwwdt_test_at = 0;
@@ -3003,7 +3295,7 @@ static void net_loop(void)
         }
         if (exec_trial && !net_online && ub_ms(0) - net_task_t0 > PROBATION_MS) {
             lprintf("probation: not online %u s after EXEC, back to the card's build\n", PROBATION_MS / 1000);
-            flush("probation");
+            save_own_log('F');
             irq_fail_reset(102);
         }
         if (exec_pending && (int)(ub_ms(0) - deferred_at) >= 0)
@@ -3075,6 +3367,13 @@ static void net_task(void *arg)
         char name[16];
         vfmt_n(name, "C%07x.TXT", crc32_le((const u8 *)LOG_BUF, (int)log_len) & 0xfffffff);
         save_log(name);
+        if (prev_log_len) {   /* and the crashed run's own log, as P<same id>.TXT */
+            name[0] = 'P';
+            lprintf("--- saving the previous run's log (%u bytes) as %s\n", prev_log_len, name);
+            int fr = fs_save(name, PREV_LOG, prev_log_len);
+            if (fr)
+                lprintf("--- %s: own FAT write failed (%d)\n", name, fr);
+        }
     }
     if (load_config())
         fail_or_stay(103, "no config (WIFI.TXT)");
@@ -3120,6 +3419,15 @@ int payload_entry(int argc, char *const argv[])
 
     for (u32 *p = __bss_start; p < __bss_end; p++)
         *p = 0;
+    /* the previous run ended in a crash record: keep the tail of its log before ours overwrites it */
+    prev_log_len = irq_prev_log_len();
+    if (prev_log_len) {
+        u32 start = prev_log_len > PREV_LOG_MAX ? prev_log_len - PREV_LOG_MAX : 0;
+        prev_log_len -= start;
+        for (u32 i = 0; i < prev_log_len; i++)
+            PREV_LOG[i] = LOG_BUF[start + i];
+    }
+    irq_log_len_ptr = (volatile unsigned int *)&log_len;
     lprintf("net main, build %s\n", hu_build_id);
     mcu_init(&mcu_st);
     report_cpu();

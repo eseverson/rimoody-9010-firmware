@@ -103,6 +103,10 @@ int main(void)
             unsigned sip;
             sscanf(w3, "%x", &sip);
             ip_init(a, t, sip, rb);
+        } else if (!strncmp(line, "ap ", 3)) {
+            unsigned ip;
+            sscanf(line + 3, "%x", &ip);
+            ip_ap_start(ip);
         } else if (!strncmp(line, "up", 2)) {
             ip_link_up();
         } else if (!strncmp(line, "time ", 5)) {

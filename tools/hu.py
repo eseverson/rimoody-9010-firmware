@@ -31,7 +31,7 @@ import argparse, os, socket, struct, sys, time, zlib
 
 PORT_CMD, PORT_HELLO = 5151, 5152
 OP_PING, OP_CMD, OP_WRITE, OP_READ, OP_SYNC, OP_LOG = 1, 2, 3, 4, 5, 6
-OP_MCU_TX, OP_MCU_STATE, OP_SETTIME, OP_EXEC, OP_IRQ, OP_FB, OP_SAY, OP_TOUCH, OP_RTOS, OP_USB, OP_FS = 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
+OP_MCU_TX, OP_MCU_STATE, OP_SETTIME, OP_EXEC, OP_IRQ, OP_FB, OP_SAY, OP_TOUCH, OP_RTOS, OP_USB, OP_FS, OP_AP = 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
 TRAMP_ADDR = 0x02f00000
 
 # Builds without OP_EXEC that `exec` can still replace: CRC32 of their first 4 KB at 0x1800000 -> addresses of their
@@ -230,6 +230,8 @@ def main():
     sub.add_parser('settime')
     p = sub.add_parser('fs', help='our own SD/FAT driver: status, ls [dir], crc NAME, raw LBA, rawtest NAME SRC, write NAME ADDR LEN, rm NAME, load NAME ADDR MAX')
     p.add_argument('what', choices=['status', 'ls', 'crc', 'raw', 'rawtest', 'write', 'rm', 'load']); p.add_argument('args', nargs='*')
+    p = sub.add_parser('ap', help='access-point mode: ap [CHANNEL SSID PSK] (no args: status)')
+    p.add_argument('channel', nargs='?', type=int); p.add_argument('ssid', nargs='?'); p.add_argument('psk', nargs='?')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
     p = sub.add_parser('fb'); p.add_argument('what', choices=['status', 'on', 'off', 'scale'])
     p.add_argument('n', nargs='?', type=int, default=2)
@@ -320,6 +322,12 @@ def main():
         elif a.what in ('write', 'load'):   # name addr len
             name, x, y = args[0], int(args[1], 0), int(args[2], 0)
         print(u.call(OP_FS, struct.pack('<BII', c, x, y) + name.encode()).decode(errors='replace'))
+    elif a.op == 'ap':
+        if a.channel is None:
+            print(u.call(OP_AP, b'').decode(errors='replace'))
+        else:   # the unit leaves its current network; it resets back to station mode after 5 min without a station
+            r = u.send_once(OP_AP, bytes([a.channel]) + a.ssid.encode() + b'\0' + a.psk.encode() + b'\0')
+            print(r.decode(errors='replace') if r is not None else 'no reply')
     elif a.op == 'rtos':
         print(u.call(OP_RTOS, b'').decode(errors='replace'), end='')
     elif a.op == 'touch':
