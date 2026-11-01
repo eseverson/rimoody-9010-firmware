@@ -28,3 +28,4 @@
 ## 2026-11-01
 - **Card BOOT.BIN = build 20261101-021107 (crc 0d8aae9a)**: hardware watchdog (verified), EXEC config handoff + probation, failure resets, own SD/FAT (HU1 op 17, persist path), plus everything before. Unit IP now 192.168.1.142.
 - Second, bigger border haze after the ~4 h dead period (notes/display_touch.md); owner asked to check it under stock firmware (card out).
+- **Card BOOT.BIN = build 20261101-105158** (soaked 50 rounds): no stay-offline on failures (backoff resets), RTL8188F power-off recovery, lwIP TCP, AP mode, decoder steps 1-3 + bisect tooling, hardware CCMP (switchable, untested), breadcrumbs.
