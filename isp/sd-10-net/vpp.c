@@ -124,7 +124,17 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             R(0x9c0057f0) = 0x80801011;
         } else {
             R(0x9c0057f0) &= ~1u;
-            setbits(0x9c005784, 1u << 28 | 1u << 20, 1u << 20);
+            /* eCos's display path (0x5270de): the frame's BG2D entries get gp = 2 (the decoder writes gp = 1), progressive
+             * scan bits; then the mode-0xB handoff bits: 0x784 b8 (index mode), D84 b9, DC[17:16] = 1, A80 b8 */
+            for (int e = 0; e < 2; e++) {
+                u32 a2 = 0x9c00a400 + 4 * (e ? chroma_idx : luma_idx);
+                R(a2) = (R(a2) & ~(3u << 19)) | 2u << 19;
+            }
+            setbits(0x9c005784, 1u << 28 | 1u << 20 | 1u << 21 | 1u << 8, 1u << 20 | 1u << 8);
+            setbits(0x9c005d84, 1u << 9, 1u << 9);
+            setbits(0x9c0057dc, 3u << 16 | 1u, 1u << 16 | 1u);
+            setbits(0x9c005a80, 1u << 8 | 1u << 9 | 1u << 12, 1u << 8);
+            setbits(0x9c005788, 0x1c, 0x10);
             R(0x9c005798) = luma_idx, R(0x9c00579c) = luma_idx, R(0x9c0057a0) = luma_idx;
             R(0x9c0057a4) = chroma_idx, R(0x9c0057a8) = chroma_idx, R(0x9c0057ac) = chroma_idx;
         }
@@ -179,6 +189,39 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             k0++;
         return k0 + fmt(o + k0, "vpp linear: checksum %x -> %x, error flags %x -> %x, 7f4 %x 7f8 %x 7fc %x, 7bc %x 7c0 %x", c0,
                    R(0x9c0057e8), e0, R(0x9c0057ec), R(0x9c0057f4), R(0x9c0057f8), R(0x9c0057fc), R(0x9c0057bc), R(0x9c0057c0));
+    } else if (c == 8 && n >= 2) {   /* bisect: apply setup parts by mask, wait ~0.3 s, report the error flags */
+        u32 m = p[1], f0 = R(0x9c0057ec);
+        save();
+        if (m & 1)
+            init_post();
+        if (m & 2) {
+            R(0x9c005d80) = 1;
+            setbits(0x9c005d84, 1u << 4 | 1u << 6 | 1u << 9 | 1u << 12, 1u << 4 | 1u << 6);
+        }
+        if (m & 4) {   /* the whole init_fetch (post, scaler, DDFCH, geometry) */
+            init_fetch(800, 480, 1920);
+        }
+        if (m & 8) {   /* index mode on the decoder's last picture with gp 2 */
+            for (int e = 0; e < 2; e++) {
+                u32 a2 = 0x9c00a400 + 4 * (e ? chroma_idx : luma_idx);
+                R(a2) = (R(a2) & ~(3u << 19)) | 2u << 19;
+            }
+            R(0x9c0057f0) &= ~1u;
+            setbits(0x9c005784, 1u << 28 | 1u << 20 | 1u << 21 | 1u << 8, 1u << 20 | 1u << 8);
+            R(0x9c005798) = R(0x9c00579c) = R(0x9c0057a0) = luma_idx;
+            R(0x9c0057a4) = R(0x9c0057a8) = R(0x9c0057ac) = chroma_idx;
+        }
+        if (m & 16)
+            setbits(0x9c006c84, 3u, 2u);
+        if (m & 32)
+            R(0x9c005a80) |= 1;
+        if (m & 64)
+            R(0x9c005788) = 0;   /* DDFCH enable off */
+        active = 1;
+        u32 f1 = R(0x9c0057ec);
+        for (volatile int i = 0; i < 6000000; i++)
+            ;
+        return fmt(o, "vpp bisect mask %x: flags %x -> %x -> %x; checksum %x", m, f0, f1, R(0x9c0057ec), R(0x9c0057e8));
     } else if (c == 7 && n >= 2) {   /* MOON0 gated clock by ID (0x9C00002C + 4 * (id >> 4), eCos 0x313000) */
         u32 id = p[1], a2 = 0x9c00002c + 4 * (id >> 4);
         if (id >= 0x80)

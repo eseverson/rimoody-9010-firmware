@@ -239,7 +239,7 @@ def main():
     p = sub.add_parser('aa', help='wireless Android Auto: status | start [PORT] (cert/key from AACERT.PEM / AAKEY.PEM on the card)')
     p.add_argument('what', choices=['status', 'start']); p.add_argument('port', nargs='?', type=int, default=5288)
     p = sub.add_parser('vpp', help='VPP0 video layer tests: status | bars [SECS [SLOT]] | show [SECS [SLOT]] | restore | poke ADDR VAL')
-    p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk']); p.add_argument('args', nargs='*')
+    p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk', 'bisect']); p.add_argument('args', nargs='*')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -349,7 +349,7 @@ def main():
         payload = bytes([1]) + struct.pack('<H', a.port) if a.what == 'start' else bytes([0])
         print(u.call(OP_AA, payload).decode(errors='replace'))
     elif a.op == 'vpp':
-        c = {'status': 0, 'bars': 1, 'show': 2, 'restore': 3, 'poke': 4, 'clock': 5, 'linear': 6, 'gclk': 7}[a.what]
+        c = {'status': 0, 'bars': 1, 'show': 2, 'restore': 3, 'poke': 4, 'clock': 5, 'linear': 6, 'gclk': 7, 'bisect': 8}[a.what]
         if c == 4:
             payload = bytes([4]) + struct.pack('<II', int(a.args[0], 0), int(a.args[1], 0))
         else:
