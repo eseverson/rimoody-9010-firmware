@@ -201,6 +201,173 @@ int vdec_bitread(u32 src, u32 len, char *o, vdec_fmt fmt)
     return k;
 }
 
+/* ---- step 4: one picture (single-slice I picture) through the SPMP command ring ---- */
+#define FB_LUMA   0x04600000u   /* pitch 896 (800 rounded to 128), 512 rows (480 rounded to 64): 0x70000 */
+#define FB_CHROMA 0x04670000u   /* interleaved CbCr, 896 x 256 */
+#define FB_MVC    0x04700000u
+#define WORK_3B   0x04720000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each) */
+#define WORK_3C   0x04740000u
+#define IDX_LUMA  0x00
+#define IDX_CHROMA 0x14
+#define IDX_MVC   0x2a
+
+static u32 ring_n;   /* words written in the SPMP ring */
+static void put(u32 w)   /* SPMP words are stored big-endian */
+{
+    volatile u32 *r = (volatile u32 *)SPMP_ADDR;
+    r[ring_n++] = w >> 24 | (w >> 8 & 0xff00) | (w << 8 & 0xff0000) | w << 24;
+}
+static u32 regno(u32 addr) { return (addr - 0x9c00c000u) >> 2; }
+static void w16(u32 addr, u32 v) { put(regno(addr) << 16 | (v & 0xffff)); }
+static void w32(u32 addr, u32 v) { put(0x10000000u | regno(addr) << 16); put(v); }
+
+static void cache_inval(u32 a, u32 n)   /* L1D_VA_INVAL over a range (the decoder wrote it behind the cache) */
+{
+    for (u32 x = a & ~31u; x < a + n; x += 32)
+        __asm__ volatile("cctl %0, L1D_VA_INVAL" ::"r"(x) : "memory");
+    __asm__ volatile("msync all" ::: "memory");
+}
+
+int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt)
+{
+    if (!inited)
+        return fmt(o, "ERR vdec: init first");
+    if (len < 16 || len > 0x100000)
+        return fmt(o, "ERR vdec: 16 bytes .. 1 MB");
+    const u8 *s = (const u8 *)src;
+    /* host-side parse: SPS, PPS, first slice */
+    struct h264_sps sps = { 0 };
+    struct h264_pps pps = { 0 };
+    struct h264_slice sh = { 0 };
+    u32 pos = 0, st, nl, slice_at = 0;
+    int have = 0;
+    while (h264_next_nal(s, len, &pos, &st, &nl)) {
+        int t = s[st] & 31;
+        if (t == 7)
+            h264_parse_sps(s + st, nl, &sps);
+        else if (t == 8)
+            h264_parse_pps(s + st, nl, &pps);
+        else if ((t == 5 || t == 1) && !have) {
+            have = !h264_parse_slice(s + st, nl, &sps, &pps, &sh);
+            slice_at = st;
+        }
+    }
+    if (!have || sh.slice_type != 2)
+        return fmt(o, "ERR vdec: need an I slice (have %d, type %u)", have, sh.slice_type);
+    /* bitstream into the EVB */
+    volatile u8 *d = (volatile u8 *)EVB_ADDR;
+    for (u32 i = 0; i < len; i++)
+        d[i] = s[i];
+    plat_sync(EVB_ADDR, len);
+    /* read the slice header through the bit reader, then capture the slice-data position (H264_SliceHeaderEnd) */
+    int r = dpfu_start(slice_at, len - slice_at);
+    for (u32 left = sh.data_bit_rbsp; left; ) {
+        u32 k = left > 31 ? 31 : left;
+        rd((int)k);
+        left -= k;
+    }
+    u32 save0 = M(0xd894), save1 = M(0xd898);
+    M(0xd884) = 0;   /* stop */
+    /* frame buffers: fill with a marker so untouched memory shows */
+    for (u32 i = 0; i < 0x70000; i += 4)
+        *(volatile u32 *)(FB_LUMA + i) = 0x55555555;
+    for (u32 i = 0; i < 0x38000; i += 4)
+        *(volatile u32 *)(FB_CHROMA + i) = 0x55555555;
+    plat_sync(FB_LUMA, 0x70000);
+    plat_sync(FB_CHROMA, 0x38000);
+    u32 pitch = (sps.width + 127) & ~127u;
+    M(0xa380) = (M(0xa380) & 0xffff0000u) | (pitch >> 4) << 8 | (pitch >> 4);   /* "mb size" slots 0 and 1 */
+    bg2d_set(IDX_LUMA, FB_LUMA, 1, 0);
+    bg2d_set(IDX_CHROMA, FB_CHROMA, 1, 0);
+    bg2d_set(IDX_MVC, FB_MVC, 1, 0);
+    bg2d_set(0x3b, WORK_3B, 0, 0);
+    bg2d_set(0x3c, WORK_3C, 0, 0);
+    /* the slice's command block (notes/h264_fields.md "Test IDR command values") */
+    ring_n = 0;
+    w32(0x9c00d888, save0);
+    w32(0x9c00d88c, save1);
+    w16(0x9c00d018, 0);                               /* field_pic_flag */
+    w16(0x9c00d01c, 1);                               /* !bottom_field_flag */
+    w16(0x9c00d090, sh.direct_spatial_mv_pred);
+    w16(0x9c00d020, 0);                               /* MbaffFrameFlag */
+    w16(0x9c00d014, pps.constrained_intra_pred);
+    w16(0x9c00d080, sh.nal_ref_idc != 0);
+    w16(0x9c00d084, pps.entropy_coding_mode);
+    w16(0x9c00d010, ((u32)pps.chroma_qp_index_offset & 0x3f) | ((u32)pps.second_chroma_qp_index_offset & 0x3f) << 6);
+    w16(0x9c00d0a0, (u32)sh.qp);
+    w16(0x9c00d024, sh.slice_type);
+    w16(0x9c00d008, sps.mb_width);
+    w16(0x9c00d00c, sps.mb_height);
+    w16(0x9c00d088, sh.first_mb / sps.mb_width);
+    w16(0x9c00d08c, sh.first_mb % sps.mb_width);
+    w16(0x9c00d094, sh.num_ref_idx_l0 - 1);
+    w16(0x9c00d098, 0xffff);                          /* l1 for non-B: S+0x39 - 1 with S+0x39 = 0 */
+    w16(0x9c00d0a4, 0);
+    w16(0x9c00d180, pps.weighted_pred);
+    w16(0x9c00d184, pps.weighted_bipred_idc);
+    w16(0x9c00d188, 0);
+    w16(0x9c00d18c, 0);
+    w16(0x9c00d800, sh.disable_deblocking);
+    w16(0x9c00d804, (u32)sh.alpha_offset);
+    w16(0x9c00d808, (u32)sh.beta_offset);
+    w32(0x9c00d028, 0x3bu << 24 | 0x3cu << 16 | IDX_MVC);
+    w16(0x9c00d02c, IDX_LUMA | IDX_CHROMA << 8);
+    w16(0x9c00d09c, sh.cabac_init_idc);
+    w16(0x9c00d004, (sps.profile_idc > 99) | (sps.chroma_format_idc & 3) << 1 | (pps.transform_8x8_mode & 1) << 3);
+    for (u32 a = 0x9c00d190; a <= 0x9c00d19c; a += 4)
+        w32(a, 0xffffffff);
+    put(0x2040003f);                                  /* ref lists (empty for I) */
+    for (int i = 0; i < 64; i++)
+        put(0);
+    put(0x2000003f);                                  /* inverse map */
+    for (int i = 0; i < 64; i++)
+        put(0);
+    put(0xf8000000);                                  /* end of slice */
+    plat_sync(SPMP_ADDR, ring_n * 4);
+    /* picture decode (h264_trigger_decode / real_decode_h264_video) */
+    u32 pre_dc84 = M(0xdc84), pre_eca0 = M(0xeca0);
+    M(0xde6c) = 0x18;
+    M(0xd980) = 1;
+    for (u32 a = 0xdb00; a <= 0xdb7c; a += 4)
+        M(a) = 0;
+    M(0xd980) = 0;
+    M(0xd0b4) = 0xfe;
+    M(0xd034) = 1;
+    M(0xd924) = EVB_KB << 8 | IDX_EVB;
+    M(0xd54c) = SPMP_KB << 8 | IDX_SPMP;
+    M(0xd548) = 1;
+    M(0xd048) = 1, M(0xd1a4) = 0, M(0xd558) = 0, M(0xd55c) = 0, M(0xd564) = 0;
+    M(0xd550) = 0x1f8;
+    M(0xd550) = 0;
+    M(0xd554) = ring_n << 21 | 0;   /* first slice: length in words, start word 0 */
+    M(0xd558) = 1;
+    M(0xd550) = 0;
+    M(0xd550) = 1;
+    int k1 = poll(0xd550, 1, 1, 200000);
+    int k2 = poll(0xd570, 1, 1, 2000000);
+    u32 d570 = M(0xd570);
+    M(0xd570) = 1;
+    M(0xd550) = 0;
+    int k3 = poll(0xdc84, 1, 1, 2000000);
+    cache_inval(FB_LUMA, 0x70000);
+    cache_inval(FB_CHROMA, 0x38000);
+    /* how much of the luma plane changed, and its first bytes */
+    u32 changed = 0, sum = 0;
+    for (u32 i = 0; i < 0x70000; i += 4) {
+        u32 v = *(volatile u32 *)(FB_LUMA + i);
+        changed += v != 0x55555555;
+        sum += (v & 0xff) + (v >> 8 & 0xff) + (v >> 16 & 0xff) + (v >> 24);
+    }
+    vdec_stats.decodes++;
+    return fmt(o, "vdec decode: slice at %u (header %u bits), DPFU %d save %x/%x; ring %u words; pre DC84 %x ECA0 %x; "
+                  "start %s, done %s (D570 %x), picture end %s; D000 %x D04C %x D0AC %x D55C %x D558 %x D904 %x DC84 %x; "
+                  "luma words changed %u of %u, mean %u; first %08x %08x",
+               slice_at, sh.data_bit_rbsp, r, save0, save1, ring_n, pre_dc84, pre_eca0, k1 ? "TIMEOUT" : "ok",
+               k2 ? "TIMEOUT" : "ok", d570, k3 ? "TIMEOUT" : "ok", M(0xd000), M(0xd04c), M(0xd0ac), M(0xd55c), M(0xd558),
+               M(0xd904), M(0xdc84), changed, 0x70000 / 4, sum / 0x70000, *(volatile u32 *)FB_LUMA,
+               *(volatile u32 *)(FB_LUMA + 4));
+}
+
 int vdec_status(char *o, vdec_fmt fmt)
 {
     return fmt(o, "vdec: %s; D000 %x D04C %x D0AC %x DC84 %x D550 %x D570 %x D704 %x D8A0 %x D920 %x; idx28 %x idx29 %x",

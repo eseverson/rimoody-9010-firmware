@@ -1815,6 +1815,12 @@ static int usb_tx(int ep, int len)
 /* the 802.11 frame is at txbuf + TXDESC_SIZE; mgmt frames go at 1 Mb/s on the MGNT queue (first OUT endpoint, the
  * high queue), data at a fixed 12 Mb/s on BE (second OUT endpoint, the normal queue), as rtl8xxxu maps them */
 static int tx_beacon;   /* next tx_frame is the AP beacon: BEACON queue, hardware sequence number, endpoint 0 */
+/* Hardware CCMP (rtl8xxxu set_key/cam_write): the pairwise key in CAM slot 0 (key id 0, the peer's MAC); unicast data is
+ * then encrypted by the chip (we insert the CCMP header, TXDESC_SEC_AES, the chip appends the MIC) and arrives
+ * decrypted (rx descriptor security != 0 and swdec == 0; CCMP header and MIC left in place, MIC checked: icverr).
+ * Group traffic stays in software. Off by default; HU1 op 21 switches it (software CCMP tops out at ~3.4 Mbit/s). */
+static int hwsec, tx_sec, rx_hwdec, rx_icverr;
+static u32 hw_tx, hw_rx, hw_icv, hwsec_until, hwsec_cmds;   /* revert unless a HU1 command arrives in 60 s */
 static int tx_frame(int flen, int mgmt)
 {
     u8 *d = txbuf, *f = txbuf + TXDESC_SIZE;
@@ -1823,7 +1829,8 @@ static int tx_frame(int flen, int mgmt)
     d[0] = flen, d[1] = flen >> 8, d[2] = TXDESC_SIZE;
     const u8 *da = (f[1] & 1) ? f + 16 : f + 4;   /* ieee80211_get_DA: A3 for ToDS */
     d[3] = TXDESC_OWN | TXDESC_FIRST_SEGMENT | TXDESC_LAST_SEGMENT | (da[0] & 1 ? TXDESC_BROADMULTICAST : 0);
-    put32le(d + 4, (tx_beacon ? 0x10u : mgmt ? TXDESC_QUEUE_MGNT : TXDESC_QUEUE_BE) << TXDESC_QUEUE_SHIFT);
+    put32le(d + 4, (tx_beacon ? 0x10u : mgmt ? TXDESC_QUEUE_MGNT : TXDESC_QUEUE_BE) << TXDESC_QUEUE_SHIFT |
+                       (tx_sec ? 0x00c00000u : 0));   /* TXDESC_SEC_AES */
     put32le(d + 8, TXDESC40_AGG_BREAK);
     put32le(d + 12, TXDESC40_USE_DRIVER_RATE);
     put32le(d + 16, (mgmt ? DESC_RATE_1M : DESC_RATE_12M) | TXDESC40_RETRY_LIMIT_ENABLE |
@@ -1863,6 +1870,41 @@ static cu64 tx_pn, rx_pn_tk, rx_pn_gtk[4];
 static u32 rx_frames, rx_data, dec_fail, replays, beacons;
 static const u8 our_rsn[] = { 0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
                               0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00 };   /* RSN v1, CCMP/CCMP, PSK, no PMF */
+
+static void cam_write(int slot, const u8 *mac, const u8 *key, int keyid, int group)   /* rtl8xxxu_cam_write */
+{
+    u32 ctrl = 4u << 2 | (u32)keyid | BIT(15) | (group ? BIT(6) : 0);   /* CCMP, valid */
+    for (int j = 5; j >= 0; j--) {
+        u32 v = j == 0 ? ctrl | (u32)mac[0] << 16 | (u32)mac[1] << 24
+                : j == 1 ? mac[2] | (u32)mac[3] << 8 | (u32)mac[4] << 16 | (u32)mac[5] << 24
+                         : key[(j - 2) * 4] | (u32)key[(j - 2) * 4 + 1] << 8 | (u32)key[(j - 2) * 4 + 2] << 16 |
+                               (u32)key[(j - 2) * 4 + 3] << 24;
+        rw32(REG_CAM_WRITE, v);
+        rw32(REG_CAM_CMD, CAM_CMD_POLLING | CAM_CMD_WRITE | (u32)(slot << 3 | j));
+        ub_udelay(100);
+    }
+}
+
+static void hwsec_apply(const u8 *peer)   /* (re)install the pairwise key for the chip, or turn the chip's crypto off */
+{
+    if (hwsec && tk_ok) {
+        rw16(REG_CR, rr16(REG_CR) | CR_SECURITY_ENABLE);
+        rw8(REG_SECURITY_CFG, 0xcf);   /* TX/RX enable, default keys for unicast and broadcast */
+        cam_write(0, peer, tk, 0, 0);
+        lprintf("hwsec: pairwise key in CAM slot 0 for %02x:%02x:%02x:%02x:%02x:%02x\n", peer[0], peer[1], peer[2],
+                peer[3], peer[4], peer[5]);
+    } else {
+        rw8(REG_SECURITY_CFG, 0);
+        rw32(REG_CAM_CMD, CAM_CMD_POLLING | BIT(30));   /* clear the CAM */
+    }
+}
+
+/* CCMP header (IEEE 802.11 12.5.3.2) for a frame the chip will encrypt: PN0 PN1 0 (ExtIV | keyid<<6) PN2..PN5 */
+static void ccmp_hdr(u8 *h, cu64 pn, int keyid)
+{
+    h[0] = (u8)pn, h[1] = (u8)(pn >> 8), h[2] = 0, h[3] = (u8)(0x20 | keyid << 6);
+    h[4] = (u8)(pn >> 16), h[5] = (u8)(pn >> 24), h[6] = (u8)(pn >> 32), h[7] = (u8)(pn >> 40);
+}
 
 static u8 *mgmt_hdr(int fc0, const u8 *a1)
 {
@@ -1929,6 +1971,15 @@ static int tx_data(const u8 *dst, int type, const u8 *p, int len, int protect)
     /* keep the USB transfer off a multiple of 512 (no zero-length packet from U-Boot's EHCI): IPv4 tolerates a pad */
     if (type == 0x0800 && (TXDESC_SIZE + 24 + plen + (protect ? 16 : 0)) % 512 == 0)
         body[plen++] = 0, tx_pad++;
+    if (protect && hwsec && !(dst[0] & 1)) {   /* the chip encrypts: header bit + CCMP header, no MIC */
+        f[1] |= 0x40;
+        ccmp_hdr(f + 24, ++tx_pn, 0);
+        tx_sec = 1;
+        int r = tx_frame(24 + 8 + plen, 0);
+        tx_sec = 0;
+        hw_tx++;
+        return r;
+    }
     int flen = protect ? ccmp_encrypt(tk, f, 24, plen, ++tx_pn, 0) : 24 + plen;
     return tx_frame(flen, 0);
 }
@@ -2103,6 +2154,7 @@ static void eapol_in(const u8 *p, int n)
     if (act & WPA_PTK) {
         cpy(tk, wpa.ptk + 32, 16);
         tk_ok = 1, tx_pn = 0, rx_pn_tk = 0;
+        hwsec_apply(bss.addr);
     }
     if (act & WPA_GTK) {
         int id = wpa.gtk_id;
@@ -2132,7 +2184,17 @@ static void data_frame(u8 *f, int len)
         return;   /* too short, or our own broadcast relayed back by the AP */
     u8 *body;
     int n, prot = f[1] & 0x40;
-    if (prot) {
+    if (prot && rx_hwdec) {   /* decrypted by the chip: CCMP header and MIC still there */
+        const u8 *h = f + hl;
+        cu64 pn = h[0] | (cu64)h[1] << 8 | (cu64)h[4] << 16 | (cu64)h[5] << 24 | (cu64)h[6] << 32 | (cu64)h[7] << 40;
+        if (len < hl + 16 || pn <= rx_pn_tk) {
+            replays += len >= hl + 16;
+            return;
+        }
+        rx_pn_tk = pn;
+        body = f + hl + 8, n = len - hl - 16;
+        hw_rx++;
+    } else if (prot) {
         int keyid = f[hl + 3] >> 6, mc = da[0] & 1;
         if (mc ? !gtk_ok[keyid] : !tk_ok)
             return;
@@ -2250,6 +2312,10 @@ static void parse_rx(int n)
             dumps++;
             lprintf("rx sample: pktlen %d drvinfo %d fc %02x%02x\n", pktlen, drv, f[0], f[1]);
         }
+        rx_hwdec = ((d0 >> 20) & 7) && !(d0 & BIT(27));   /* security set, not left for software */
+        rx_icverr = (d0 & BIT(15)) != 0;
+        if (rx_hwdec && rx_icverr)
+            hw_icv++;
         if (!(d2 & BIT(28)) && !(d0 & (BIT(14) | BIT(15))) && pktlen >= 24) {   /* not C2H, no CRC/ICV error */
             rx_frames++;
             int type = (f[0] >> 2) & 3;
@@ -2488,6 +2554,15 @@ static int ap_tx_data(const u8 *dst, int type, const u8 *p, int len, int protect
     int plen = 8 + len;
     if (type == 0x0800 && (TXDESC_SIZE + 24 + plen + (protect ? 16 : 0)) % 512 == 0)
         body[plen++] = 0, tx_pad++;
+    if (protect && hwsec && !mc) {
+        f[1] |= 0x40;
+        ccmp_hdr(f + 24, ++tx_pn, 0);
+        tx_sec = 1;
+        int r = tx_frame(24 + 8 + plen, 0);
+        tx_sec = 0;
+        hw_tx++;
+        return r;
+    }
     int flen = !protect ? 24 + plen : mc ? ccmp_encrypt(ap_gtk, f, 24, plen, ++ap_gtk_pn, 1)
                                          : ccmp_encrypt(tk, f, 24, plen, ++tx_pn, 0);
     return tx_frame(flen, 0);
@@ -2538,7 +2613,15 @@ static void ap_data_frame(u8 *f, int len)
         return;
     u8 *body;
     int n;
-    if (f[1] & 0x40) {
+    if ((f[1] & 0x40) && rx_hwdec) {
+        const u8 *h = f + hl;
+        cu64 pn = h[0] | (cu64)h[1] << 8 | (cu64)h[4] << 16 | (cu64)h[5] << 24 | (cu64)h[6] << 32 | (cu64)h[7] << 40;
+        if (sta_st < 3 || len < hl + 16 || pn <= sta_rx_pn)
+            return;
+        sta_rx_pn = pn;
+        body = f + hl + 8, n = len - hl - 16;
+        hw_rx++;
+    } else if (f[1] & 0x40) {
         if (sta_st < 3)
             return;
         cu64 pn;
@@ -2574,6 +2657,7 @@ static void ap_data_frame(u8 *f, int len)
         if (a & WPA_AP_DONE) {
             cpy(tk, wap.ptk + 32, 16);
             tk_ok = keys_ok = 1, tx_pn = 0, sta_rx_pn = 0;
+            hwsec_apply(sta);
             sta_st = 3;
             lprintf("ap: 4-way done, station keyed t=%u\n", ub_ms(0));
             flush("ap station keyed");
@@ -3138,6 +3222,15 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         ap_start_ch = ch, ap_start_pending = 1, deferred_at = ub_ms(0) + 300;
         return vfmt_n(t, "ap: starting on channel %d as '%s' after this reply; this network connection ends", ch, ap_req_ssid);
     }
+    case 21:   /* HWSEC: [u8 on] -> hardware CCMP for unicast (applied to the current key at once); status */
+        if (n >= 1) {
+            hwsec = p[0] != 0;
+            hwsec_apply(jstate == J_AP ? sta : bss.addr);
+            hwsec_until = hwsec ? ub_ms(0) + 60000 : 0;
+            hwsec_cmds = (u32)ip_stats[5] + 1;   /* this command counts once its reply is out */
+        }
+        return vfmt_n(t, "hwsec %s; chip-encrypted tx %u, chip-decrypted rx %u, icv errors %u; SEC_CFG %x CR %x",
+                      hwsec ? "on" : "off", hw_tx, hw_rx, hw_icv, rr8(REG_SECURITY_CFG), rr16(REG_CR));
     case 20: {   /* BENCH: software CCMP encrypt + decrypt of 1500-byte frames (the TCP throughput question) */
         static u8 fr[24 + 8 + 1500 + 16];
         static const u8 key[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
@@ -3166,6 +3259,8 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             return vdec_init(t, vfmt_n);
         if (c == 2 && n >= 9)
             return vdec_bitread(le32(p + 1), le32(p + 5), t, vfmt_n);
+        if (c == 3 && n >= 9)
+            return vdec_decode(le32(p + 1), le32(p + 5), t, vfmt_n);
         return vdec_status(t, vfmt_n);
     }
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */
@@ -3325,6 +3420,13 @@ static void net_loop(void)
             mlme_tick();
         ip_poll();
         lw_poll();
+        if (hwsec_until && (u32)ip_stats[5] > hwsec_cmds)
+            hwsec_until = 0;   /* a HU1 command made it through with the chip's crypto: keep it */
+        else if (hwsec_until && (int)(ub_ms(0) - hwsec_until) >= 0) {
+            hwsec_until = 0, hwsec = 0;
+            hwsec_apply(jstate == J_AP ? sta : bss.addr);
+            log_s("hwsec: no HU1 command within 60 s of enabling it, back to software CCMP\n");
+        }
         if (ap_start_pending && (int)(ub_ms(0) - deferred_at) >= 0) {
             ap_start_pending = 0;
             ap_start(ap_start_ch, ap_req_ssid, ap_req_psk);

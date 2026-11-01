@@ -7,4 +7,5 @@ typedef int (*vdec_fmt)(char *, const char *, ...);
 int vdec_init(char *o, vdec_fmt fmt);
 int vdec_bitread(unsigned int src, unsigned int len, char *o, vdec_fmt fmt);
 int vdec_status(char *o, vdec_fmt fmt);
+int vdec_decode(unsigned int src, unsigned int len, char *o, vdec_fmt fmt);   /* step 4: one I picture */
 #endif
