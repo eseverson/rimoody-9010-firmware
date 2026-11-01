@@ -40,6 +40,7 @@ typedef signed char s8;
 #include "vdec.h"
 #include "aa.h"
 #include "aa_tcp.h"
+#include "vpp.h"
 #include "ip.h"
 #include "mcu.h"
 #include "irq.h"
@@ -3099,6 +3100,22 @@ static int usb_op(int c, int count, char *o)
 }
 
 /* ---- HU1 op 17 FS: our own SD + FatFs (helpers above save_log) ---- */
+/* ---- VPP0 tests (vpp.c, HU1 op 24): the console's OSD layer is off while one runs, everything comes back after
+ * vpp_restore_at ---- */
+static u32 vpp_restore_at;
+static int vpp_osd_was_on;
+static void vpp_restore_now(void)
+{
+    vpp_restore();
+    vpp_restore_at = 0;
+    if (vpp_osd_was_on) {
+        con_lock_take();
+        fb_enable();
+        con_lock_give();
+        vpp_osd_was_on = 0;
+    }
+}
+
 /* ---- wireless Android Auto (aa.c over aa_tcp.c), HU1 op 22. Net task only. The head unit's certificate and key are
  * read from the SD card (AACERT.PEM, AAKEY.PEM), never built into the image. Video access units go straight to the
  * hardware decoder (vdec_feed). ---- */
@@ -3436,6 +3453,24 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         extern int aa_tls_bench(char *o, int (*fmt)(char *, const char *, ...));
         return k + aa_tls_bench(t + k, vfmt_n);
     }
+    case 24: {   /* VPP: 0 status, 1 color bar, 2 decoder picture [u8 seconds (20), u8 DMIX slot], 3 restore, 4 poke */
+        int c = n ? p[0] : 0;
+        unsigned int l = 0, ch = 0;
+        int slot = vdec_last_slot(&l, &ch);
+        if (c == 2 && slot < 0)
+            return vfmt_n(t, "ERR vpp: no decoded picture yet (hu.py vdec decode first)");
+        if (c == 1 || c == 2 || c == 4) {
+            con_lock_take();
+            if (fb_on_flag)
+                fb_disable(), vpp_osd_was_on = 1;
+            con_lock_give();
+            vpp_restore_at = ub_ms(0) + 1000u * (n >= 2 && p[1] ? p[1] : 20);
+        }
+        int k = vpp_op(p, n, t, vfmt_n, (u32)slot, 0x14u + (u32)slot);
+        if (c == 3)
+            vpp_restore_now();
+        return k;
+    }
     case 22:   /* AA: 0 status, 1 start listening [port u16] */
         return aa_op(n ? p[0] : 0, p, n, t);
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */
@@ -3606,6 +3641,8 @@ static void net_loop(void)
         unsigned long long tp2 = clk_us();
         if (aa_listening)
             aa_touch_poll();
+        if (vpp_restore_at && (int)(ub_ms(0) - vpp_restore_at) >= 0)
+            vpp_restore_now();
         lw_poll();
         unsigned long long tp3 = clk_us();
         prof_rx_us += tp1 - tp0, prof_mid_us += tp2 - tp1, prof_lw_us += tp3 - tp2, prof_iters++;
