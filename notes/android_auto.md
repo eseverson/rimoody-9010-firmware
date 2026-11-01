@@ -98,3 +98,13 @@ Consequences for the plan: the USB phone port and AOA work is dropped (`test/aa_
 - Stock AA TCP endpoint: IP 192.168.0.1, port 8765 (0x3927C8).
 - Other BT commands go through a selector (0x3887D0) using a flash table near 0x984ACE80; its layout is not decoded yet (the bytes there are 8-byte index/value pairs).
 - Next: watch the MCU link (receive only) while a phone pairs and starts wireless AA under stock firmware, if the stock firmware can be booted with our UART tap; otherwise decode the inbound dispatch.
+
+## Wireless pieces built (2026-10-31, all host-tested, in `make test`)
+- `aa_wl.c`: RFCOMM handshake (WifiStartRequest / WifiInfoResponse, phone replies), byte-exact against hand-encoded protobuf.
+- `aa_tcp.c`: aa.c over lwIP TCP; scripted phone gets the version request and a TLS ClientHello.
+- lwIP 2.2.0 (`lwip/`, `lwipopts.h`): 8 MB transfer with 1% loss intact.
+- `wpa_ap.c`: WPA2-PSK authenticator; full 4-way handshake against our supplicant, wrong passphrase rejected.
+- `dhcps.c`: DHCP server; lwIP's client gets 192.168.43.2/24.
+- `ap80211.c`: beacon / probe response / auth / assoc response (b/g/n HT20, WPA2-CCMP RSN, WMM) dissected by tshark without errors, plus parsing of phone frames.
+- RTL8188F AP mode recipe from Linux rtl8xxxu (v6.12): MSR link type 3 (AP) at 0x102; BEACON_CTRL 0x550 = DIS_TSF_UPDATE | BCN_FUNC_EN | MBSSID | TX_BCN_RPT after a TSF0 reset (0x553); ATIMWND 0x55A = 0x0C; BCN_INTERVAL 0x554 = 100; TBTT_PROHIBIT 0x540 = 0x6404 then +1 = 0x80 and +2 &= 0xF0 when beaconing; FWHW_TXQ_CTRL 0x420 +2 |= EN_BCNQ_DL>>16; beacon sent as a normal TX frame on queue 0x10 after clearing BCN_VALID (TDECTRL 0x208 bit 16, write 1) and SW_BCN_SEL (0x228 bit 20), then wait BCN_VALID; RCR without CHECK_BSSID_MATCH / CHECK_BSSID_BEACON; H2C media status connect for the broadcast MACID; keys through the CAM as in station mode.
+- Next on hardware: AP mode in net.c (radio + these modules), lwIP netif over the 802.11 data path, then BT RFCOMM (needs the owner's go-ahead for `AC` frames).
