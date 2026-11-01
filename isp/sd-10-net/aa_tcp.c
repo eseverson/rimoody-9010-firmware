@@ -79,5 +79,38 @@ int aa_tcp_listen(const struct aa_platform *p, const void *netif_or_null, int po
     return 0;
 }
 
+static err_t on_connected(void *arg, struct tcp_pcb *pcb, err_t err)
+{
+    (void)arg;
+    if (err != ERR_OK)
+        return err;
+    conn = pcb;
+    tcp_nagle_disable(pcb);
+    tcp_recv(pcb, on_recv);
+    aa_start(&plat);
+    return ERR_OK;
+}
+
+/* Head-unit-server mode (Android Auto developer settings, "Start head unit server"): the phone listens (port 5277)
+ * and the head unit connects to it; the protocol on top is the same (we are still the TLS client). */
+int aa_tcp_connect(const struct aa_platform *p, unsigned int ip_be, int port)
+{
+    if (conn)
+        return -3;
+    plat = *p;
+    plat.send = tcp_send_cb;
+    struct tcp_pcb *pcb = tcp_new();
+    if (!pcb)
+        return -1;
+    ip_addr_t a;
+    IP4_ADDR(&a, ip_be >> 24 & 0xff, ip_be >> 16 & 0xff, ip_be >> 8 & 0xff, ip_be & 0xff);
+    tcp_err(pcb, on_err);
+    if (tcp_connect(pcb, &a, (u16_t)port, on_connected) != ERR_OK) {
+        tcp_abort(pcb);
+        return -2;
+    }
+    return 0;
+}
+
 int aa_tcp_connected(void) { return conn != 0; }
 unsigned int aa_tcp_tx_drops(void) { return tx_drops; }

@@ -236,8 +236,8 @@ def main():
     p = sub.add_parser('vdec', help='hardware H.264 decoder bring-up: status | init | bitread FILE.h264')
     p.add_argument('what', choices=['status', 'init', 'bitread', 'decode', 'spmp', 'prepare']); p.add_argument('file', nargs='?')
     p.add_argument('--pics', type=int, default=1, help='decode: pictures to decode (0: all)'); p.add_argument('--skip', type=lambda x: int(x, 0), default=0)
-    p = sub.add_parser('aa', help='wireless Android Auto: status | start [PORT] (cert/key from AACERT.PEM / AAKEY.PEM on the card)')
-    p.add_argument('what', choices=['status', 'start']); p.add_argument('port', nargs='?', type=int, default=5288)
+    p = sub.add_parser('aa', help='wireless Android Auto: status | start [PORT] | connect PHONE_IP[:PORT] (cert/key from AACERT.PEM / AAKEY.PEM on the card)')
+    p.add_argument('what', choices=['status', 'start', 'connect']); p.add_argument('target', nargs='?', default='5288')
     p = sub.add_parser('vpp', help='VPP0 video layer tests: status | bars [SECS [SLOT]] | show [SECS [SLOT]] | restore | poke ADDR VAL')
     p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk', 'bisect']); p.add_argument('args', nargs='*')
     p = sub.add_parser('osdvid', help='video through the OSD layer: status | show [SECS] | on | off')
@@ -348,7 +348,13 @@ def main():
         else:
             print(u.call(OP_VDEC, bytes([{'status': 0, 'init': 1, 'spmp': 4}[a.what]])).decode(errors='replace'))
     elif a.op == 'aa':
-        payload = bytes([1]) + struct.pack('<H', a.port) if a.what == 'start' else bytes([0])
+        if a.what == 'start':
+            payload = bytes([1]) + struct.pack('<H', int(a.target))
+        elif a.what == 'connect':   # phone running Android Auto's "head unit server" (developer settings), port 5277
+            host, _, port = a.target.partition(':')
+            payload = bytes([2]) + bytes(int(x) for x in host.split('.')) + struct.pack('<H', int(port or 5277))
+        else:
+            payload = bytes([0])
         print(u.call(OP_AA, payload).decode(errors='replace'))
     elif a.op == 'vpp':
         c = {'status': 0, 'bars': 1, 'show': 2, 'restore': 3, 'poke': 4, 'clock': 5, 'linear': 6, 'gclk': 7, 'bisect': 8}[a.what]

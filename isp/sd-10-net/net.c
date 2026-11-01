@@ -3175,10 +3175,13 @@ static void aa_touch_poll(void)   /* net task: panel 1024 x 600 -> video 800 x 4
 static int aa_op(int c, const u8 *p, int n, char *t)
 {
     const struct aa_status *a = aa_status();
-    if (c == 1) {   /* start: [port u16, default 5288] */
-        int port = n >= 3 ? p[1] | p[2] << 8 : 5288;
-        if (aa_listening)
+    if (c == 1 || c == 2) {   /* 1 start: [port u16, default 5288]; 2 connect: ip[4] port u16 (phone's head unit server) */
+        int port = c == 1 ? (n >= 3 ? p[1] | p[2] << 8 : 5288) : (n >= 7 ? p[5] | p[6] << 8 : 5277);
+        u32 ip = n >= 5 ? (u32)p[1] << 24 | (u32)p[2] << 16 | (u32)p[3] << 8 | p[4] : 0;
+        if (c == 1 && aa_listening)
             return vfmt_n(t, "ERR aa: already listening");
+        if (c == 2 && (!ip || aa_tcp_connected()))
+            return vfmt_n(t, "ERR aa: no ip, or a session is up");
         u32 cl, kl;
         if (fs_load("AACERT.PEM", aa_cert, sizeof aa_cert - 1, &cl) || !cl || fs_load("AAKEY.PEM", aa_key, sizeof aa_key - 1, &kl) || !kl)
             return vfmt_n(t, "ERR aa: AACERT.PEM / AAKEY.PEM not readable on the card");
@@ -3189,11 +3192,18 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         static struct aa_platform pf;
         pf.video = aa_video_cb, pf.log = aa_log_cb, pf.now_us = clk_us;
         pf.cert = aa_cert, pf.cert_len = cl + 1, pf.key = aa_key, pf.key_len = kl + 1, pf.dpi = 160;
+        gt9_hook = aa_touch_hook;
+        if (c == 2) {
+            int r = aa_tcp_connect(&pf, ip, port);
+            if (r)
+                return vfmt_n(t, "ERR aa: connect failed (%d)", r);
+            return vfmt_n(t, "aa: connecting to %u.%u.%u.%u:%d (cert %u B, key %u B); %s", ip >> 24, ip >> 16 & 0xff,
+                          ip >> 8 & 0xff, ip & 0xff, port, cl, kl, vm);
+        }
         int r = aa_tcp_listen(&pf, 0, port);
         if (r)
             return vfmt_n(t, "ERR aa: listen on %d failed (%d)", port, r);
         aa_listening = port;
-        gt9_hook = aa_touch_hook;
         return vfmt_n(t, "aa: listening on TCP %d (cert %u B, key %u B); %s", port, cl, kl, vm);
     }
     static const char *const names[] = { "idle", "version", "tls", "authed", "discovery", "running", "closed", "error" };
