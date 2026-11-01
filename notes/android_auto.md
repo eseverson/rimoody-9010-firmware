@@ -34,7 +34,19 @@ The certificate for C: Google's phone app only talks to head units presenting a 
 
 **C: our own Android Auto stack, using this unit's certificate.** The embedded certificate is Google's reference head-unit certificate (subject O=Google-Linux-Reference, issuer O=Google Automotive Link, RSA-2048, sha256WithRSA, valid 2014-08-12 to 2044-08-11), with the Google Automotive Link root (2014-06-06 to 2044-06-05) and one private key. The key and certificate stay out of git and out of the payload image: the payload will load them from the SD card at runtime.
 
-## Plan for C
+## Wireless only (owner, 2026-10-31)
+
+USB Android Auto is not wanted, only wireless. How wireless AA works: the phone pairs with the head unit over Bluetooth, finds the AA wireless RFCOMM service (UUID 4de17a00-52cb-11e6-bdf4-0800200c9a66), and over RFCOMM receives the head unit's Wi-Fi access point (SSID, password, BSSID, security) and an IP/port; it joins the AP and opens a TCP connection, and from there the AA protocol is the same as over USB (same framing, TLS, channels).
+
+The stock firmware does exactly this on this hardware: hostapd with the RTL8188F in AP mode (2.4 GHz; the chip has no 5 GHz) and an RFCOMM interface to the Bluetooth chip (`RFCOMM_IF_sendData`; the AA module's `AABluetoothEndpoint` / `AAWifiDiscovery` / `setWiFiInfo` / `setWiFiIPAndPort`). So 2.4 GHz wireless AA is accepted by phones, at least the ones the vendor tested.
+
+Consequences for the plan: the USB phone port and AOA work is dropped (`test/aa_host.c` stays only as a protocol harness); `aa.c` is transport-independent and stays. New pieces:
+1. **Wi-Fi AP mode** on our RTL8188F driver: beacons, probe/auth/assoc responses, a WPA2-PSK authenticator (the 4-way handshake from the AP side; wpa.c has the supplicant side), and a DHCP server for one client. Reference: Linux rtl8xxxu gained AP mode for the 8188F.
+2. **TCP**: lwIP (raw API, in the net task) on a netif over our 802.11 data path, replacing ip.c's hand-rolled UDP/ARP/ICMP; HU1 moves onto it.
+3. **Bluetooth RFCOMM** through the Jieli AC6965A: how eCos registers the AA service and moves RFCOMM data over the chip's link (being mapped). The Jieli's own firmware does the Bluetooth stack; we only get what its UART protocol exposes.
+4. Decoder and audio as before.
+
+## Plan for C (USB parts superseded by the wireless section above)
 
 1. H.264 decoder: map `h264_vid.c` and the decoder register block from the eCos disassembly (bitstream feed, frame buffers, output format, how frames reach the display layer). Biggest unknown; decides feasibility.
 2. Phone USB port: which controller (EHCI0 at 0x9C102100 is the candidate), generalize usbh.c, AOA switch (control requests 51/52/53).
