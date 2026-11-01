@@ -37,6 +37,7 @@ typedef signed char s8;
 #include "wpa_ap.h"
 #include "ap80211.h"
 #include "lwnet.h"
+#include "vdec.h"
 #include "ip.h"
 #include "mcu.h"
 #include "irq.h"
@@ -3136,6 +3137,36 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             return vfmt_n(t, "ERR ap: channel 1..13, ssid, psk 8..63 chars");
         ap_start_ch = ch, ap_start_pending = 1, deferred_at = ub_ms(0) + 300;
         return vfmt_n(t, "ap: starting on channel %d as '%s' after this reply; this network connection ends", ch, ap_req_ssid);
+    }
+    case 20: {   /* BENCH: software CCMP encrypt + decrypt of 1500-byte frames (the TCP throughput question) */
+        static u8 fr[24 + 8 + 1500 + 16];
+        static const u8 key[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+        for (int i = 0; i < (int)sizeof fr; i++)
+            fr[i] = (u8)i;
+        fr[0] = 0x08, fr[1] = 0x41;
+        u32 t0 = clk_ms(), nfr = 200;
+        for (u32 i = 0; i < nfr; i++) {
+            ccmp_encrypt(key, fr, 24, 1500, i + 1, 0);
+            irq_pet();
+        }
+        u32 t1 = clk_ms();
+        cu64 pn;
+        int ok = 0;
+        for (u32 i = 0; i < nfr; i++) {
+            ccmp_encrypt(key, fr, 24, 1500, i + 1, 0);
+            ok += ccmp_decrypt(key, fr, 24 + 8 + 1500 + 8, 24, &pn) == 1500;
+        }
+        u32 t2 = clk_ms(), enc = t1 - t0, both = t2 - t1;
+        return vfmt_n(t, "bench: CCMP encrypt %u x 1500 B in %u ms (%u kB/s); encrypt+decrypt %u ms -> decrypt alone ~%u kB/s; %u ok",
+                      nfr, enc, enc ? nfr * 1500 / enc : 0, both, both > enc ? nfr * 1500 / (both - enc) : 0, ok);
+    }
+    case 19: {   /* VDEC: 0 status, 1 init, 2 bit-reader test on an access unit at addr (u32) of len (u32) */
+        int c = n ? p[0] : 0;
+        if (c == 1)
+            return vdec_init(t, vfmt_n);
+        if (c == 2 && n >= 9)
+            return vdec_bitread(le32(p + 1), le32(p + 5), t, vfmt_n);
+        return vdec_status(t, vfmt_n);
     }
     case 16:   /* USB: 0 status, 1 compare U-Boot vs ehci.c on N register reads, 2 own driver on, 3 off */
         return usb_op(n ? p[0] : 0, n >= 3 ? p[1] | p[2] << 8 : 200, t);
