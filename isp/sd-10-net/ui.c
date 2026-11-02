@@ -352,14 +352,6 @@ static void theme_cb(lv_event_t *e)
     settings_save();
 }
 
-static lv_obj_t *lights_label;
-static void lights_text(void)
-{
-    if (lights_label)
-        lv_label_set_text(lights_label, lights ? "Headlights on: night brightness, Android Auto in night mode"
-                                               : "Headlights off: day brightness");
-}
-
 /* the headlight input, every 200 ms; a change counts after 5 equal readings in a row (eCos does the same) */
 static void lights_timer(lv_timer_t *t)
 {
@@ -373,7 +365,6 @@ static void lights_timer(lv_timer_t *t)
         apply_backlight();
         plat_ui_night(lights);
         theme_update();
-        lights_text();
     }
 }
 
@@ -446,15 +437,6 @@ static lv_obj_t *row(lv_obj_t *page, const char *text)
     lv_obj_set_flex_grow(l, 1);
     lv_obj_set_style_pad_right(l, 16, 0);
     return r;
-}
-
-static void note(lv_obj_t *page, const char *text)
-{
-    lv_obj_t *l = lv_label_create(page);
-    lv_label_set_text(l, text);
-    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(l, LV_PCT(100));
-    lv_obj_add_style(l, &st_section, 0);
 }
 
 static void wifi_ta_cb(lv_event_t *e)   /* the keyboard types into whichever field was tapped */
@@ -590,7 +572,6 @@ static void build_settings(void)
     lv_obj_t *wb = lv_button_create(r);
     lv_label_set_text(lv_label_create(wb), "Change");
     lv_obj_add_event_cb(wb, wifi_open_cb, LV_EVENT_CLICKED, 0);
-    note(p, "Change saves the network to WIFI.TXT on the SD card and restarts the unit.");
 
     p = page(scr_settings, 1, "Android Auto", nav);
     r = row(p, "Enabled");
@@ -598,7 +579,6 @@ static void build_settings(void)
     if (aa_enabled)
         lv_obj_add_state(sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(sw, aa_switch_cb, LV_EVENT_VALUE_CHANGED, 0);
-    note(p, "When enabled, the unit switches to Android Auto as soon as the phone's video starts.");
 
     p = page(scr_settings, 2, "Display", nav);
     static const char *const bright_names[] = { "Brightness", "With headlights on" };
@@ -622,23 +602,16 @@ static void build_settings(void)
     lv_obj_set_size(bm, 330, 64);
     lv_obj_set_style_pad_all(bm, 4, 0);
     lv_obj_add_event_cb(bm, theme_cb, LV_EVENT_VALUE_CHANGED, 0);
-    lights_label = lv_label_create(p);
-    lv_obj_add_style(lights_label, &st_row, 0);
-    lv_obj_set_width(lights_label, LV_PCT(100));
-    lv_obj_set_style_pad_all(lights_label, 16, 0);
-    lights_text();
-    note(p, "Headlights come from the harness illumination wire. Auto theme turns dark with them.");
 
     p = page(scr_settings, 3, "Audio", nav);
     row(p, "Equalizer");
-    note(p, "Comes with audio output (not built yet).");
 
     p = page(scr_settings, 4, "System", nav);
     r = row(p, "Restart the head unit");
     lv_obj_t *b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Reboot");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)0);
-    r = row(p, "Log console (Home or Back returns)");
+    r = row(p, "Log console");
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Open");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)2);
