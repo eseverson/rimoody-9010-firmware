@@ -59,10 +59,17 @@ void ui_aa_session(int active)
         aa_session = active, aa_session_seen++;
 }
 
-void ui_assert_failed(void)
+void ui_assert_failed(void)   /* LVGL logged the failed check just before; park the UI task, keep the unit up */
 {
+    plat_ui_log("ui: LVGL assertion failed, UI stopped\n");
     for (;;)
         vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+static void log_cb(lv_log_level_t level, const char *buf)
+{
+    (void)level;
+    plat_ui_log(buf);
 }
 
 /* ---- display and input drivers ---- */
@@ -197,6 +204,9 @@ static void apply_theme(void)
     lv_theme_t *t = lv_theme_default_init(d, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_GREY), dark,
                                           &lv_font_montserrat_20);
     lv_display_set_theme(d, t);
+    /* the bottom layer is created like a screen and picks up the theme's opaque screen colour; it must stay
+     * transparent so a transparent screen (the AA view) shows the video on VPP0 */
+    lv_obj_set_style_bg_opa(lv_layer_bottom(), LV_OPA_TRANSP, 0);
 }
 
 static void dark_cb(lv_event_t *e)
@@ -326,8 +336,8 @@ static void build_console(void)
 
 static void vol_hide(lv_timer_t *t)
 {
-    (void)t;
     lv_obj_add_flag(vol_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_pause(t);   /* kept for the next press (a repeat count would make LVGL delete it) */
 }
 
 static void build_volume(void)
@@ -356,6 +366,7 @@ static void build_volume(void)
     lv_obj_align(vol_num, LV_ALIGN_RIGHT_MID, -10, 0);
     lv_obj_add_flag(vol_panel, LV_OBJ_FLAG_HIDDEN);
     vol_timer = lv_timer_create(vol_hide, 1500, 0);
+    lv_timer_set_auto_delete(vol_timer, false);
     lv_timer_pause(vol_timer);
 }
 
@@ -367,7 +378,6 @@ static void vol_show(void)
     lv_obj_remove_flag(vol_panel, LV_OBJ_FLAG_HIDDEN);
     lv_timer_reset(vol_timer);
     lv_timer_resume(vol_timer);
-    lv_timer_set_repeat_count(vol_timer, 1);
 }
 
 /* ---- navigation ---- */
@@ -454,6 +464,7 @@ static void ui_task(void *arg)
 {
     (void)arg;
     lv_init();
+    lv_log_register_print_cb(log_cb);
     lv_tick_set_cb(tick_cb);
     lv_display_t *d = lv_display_create(PANEL_W, PANEL_H);
     lv_display_set_color_format(d, LV_COLOR_FORMAT_ARGB8888);

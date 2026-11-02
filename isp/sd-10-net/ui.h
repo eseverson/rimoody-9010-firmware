@@ -25,5 +25,6 @@ void plat_ui_brightness(int percent);
 void plat_ui_video_hide(void);                  /* the AA view went away: VPP0 off */
 int plat_ui_status(char *out, int max);         /* one line of network / build status for Settings */
 int plat_ui_console(char *out, int max);        /* the log tail for the console screen */
+void plat_ui_log(const char *s);                /* a line into the payload's log */
 
 #endif

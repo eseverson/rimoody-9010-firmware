@@ -275,7 +275,7 @@
  *-----------*/
 
 /*Enable the log module*/
-#define LV_USE_LOG 0
+#define LV_USE_LOG 1
 #if LV_USE_LOG
 
     /*How important log should be added:
@@ -327,8 +327,8 @@
 #define LV_USE_ASSERT_NULL          1
 #define LV_USE_ASSERT_MALLOC        1
 #define LV_USE_ASSERT_STYLE         0   /*Check if the styles are properly initialized. (Very fast, recommended)*/
-#define LV_USE_ASSERT_MEM_INTEGRITY 0   /*Check the integrity of `lv_mem` after critical operations. (Slow)*/
-#define LV_USE_ASSERT_OBJ           0   /*Check the object's type and existence (e.g. not deleted). (Slow)*/
+#define LV_USE_ASSERT_MEM_INTEGRITY 1
+#define LV_USE_ASSERT_OBJ           1
 
 /*Add a custom handler when assert happens e.g. to restart the MCU*/
 #define LV_ASSERT_HANDLER_INCLUDE <stdint.h>

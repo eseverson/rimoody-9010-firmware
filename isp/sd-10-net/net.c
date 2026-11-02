@@ -3189,6 +3189,7 @@ void plat_ui_aa_key(int keycode) { ui_req_key = keycode; }
 void plat_ui_aa_enable(int on) { ui_aa_enabled = on; }
 void plat_ui_brightness(int percent) { ui_req_bright = percent; }
 void plat_ui_video_hide(void) { ui_req_hide = 1; }
+void plat_ui_log(const char *m) { log_s(m); }
 
 /* touches for the phone: queued by the touch task (gt9_hook), sent by the net task (lwIP is single-threaded) */
 static struct { u8 action; u16 x, y; } aa_tq[32];

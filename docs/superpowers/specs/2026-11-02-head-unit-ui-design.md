@@ -48,7 +48,7 @@ Exact layouts, colors and icon set; Wi-Fi network list vs manual entry first; wh
 
 - [x] 1. LVGL builds in the payload; screens on the panel through OSD0 (build 20261102-001836; framebuffer screenshots via `hu.py ui shot`, input injection via `hu.py ui tap/button`). Real-finger touch still to confirm with the owner.
 - [x] 2. Home: inverted logo + faint dock (AA, Settings, Console); front buttons handled (mute short / reboot long, home, back, vol ± with repeat)
-- [ ] 3. AA loop: auto-enter on phone session, Home leaves, dock returns, Back to the phone, OSD0 transparent over VPP0
+- [x] 3. AA loop (build 20261102-002618, tools/aa_phone.py stream): auto-enter on the first decoded picture, Home leaves (VPP0 off), the dock's AA button returns, stream end goes home; OSD0 blends over VPP0 with per-pixel alpha (LVGL's bottom layer had to be made transparent: it picks up the theme's opaque screen colour). Back -> AA key 4 sent but not verified without a real phone.
 - [x] 4. Volume overlay (visual + state; mute sends MCU 01 01/01 00)
 - [ ] 5. Settings: first screen up (Wi-Fi status, AA switch, brightness slider (not wired), dark mode, reboot, boot stock, install stub). To do: Wi-Fi network entry, backlight, verify boot stock and reboot on the unit
 - [x] 6. Console as a debug screen (dock, third button)
