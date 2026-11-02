@@ -1938,7 +1938,7 @@ static int rx_tid(const u8 *f, int hl)   /* QoS control sits after the address f
     (void)hl;
     return (f[0] & 0x80) ? (f[(f[1] & 3) == 3 ? 30 : 24] & 0x0f) : 16;
 }
-static u32 rx_frames, rx_data, dec_fail, replays, beacons;
+static u32 rx_frames, rx_data, dec_fail, replays, beacons, rxff_ovf, replays_new;   /* replays_new: dropped as a replay without the Retry bit (not a plain duplicate) */   /* rxff_ovf: RTL8188F RX FIFO overflows seen (HISRE bit 8) */
 static const u8 our_rsn[] = { 0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
                               0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00 };   /* RSN v1, CCMP/CCMP, PSK, no PMF */
 
@@ -2265,6 +2265,9 @@ static void data_frame(u8 *f, int len)
         cu64 *last = &rx_pn_tk[rx_tid(f, hl)];
         if (len < hl + 16 || pn <= *last) {
             replays += len >= hl + 16;
+            if (len >= hl + 16 && !(f[1] & 0x08) && replays_new++ < 20)
+                lprintf("rx: PN %u <= %u on TID %d without Retry (seq %u)\n", (u32)pn, (u32)*last, rx_tid(f, hl),
+                        (u32)(f[22] | f[23] << 8) >> 4);
             return;
         }
         *last = pn;
@@ -4179,9 +4182,9 @@ static void status_line(void)
     ip_fmt_addr(ip, ip_addr());
     fmt_mac(m, bss.addr);
     lprintf("status t=%u state=%s bss=%s ch=%d rssi=%d beacons=%u rx=%u data=%u tx=%u txerr=%u pad=%u decfail=%u "
-            "replay=%u ip=%s ipstats=%u/%u/%u/%u/%u/%u/%u/%u hb=%u usberr=%u\n",
+            "replay=%u/%u rxovf=%u ip=%s ipstats=%u/%u/%u/%u/%u/%u/%u/%u hb=%u usberr=%u\n",
             ub_ms(0), jnames[jstate], m, cur_ch, rssi_now, beacons, rx_frames, rx_data, tx_count, tx_err, tx_pad,
-            dec_fail, replays, ip, ip_stats[0], ip_stats[1], ip_stats[2], ip_stats[3], ip_stats[4], ip_stats[5],
+            dec_fail, replays, replays_new, rxff_ovf, ip, ip_stats[0], ip_stats[1], ip_stats[2], ip_stats[3], ip_stats[4], ip_stats[5],
             ip_stats[6], ip_stats[7], hb_count, errs);
 }
 
@@ -4418,6 +4421,15 @@ static void net_loop(void)
             log_s("hwsec: no HU1 command within 60 s of enabling it, back to software CCMP\n");
         }
         car_net_tick();
+        {   /* RX FIFO overflow on the chip (the host did not drain it in time): latched in HISRE bit 8, write 1 to clear */
+            static u32 ovf_at;
+            if (wdev && !errs && ub_ms(0) - ovf_at >= 100) {
+                ovf_at = ub_ms(0);
+                u32 h = rr32(REG_HISRE);
+                if (h & IMR1_RXFOVW)
+                    rxff_ovf++, rw32(REG_HISRE, IMR1_RXFOVW);
+            }
+        }
         if (ap_start_pending && (int)(ub_ms(0) - deferred_at) >= 0) {
             ap_start_pending = 0;
             ap_from_hu1 = 1;
