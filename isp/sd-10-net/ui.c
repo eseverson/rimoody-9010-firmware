@@ -140,10 +140,8 @@ static void dock_cb(lv_event_t *e)
     int which = (int)(intptr_t)lv_event_get_user_data(e);
     if (which == 0)
         show_aa();
-    else if (which == 1)
-        show_settings();
     else
-        show_console();
+        show_settings();
 }
 
 static lv_obj_t *logo(lv_obj_t *parent, lv_opa_t opa)
@@ -172,8 +170,8 @@ static void build_home(void)
     lv_obj_set_style_bg_opa(dock, LV_OPA_10, 0);
     lv_obj_set_style_border_width(dock, 0, 0);
     lv_obj_align(dock, LV_ALIGN_BOTTOM_MID, 0, -24);
-    static const char *const icons[] = { LV_SYMBOL_GPS, LV_SYMBOL_SETTINGS, LV_SYMBOL_LIST };
-    for (int i = 0; i < 3; i++) {
+    static const char *const icons[] = { LV_SYMBOL_GPS, LV_SYMBOL_SETTINGS };   /* the log view lives in Settings > System */
+    for (int i = 0; i < 2; i++) {
         lv_obj_t *b = lv_button_create(dock);
         lv_obj_set_size(b, 72, 72);
         lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
