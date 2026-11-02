@@ -38,7 +38,7 @@ The unit lives in Android Auto: the owner uses maps and audio control there almo
 - **Tasks:** a `ui` FreeRTOS task runs `lv_timer_handler`; it replaces the console's drawing while the UI is on. The text console stays available as a debug screen.
 - **Input:** the GT911 touch task feeds a pointer input device (panel area x < 1024); presses in the button strip (x 1054..1061, y 141/211/322/404/508) become button events handled by the UI (short/long press). While AA is shown, panel touches keep going to the phone.
 - **Assets:** `tools/mklogo.py` rasterizes `miata.svg` (ImageMagick) to an inverted A8/ARGB image as a C array at build time.
-- **Backends:** Wi-Fi config writes `WIFI.TXT` on the card and reconnects; "boot stock firmware" sets a one-shot card flag that the payload's early boot path turns into U-Boot's `bootsp ecos nor`; reboot = clean dongle power-off then reset; brightness through the backlight PWM (0x9C007A08) or the MCU `EE <level>` frame (to verify); install status reads the NOR boot script at 0x98E00000.
+- **Backends:** Wi-Fi config writes `WIFI.TXT` on the card and reconnects; "boot stock firmware" sets a one-shot card flag that the payload's early boot path turns into U-Boot's `bootsp ecos nor`; reboot = clean dongle power-off then reset; brightness through the MCU `EE <level>` frame (verified; the PWM register does nothing visible); install status reads the NOR boot script at 0x98E00000.
 
 ## Left to the builder
 
@@ -50,13 +50,13 @@ Exact layouts, colors and icon set; Wi-Fi network list vs manual entry first; wh
 - [x] 2. Home: inverted logo + faint dock (AA, Settings, Console); front buttons handled (mute short / reboot long, home, back, vol ± with repeat)
 - [x] 3. AA loop (build 20261102-002618, tools/aa_phone.py stream): auto-enter on the first decoded picture, Home leaves (VPP0 off), the dock's AA button returns, stream end goes home; OSD0 blends over VPP0 with per-pixel alpha (LVGL's bottom layer had to be made transparent: it picks up the theme's opaque screen colour). Back -> AA key 4 sent but not verified without a real phone.
 - [x] 4. Volume overlay (visual + state; mute sends MCU 01 01/01 00)
-- [~] 5. Settings (build 20261102-003431, persisted): Wi-Fi status + "Change" screen (SSID/password fields, on-screen keyboard; the check key rewrites WIFI.TXT's ssid=/psk=, keeps token=/ip=, restarts; connect not exercised on the unit), Android Auto switch, brightness slider (**not wired**: the PWM duty had no visible effect; the MCU `EE <level>` frame needs the owner present to try), dark mode switch (theme; the home screen stays black), equalizer placeholder, Reboot (verified, also the long press on button 1), Boot stock (one-shot ECOSSTOCK.FLG -> U-Boot `bootsp ecos nor`; **not exercised**: it leaves the unit in eCos until an ACC cycle), install status (reads the NOR boot script + bootcmd, verified "Installed") and the "Install to flash" stub.
+- [~] 5. Settings (build 20261102-003431, persisted): Wi-Fi status + "Change" screen (SSID/password fields, on-screen keyboard; the check key rewrites WIFI.TXT's ssid=/psk=, keeps token=/ip=, restarts; connect not exercised on the unit), Android Auto switch, brightness (**done, build 20261102-012033**: day and headlights-on sliders drive the MCU `EE` backlight frame through eCos's 33-step table; dragging previews the level), theme Light/Dark/Auto (Auto is dark while the headlights are on; the home screen stays black), headlights from the GPIO26 illumination input (debounced, also Android Auto's night mode), settings saved in UI.TXT on the card, equalizer placeholder, Reboot (verified, also the long press on button 1), Boot stock (one-shot ECOSSTOCK.FLG -> U-Boot `bootsp ecos nor`; **not exercised**: it leaves the unit in eCos until an ACC cycle), install status (reads the NOR boot script + bootcmd, verified "Installed") and the "Install to flash" stub.
 - [x] 6. Console as a debug screen (dock, third button)
 
 ## Open items for the owner
 
 - Real-finger touch and the front buttons by hand (all screens were driven by `hu.py ui tap/button/drag` so far).
 - Android Auto with the phone: touch, the Back button (AA key 4), auto-enter/leave.
-- Backlight: try the MCU `EE <level>` frame with the owner watching (`EE FF` is off).
+- Headlight input in the car: confirm GPIO26 reads 0 with the lights on (Settings › Display shows the state). On the bench, `hu.py ui lights 1` fakes it.
 - Boot stock: try once (then ACC cycle back).
 - Later: audio output (then volume/mute/EQ become real), a Wi-Fi network list from a scan, background image.

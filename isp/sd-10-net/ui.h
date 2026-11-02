@@ -4,7 +4,7 @@
 #ifndef UI_H
 #define UI_H
 
-void ui_start(unsigned int fb_addr);            /* create the UI task (after the scheduler's other tasks) */
+void ui_start(unsigned int fb_addr, const char *settings);   /* create the UI task; settings: UI.TXT's text (key=value lines) */
 int ui_running(void);                           /* the UI owns the OSD0 framebuffer (the text console stays off) */
 int ui_console_active(void);                    /* the user opened the text console: it draws, the UI does not */
 
@@ -22,7 +22,10 @@ void plat_ui_reboot(void);
 void plat_ui_boot_stock(void);
 void plat_ui_aa_key(int keycode);               /* 4 BACK */
 void plat_ui_aa_enable(int on);
-void plat_ui_brightness(int percent);
+void plat_ui_brightness(int percent);           /* backlight 0..100 (MCU ee frame) */
+int plat_ui_lights(void);                       /* the headlight input right now (1 = lights on); the UI debounces it */
+void plat_ui_night(int on);                     /* debounced headlights changed: Android Auto night mode */
+void plat_ui_settings_save(const char *kv);     /* write UI.TXT (copied; the net task saves it) */
 void plat_ui_video_hide(void);                  /* the AA view went away: VPP0 off */
 int plat_ui_status(char *out, int max);         /* one line of network / build status for Settings */
 int plat_ui_console(char *out, int max);        /* the log tail for the console screen */

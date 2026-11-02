@@ -3187,7 +3187,43 @@ void plat_ui_reboot(void) { ui_req_reboot = 1; }
 void plat_ui_boot_stock(void) { ui_req_stock = 1; }
 void plat_ui_aa_key(int keycode) { ui_req_key = keycode; }
 void plat_ui_aa_enable(int on) { ui_aa_enabled = on; }
-void plat_ui_brightness(int percent) { ui_req_bright = percent; }
+void plat_ui_brightness(int percent) { ui_req_bright = percent < 0 ? 0 : percent > 100 ? 100 : percent; }
+
+/* Backlight: MCU frame `ee <level>`, an inverted duty: 00 brightest, e1 dim but lit, f0 and up off (camera sweep
+ * 2026-11-02). eCos's 33-step table (flash 0x9806bf9c, indexed by its 0..32 brightness setting) is used as is. */
+static const u8 bl_table[33] = { 0xe1, 0xdc, 0xd7, 0xd2, 0xcd, 0xc8, 0xc3, 0xbe, 0xb9, 0xb2, 0xab, 0xa4, 0x9d, 0x96, 0x8f,
+                                 0x88, 0x81, 0x7a, 0x74, 0x6e, 0x68, 0x62, 0x5c, 0x56, 0x50, 0x46, 0x3c, 0x32, 0x28, 0x1e,
+                                 0x14, 0x0a, 0x00 };
+static void backlight_set(int percent)
+{
+    u8 m[2] = { 0xee, bl_table[(percent * 32 + 50) / 100] };
+    mcu_send(&mcu_st, m, 2, ub_ms(0));
+}
+
+/* Headlights: harness illumination input on GPIO26 (eCos sysio 0x6b, read by 0x320998 and debounced over 5 samples by
+ * 0x320a82), active low: 0 = lights on. IN register 0x9C000360 bit 26. Read only: the pad reads without taking the
+ * pin over (it reads 1 with nothing connected). Debounced by the UI. ui_lights_force: -1 the input, 0/1 forced (op 26). */
+static volatile int ui_lights_force = -1;
+int plat_ui_lights(void)
+{
+    if (ui_lights_force >= 0)
+        return ui_lights_force;
+    return !((*(volatile u32 *)0x9C000360u >> 26) & 1);
+}
+static volatile int ui_req_night = -1;
+void plat_ui_night(int on) { ui_req_night = on; }
+
+/* UI settings (UI.TXT on the card, key=value lines): read once before the UI starts, written by the net task */
+static char ui_settings_in[256], ui_settings_out[256];
+static volatile int ui_req_save;
+void plat_ui_settings_save(const char *kv)
+{
+    int i;
+    for (i = 0; i < (int)sizeof ui_settings_out - 1 && kv[i]; i++)
+        ui_settings_out[i] = kv[i];
+    ui_settings_out[i] = 0;
+    ui_req_save = 1;
+}
 void plat_ui_video_hide(void) { ui_req_hide = 1; }
 void plat_ui_log(const char *m) { log_s(m); }
 
@@ -3666,7 +3702,12 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             ui_pointer(1, (unsigned)x2, (unsigned)y2);
             return vfmt_n(t, "ui: drag %d,%d -> %d,%d", x1, y1, x2, y2);
         }
-        return vfmt_n(t, "ERR ui: 0 tap x y | 1 button n [hold/100ms] | 2 drag x1 y1 x2 y2");
+        if (c == 3 && n >= 2) {   /* headlight input: 0 off, 1 on (forced), 2 back to the real input */
+            ui_lights_force = p[1] <= 1 ? p[1] : -1;
+            return vfmt_n(t, "ui: lights %s, input GPIO26 reads %u", p[1] == 0 ? "forced off" : p[1] == 1 ? "forced on" : "from the input",
+                          (unsigned)((*(volatile u32 *)0x9C000360u >> 26) & 1));
+        }
+        return vfmt_n(t, "ERR ui: 0 tap x y | 1 button n [hold/100ms] | 2 drag x1 y1 x2 y2 | 3 lights 0/1/2");
     }
     case 25: {   /* OSDVID: 0 status, 1 show the last decoded picture [u8 seconds, 0 = stay], 2 on (AA video live), 3 off */
         int c = n ? p[0] : 0;
@@ -3931,9 +3972,25 @@ static void net_loop(void)
                 ui_req_hide = 0;
                 vpp_hide();
             }
-            if (ui_req_bright >= 0) {   /* not wired yet: the PWM duty showed no visible effect; MCU EE <level> to verify */
-                lprintf("ui: brightness %d%% (not wired to the backlight yet)\n", ui_req_bright);
+            if (ui_req_bright >= 0) {
+                int pc = ui_req_bright;
                 ui_req_bright = -1;
+                backlight_set(pc);
+            }
+            if (ui_req_night >= 0) {
+                int on = ui_req_night;
+                ui_req_night = -1;
+                aa_set_night(on);
+                lprintf("ui: headlights %s\n", on ? "on (night)" : "off (day)");
+            }
+            if (ui_req_save) {
+                ui_req_save = 0;
+                int k = 0;
+                while (ui_settings_out[k])
+                    k++;
+                int r = fs_save("UI.TXT", ui_settings_out, (u32)k);
+                if (r)
+                    lprintf("ui: UI.TXT save failed: %d\n", r);
             }
             if (ui_req_wifi) {
                 ui_req_wifi = 0;
@@ -4280,7 +4337,13 @@ int payload_entry(int argc, char *const argv[])
     gt9_hook = touch_route;   /* AA view -> the phone, else the UI */
     gt9_button_hook = ui_button;
     if (BOOT_FB)
-        ui_start(FB_ADDR);   /* LVGL on OSD0 (ui.c); the text console stops drawing once it runs */
+    {
+        u32 k = 0;
+        if (fs_load("UI.TXT", ui_settings_in, sizeof ui_settings_in - 1, &k))
+            k = 0;
+        ui_settings_in[k] = 0;
+        ui_start(FB_ADDR, ui_settings_in);   /* LVGL on OSD0 (ui.c); the text console stops drawing once it runs */
+    }
     vTaskStartScheduler();   /* returns when net_task ends the scheduler */
     lprintf("rtos: scheduler ended\n");
     status_line();

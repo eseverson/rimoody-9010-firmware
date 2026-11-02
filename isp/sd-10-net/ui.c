@@ -27,6 +27,12 @@ static volatile int aa_session, aa_session_seen;
 static volatile int aa_view;
 static int aa_enabled = 1;
 static int volume = 20, muted, dark = 1;
+/* display settings (UI.TXT): backlight in percent by day and with the headlights on; theme 0 light, 1 dark, 2 auto
+ * (dark while the headlights are on) */
+static int bright_day = 100, bright_night = 40, theme_mode = 1;
+static int lights;   /* debounced headlight input */
+static char settings_text[256];
+static void settings_save(void);
 
 static lv_obj_t *scr_home, *scr_aa, *scr_settings, *scr_wifi;
 static lv_obj_t *wifi_ssid, *wifi_psk, *wifi_kb, *wifi_msg;
@@ -213,9 +219,58 @@ static void aa_switch_cb(lv_event_t *e)
 {
     aa_enabled = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
     plat_ui_aa_enable(aa_enabled);
+    settings_save();
 }
 
-static void bright_cb(lv_event_t *e) { plat_ui_brightness(lv_slider_get_value(lv_event_get_target(e))); }
+/* ---- settings file and display policy ---- */
+
+static int kv_int(const char *t, const char *key, int dflt, int lo, int hi)   /* "key=123" at a line start */
+{
+    for (const char *p = t; *p;) {
+        int i = 0;
+        while (key[i] && p[i] == key[i])
+            i++;
+        if (!key[i] && p[i] == '=') {
+            int v = 0, any = 0;
+            for (p += i + 1; *p >= '0' && *p <= '9'; p++)
+                v = v * 10 + (*p - '0'), any = 1;
+            return !any ? dflt : v < lo ? lo : v > hi ? hi : v;
+        }
+        while (*p && *p != '\n')
+            p++;
+        if (*p)
+            p++;
+    }
+    return dflt;
+}
+
+static void settings_load(void)
+{
+    bright_day = kv_int(settings_text, "day", bright_day, 0, 100);
+    bright_night = kv_int(settings_text, "night", bright_night, 0, 100);
+    theme_mode = kv_int(settings_text, "theme", theme_mode, 0, 2);
+    aa_enabled = kv_int(settings_text, "aa", aa_enabled, 0, 1);
+    plat_ui_aa_enable(aa_enabled);
+}
+
+static void settings_save(void)
+{
+    char t[96];
+    lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\n", bright_day, bright_night, theme_mode, aa_enabled);
+    plat_ui_settings_save(t);
+}
+
+static void apply_backlight(void) { plat_ui_brightness(lights ? bright_night : bright_day); }
+
+static void apply_theme(void);
+static void theme_update(void)   /* dark follows the mode (and the headlights in auto) */
+{
+    int want = theme_mode == 2 ? lights : theme_mode;
+    if (want != dark) {
+        dark = want;
+        apply_theme();
+    }
+}
 
 /* ---- colours: explicit per mode (the owner found light mode too low in contrast with translucent text) ---- */
 
@@ -269,10 +324,57 @@ static void apply_theme(void)
     lv_obj_report_style_change(0);
 }
 
-static void dark_cb(lv_event_t *e)
+/* brightness sliders: user data 0 day, 1 headlights on. Dragging previews that level on the backlight; letting go
+ * stores it and goes back to the level that applies now. */
+static void bright_cb(lv_event_t *e)
 {
-    dark = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
-    apply_theme();
+    int which = (int)(intptr_t)lv_event_get_user_data(e);
+    int v = lv_slider_get_value(lv_event_get_target(e));
+    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+        plat_ui_brightness(v);
+        return;
+    }
+    if (which)
+        bright_night = v;
+    else
+        bright_day = v;
+    apply_backlight();
+    settings_save();
+}
+
+static void theme_cb(lv_event_t *e)
+{
+    uint32_t i = lv_buttonmatrix_get_selected_button(lv_event_get_target(e));
+    if (i > 2)
+        return;
+    theme_mode = (int)i;
+    theme_update();
+    settings_save();
+}
+
+static lv_obj_t *lights_label;
+static void lights_text(void)
+{
+    if (lights_label)
+        lv_label_set_text(lights_label, lights ? "Headlights on: night brightness, Android Auto in night mode"
+                                               : "Headlights off: day brightness");
+}
+
+/* the headlight input, every 200 ms; a change counts after 5 equal readings in a row (eCos does the same) */
+static void lights_timer(lv_timer_t *t)
+{
+    (void)t;
+    static int last = -1, same;
+    int v = plat_ui_lights() ? 1 : 0;
+    same = v == last ? same + 1 : 1;
+    last = v;
+    if (same == 5 && v != lights) {
+        lights = v;
+        apply_backlight();
+        plat_ui_night(lights);
+        theme_update();
+        lights_text();
+    }
 }
 
 /* ---- console mode: the original text console (console.c, drawn by net.c's console task) takes the panel; the UI
@@ -499,18 +601,33 @@ static void build_settings(void)
     note(p, "When enabled, the unit switches to Android Auto as soon as the phone's video starts.");
 
     p = page(scr_settings, 2, "Display", nav);
-    r = row(p, "Brightness");
-    lv_obj_t *sl = lv_slider_create(r);
-    lv_obj_set_width(sl, 320);
-    lv_slider_set_range(sl, 10, 100);
-    lv_slider_set_value(sl, 80, LV_ANIM_OFF);
-    lv_obj_add_event_cb(sl, bright_cb, LV_EVENT_RELEASED, 0);
-    r = row(p, "Dark mode");
-    sw = lv_switch_create(r);
-    if (dark)
-        lv_obj_add_state(sw, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(sw, dark_cb, LV_EVENT_VALUE_CHANGED, 0);
-    note(p, "Brightness is not connected to the backlight yet.");
+    static const char *const bright_names[] = { "Brightness", "With headlights on" };
+    for (int i = 0; i < 2; i++) {
+        r = row(p, bright_names[i]);
+        lv_obj_t *sl = lv_slider_create(r);
+        lv_obj_set_width(sl, 320);
+        lv_obj_set_style_margin_right(sl, 12, 0);
+        lv_slider_set_range(sl, 0, 100);
+        lv_slider_set_value(sl, i ? bright_night : bright_day, LV_ANIM_OFF);
+        lv_obj_add_event_cb(sl, bright_cb, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(sl, bright_cb, LV_EVENT_RELEASED, (void *)(intptr_t)i);
+    }
+    r = row(p, "Theme");
+    static const char *const theme_map[] = { "Light", "Dark", "Auto", "" };
+    lv_obj_t *bm = lv_buttonmatrix_create(r);
+    lv_buttonmatrix_set_map(bm, theme_map);
+    lv_buttonmatrix_set_button_ctrl_all(bm, LV_BUTTONMATRIX_CTRL_CHECKABLE);
+    lv_buttonmatrix_set_one_checked(bm, true);
+    lv_buttonmatrix_set_button_ctrl(bm, (uint32_t)theme_mode, LV_BUTTONMATRIX_CTRL_CHECKED);
+    lv_obj_set_size(bm, 330, 64);
+    lv_obj_set_style_pad_all(bm, 4, 0);
+    lv_obj_add_event_cb(bm, theme_cb, LV_EVENT_VALUE_CHANGED, 0);
+    lights_label = lv_label_create(p);
+    lv_obj_add_style(lights_label, &st_row, 0);
+    lv_obj_set_width(lights_label, LV_PCT(100));
+    lv_obj_set_style_pad_all(lights_label, 16, 0);
+    lights_text();
+    note(p, "Headlights come from the harness illumination wire. Auto theme turns dark with them.");
 
     p = page(scr_settings, 3, "Audio", nav);
     row(p, "Equalizer");
@@ -705,6 +822,11 @@ static void ui_task(void *arg)
     lv_indev_t *in = lv_indev_create();
     lv_indev_set_type(in, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(in, pointer_cb);
+    settings_load();
+    lights = plat_ui_lights() ? 1 : 0;   /* the state at power-on counts as is */
+    dark = theme_mode == 2 ? lights : theme_mode;
+    apply_backlight();
+    plat_ui_night(lights);
     apply_theme();
     build_home();
     build_aa();
@@ -712,6 +834,7 @@ static void ui_task(void *arg)
     build_wifi();
     build_volume();
     lv_timer_create(status_timer, 500, 0);
+    lv_timer_create(lights_timer, 200, 0);
     lv_screen_load(scr_home);
     running = 1;
     int seen = 0;
@@ -741,9 +864,13 @@ static void ui_task(void *arg)
     }
 }
 
-void ui_start(unsigned int fb_addr)
+void ui_start(unsigned int fb_addr, const char *settings)
 {
     fb = fb_addr;
+    int i = 0;
+    for (; settings && settings[i] && i < (int)sizeof settings_text - 1; i++)
+        settings_text[i] = settings[i];
+    settings_text[i] = 0;
     btn_q = xQueueCreate(16, 1);
     xTaskCreate(ui_task, "ui", 8192, 0, 2, 0);
 }

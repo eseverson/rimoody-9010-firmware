@@ -263,6 +263,28 @@ static void on_control(const u8 *m, int n)
     }
 }
 
+/* SensorBatch (0x8003) field 10 NightModeData { bool night_mode = 1 }: the phone switches Maps and the AA chrome to
+ * their night colours. Fed from the headlight input (ui.c -> aa_set_night). */
+static int night_on, night_started;
+static int send_night(void)
+{
+    static u8 nb[24];
+    struct pb e = { nb, nb + sizeof nb };
+    u8 *nm = pb_open(&e, 10);
+    pb_u(&e, 1, night_on ? 1 : 0);
+    pb_close(&e, nm);
+    return send_pb(CH_SENSOR, 0, 0x8003, &e, nb);
+}
+
+void aa_set_night(int on)
+{
+    if (night_on == !!on)
+        return;
+    night_on = !!on;
+    if (st.state == AA_RUNNING && night_started)
+        send_night();
+}
+
 static void on_channel(int ch, int ctrl, const u8 *m, int n)
 {
     u16 id = (u16)(m[0] << 8 | m[1]);
@@ -332,9 +354,16 @@ static void on_channel(int ch, int ctrl, const u8 *m, int n)
         send_pb(ch, 0, 0x8003, &b, buf);
         return;
     }
-    if (ch == CH_SENSOR && id == 0x8001) {   /* sensor start -> ok, then report parked + day */
+    if (ch == CH_SENSOR && id == 0x8001) {   /* sensor start (field 1: type) -> ok, then that sensor's current value */
+        u64 type = 0;
+        pb_get(body, bn, 1, &type);
         pb_u(&b, 1, 0);
         send_pb(ch, 0, 0x8002, &b, buf);
+        if (type == 10) {
+            night_started = 1;
+            send_night();
+            return;
+        }
         struct pb e = { buf, buf + sizeof buf };
         u8 *ds = pb_open(&e, 13);   /* driving status: 0 unrestricted */
         pb_u(&e, 1, 0);
@@ -506,6 +535,7 @@ int aa_start(const struct aa_platform *p)
     memset(&st, 0, sizeof st);
     memset(ch_open, 0, sizeof ch_open);
     memset(session, 0, sizeof session);
+    night_started = 0;
     memset(bign, 0, sizeof bign);
     rxn = 0;
     if (aa_tls_init(p->cert, p->cert_len, p->key, p->key_len)) {
