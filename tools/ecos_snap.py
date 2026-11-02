@@ -12,6 +12,9 @@ snapshot"; code in isp/ecos-snap/).
   ecos_snap.py card-audio ECOS.BIN   like card, for the audio run: HOOKA.BIN (snapshots of the audio block at 25 / 26 s,
                                  the register sweep at 27 s) and the call loggers of stubs.S patched into the image
   ecos_snap.py show-audio OUT.BIN    decode an audio run: the DSP / AUDIF call log, eCos's audio debug prints, registers
+  ecos_snap.py card-bt ECOS.BIN  the Bluetooth run: HOOKB.BIN + stubs.S -DBT (every MCU frame eCos sends, the RFCOMM
+                                 events, the BT code's prints); resets 90 s after the RFCOMM connect ack, or at 10 min
+  ecos_snap.py show-bt OUT.BIN   decode a Bluetooth run
 """
 import os, struct, subprocess, sys, time, zlib
 
@@ -72,15 +75,20 @@ AUDIO_NAMES = {1: 'DSP_SendCmd', 2: 'DownloadCode', 3: 'Download2', 4: 'AUDIF_Se
 STUBS_ADDR = 0x317cb6
 
 
-def audio_patch(img):
+BT_SITES = {32: 0x521aa8, 33: 0x3866ec, 34: 0x385ea2, 35: 0x385ef2, 36: 0x386394, 16: 0x5fd67a, 17: 0x602c62,
+            18: 0x600ea0}
+BT_NAMES = {32: 'TX', 33: 'RFCOMM_CONNECT', 34: 'RFCOMM_DATA', 35: 'RFCOMM_DATA_END', 36: 'RFCOMM_DISCONNECT'}
+
+
+def audio_patch(img, bt=False):
     """stubs.S over the dead `pwm` handler, and `j stub_N; nop16` over each site's 6-byte prologue"""
-    stubs = open(os.path.join(SNAPDIR, 'STUBS.BIN'), 'rb').read()
-    sym = {l.split()[2]: int(l.split()[0], 16) for l in open(os.path.join(SNAPDIR, 'stubs.sym'))}
+    stubs = open(os.path.join(SNAPDIR, 'STUBSB.BIN' if bt else 'STUBS.BIN'), 'rb').read()
+    sym = {l.split()[2]: int(l.split()[0], 16) for l in open(os.path.join(SNAPDIR, 'stubsb.sym' if bt else 'stubs.sym'))}
     o = STUBS_ADDR - ECOS_BASE
     if img[o:o + 2] != bytes.fromhex('fc48') or len(stubs) > 0x508:
         sys.exit('pwm handler bytes at %#x are %s (want fc48), stubs %d bytes (max 0x508)' % (STUBS_ADDR, img[o:o + 2].hex(), len(stubs)))
     img[o:o + len(stubs)] = stubs
-    for i, site in AUDIO_SITES.items():
+    for i, site in (BT_SITES if bt else AUDIO_SITES).items():
         so = site - ECOS_BASE
         first = img[so:so + 6]
         ok = (first[0] == 0xfc and first[2:4] == bytes.fromhex('51cf')) or first[:2] == bytes.fromhex('3a1f')
@@ -90,7 +98,7 @@ def audio_patch(img):
         img[so:so + 6] = struct.pack('>I', 0x48000000 | (d & 0xFFFFFF)) + bytes.fromhex('9200')
 
 
-def card(path, audio=False):
+def card(path, audio=False, bt=False):
     """Write the patched eCos, entry.S and the hook to the SD card for the payload's power-on path (net.c
     ecos_boot_check); `arm` then writes the one-shot flag, and the next cold boot (ACC cycle) runs eCos."""
     img = bytearray(open(path, 'rb').read())
@@ -99,12 +107,12 @@ def card(path, audio=False):
         if img[o:o + 4] != old:
             sys.exit('eCos bytes at %#x are %s, expected %s' % (a, img[o:o + 4].hex(), old.hex()))
         img[o:o + 4] = new
-    if audio:
-        audio_patch(img)
+    if audio or bt:
+        audio_patch(img, bt)
     tmp = os.path.join(SNAPDIR, 'ecos_patched.bin')
     open(tmp, 'wb').write(img)
     for name, src in (('ECOSP.BIN', tmp), ('ENTRY.BIN', os.path.join(SNAPDIR, 'ENTRY.BIN')),
-                      ('HOOK.BIN', os.path.join(SNAPDIR, 'HOOKA.BIN' if audio else 'HOOK.BIN'))):
+                      ('HOOK.BIN', os.path.join(SNAPDIR, 'HOOKB.BIN' if bt else 'HOOKA.BIN' if audio else 'HOOK.BIN'))):
         data = open(src, 'rb').read()
         print(hu('write', '0x600000', src))
         print(hu('--timeout', '60', 'fs', 'write', name, '0x600000', str(len(data))))
@@ -271,9 +279,37 @@ def show_audio(path):
             print('snapshot %d: %d registers -> %s' % (k, len(regs), f))
 
 
+def show_bt(path):
+    data = open(path, 'rb').read()
+    ecos = open(os.path.join(HERE, '..', 'isp', 'ecos-snap', 'ecos_patched.bin'), 'rb').read()
+    flash = open(os.path.join(HERE, '..', 'dump1.bin'), 'rb').read()
+    h = struct.unpack_from('<21I', data, 0)
+    trig = struct.unpack_from('<I', data, 0xF4)[0]
+    print('hook: magic %x calls %d done %d; RFCOMM connect ack at %.1f s' % (h[0], h[2], h[3], trig / 1e6))
+    lines = []
+    n = struct.unpack_from('<I', data, 0x20000)[0]
+    print('ring A (frames, RFCOMM events): %d logged (%d kept)' % (n, min(n, 511)))
+    for k in range(min(n, 511)):
+        o = 0x20000 + 128 * (k + 1)
+        i, ln, lp, tick = struct.unpack_from('<4I', data, o)
+        b = data[o + 16:o + 16 + min(ln, 112)]
+        lines.append((tick, 0, k, '%-17s %s%s   (from %x)' % (BT_NAMES.get(i, str(i)), b.hex(' '), ' ..' if ln > 112 else '', lp - 4)))
+    n = struct.unpack_from('<I', data, 0x30000)[0]
+    print('ring B (BT prints): %d logged (%d kept)' % (n, min(n, 2047)))
+    for k in range(min(n, 2047)):
+        i, r0, r1, r2, r3, lp, tick, r4 = struct.unpack_from('<8I', data, 0x30000 + 32 + 32 * k)
+        f = cstr(r0, ecos, flash)
+        txt = fmt_print(f, [r1, r2, r3, r4], ecos, flash) if f else '<fmt %x>' % r0
+        lines.append((tick, 1, k, 'print             %s   (from %x)' % (txt.rstrip(), lp - 4)))
+    lines.sort()
+    out = path + '.bt.txt'
+    open(out, 'w').write('\n'.join('%7d  %s' % (t, l) for t, _, _, l in lines) + '\n')
+    print('%d lines -> %s' % (len(lines), out))
+
+
 if __name__ == '__main__':
-    cmds = {'run': run, 'card': card, 'card-audio': lambda p: card(p, True), 'arm': arm, 'collect': collect,
-            'show': show, 'show-audio': show_audio}
+    cmds = {'run': run, 'card': card, 'card-audio': lambda p: card(p, True), 'card-bt': lambda p: card(p, bt=True),
+            'arm': arm, 'collect': collect, 'show': show, 'show-audio': show_audio, 'show-bt': show_bt}
     if len(sys.argv) != 3 or sys.argv[1] not in cmds:
         sys.exit(__doc__)
     cmds[sys.argv[1]](sys.argv[2])

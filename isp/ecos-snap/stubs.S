@@ -13,6 +13,11 @@
 #define RINGA 0x02F68000
 #define RINGB 0x02F78000
 #define NENT 2047
+#ifdef BT   /* Bluetooth run: ring B takes the prints of the BT / wireless-AA code instead of the audio driver */
+#define PR_LO 0x00380000
+#else
+#define PR_LO 0x003a0000
+#endif
 
     .section .text
     .global common
@@ -20,7 +25,7 @@ common:
     lwi     $r18, [$sp + 16]
     slti    $r15, $r16, 16
     bnez    $r15, 1f
-    sethi   $r17, hi20(0x003a0000)
+    sethi   $r17, hi20(PR_LO)
     sub     $r15, $r18, $r17
     sethi   $r17, hi20(0x00020000)
     slt     $r15, $r15, $r17
@@ -70,6 +75,7 @@ stub_\id:
     j       site_\id + 6   /* site_N: --defsym in the Makefile, so the linker resolves the PC-relative jump */
 .endm
 
+#ifndef BT
     STUB 1,  0x3bbf74, 0xfc, 0x60, 0x51, 0xcf, 0x80, 0x30   /* DSP_SendCmd(cmd, p1, p2, p3) */
     STUB 2,  0x3bafe0, 0xfc, 0x21, 0x51, 0xcf, 0x80, 0x20   /* DownloadCode */
     STUB 3,  0x3baf48, 0xfc, 0x41, 0x51, 0xcf, 0x80, 0x28   /* download (second form) */
@@ -80,3 +86,91 @@ stub_\id:
     STUB 8,  0x3a3f8e, 0xfc, 0x6d, 0x51, 0xcf, 0x80, 0x98   /* AUDIF_Track_Create_Ext */
     STUB 9,  0x3a4636, 0xfc, 0x20, 0x51, 0xcf, 0x80, 0x18   /* AUDIF_Track_Start */
     STUB 16, 0x5fd67a, 0x3a, 0x1f, 0x94, 0x3c, 0xef, 0xfc   /* debug print (fmt, ...) */
+#else
+/* Bluetooth run (ring A entries are 128 bytes here: { id, len, caller lp, hook tick, 112 data bytes }, 511 of them):
+ * every MCU frame eCos sends (builder 0x521aa8(payload, len); heartbeats d1 skipped), the RFCOMM event handlers'
+ * event bytes ([len][data...] at r0), and the three debug prints (ring B) when called from 0x380000..0x39ffff. */
+#define NENTB 511
+    .global common_bytes
+common_bytes:   /* r16 = id, r17 = length, r0 = source; caller lp at [sp + 16] */
+    sethi   $r15, hi20(0x00300000)
+    slt     $r15, $r0, $r15
+    bnez    $r15, 8f
+    sethi   $r15, hi20(0x04000000)
+    slt     $r15, $r0, $r15
+    beqz    $r15, 8f
+    j       7f
+8:  movi    $r17, 0
+7:  slti    $r15, $r16, 33   /* id 32 (frames): skip the heartbeat d1 */
+    beqz    $r15, 1f
+    beqz    $r17, 1f
+    lbi     $r15, [$r0 + 0]
+    xori    $r15, $r15, 0xd1
+    beqz    $r15, 9f
+1:  sethi   $r19, hi20(RINGA)
+    lwi     $r18, [$r19 + 0]
+    addi    $r15, $r18, 1
+    swi     $r15, [$r19 + 0]
+    slti    $r15, $r18, NENTB
+    beqz    $r15, 9f
+    slli    $r18, $r18, 7
+    add     $r18, $r18, $r19
+    addi    $r18, $r18, 128   /* entry k at RINGA + 128 (k + 1) */
+    swi     $r16, [$r18 + 0]
+    swi     $r17, [$r18 + 4]
+    lwi     $r15, [$sp + 16]
+    swi     $r15, [$r18 + 8]
+    sethi   $r15, hi20(0x02F48000)
+    lwi     $r15, [$r15 + 8]
+    swi     $r15, [$r18 + 12]
+    slti    $r15, $r17, 113
+    bnez    $r15, 2f
+    movi    $r17, 112
+2:  addi    $r18, $r18, 16
+    move    $r19, $r0
+3:  beqz    $r17, 9f
+    lbi     $r15, [$r19 + 0]
+    sbi     $r15, [$r18 + 0]
+    addi    $r19, $r19, 1
+    addi    $r18, $r18, 1
+    addi    $r17, $r17, -1
+    j       3b
+9:  ret     $lp
+
+/* STUBB id, length (r1 = the call's second argument, or a constant), the 6 displaced bytes */
+.macro STUBB id, lenarg, b0, b1, b2, b3, b4, b5
+    .global stub_\id
+    .balign 2
+stub_\id:
+    addi    $sp, $sp, -24
+    swi     $r16, [$sp + 0]
+    swi     $r17, [$sp + 4]
+    swi     $r18, [$sp + 8]
+    swi     $r19, [$sp + 12]
+    swi     $lp, [$sp + 16]
+    movi    $r16, \id
+    .ifc \lenarg, r1
+    move    $r17, $r1
+    .else
+    movi    $r17, \lenarg
+    .endif
+    jal     common_bytes
+    lwi     $lp, [$sp + 16]
+    lwi     $r19, [$sp + 12]
+    lwi     $r18, [$sp + 8]
+    lwi     $r17, [$sp + 4]
+    lwi     $r16, [$sp + 0]
+    addi    $sp, $sp, 24
+    .byte   \b0, \b1, \b2, \b3, \b4, \b5
+    j       site_\id + 6
+.endm
+
+    STUBB 32, r1, 0xfc, 0x41, 0x51, 0xcf, 0x80, 0x28   /* 0x521aa8 MCU frame builder (payload, len) */
+    STUBB 33, 64, 0xfc, 0x42, 0x51, 0xcf, 0x80, 0x30   /* 0x3866ec RFCOMM_CONNECT */
+    STUBB 34, 64, 0xfc, 0x40, 0x51, 0xcf, 0x80, 0x20   /* 0x385ea2 RFCOMM_DATA_PARSER_IND */
+    STUBB 35, 64, 0xfc, 0x40, 0x51, 0xcf, 0x80, 0x20   /* 0x385ef2 RFCOMM_DATA_PARSER_IND END */
+    STUBB 36, 16, 0xfc, 0x40, 0x51, 0xcf, 0x80, 0x20   /* 0x386394 RFCOMM_DISCONNECT */
+    STUB 16, 0x5fd67a, 0x3a, 0x1f, 0x94, 0x3c, 0xef, 0xfc   /* debug print (fmt, ...) */
+    STUB 17, 0x602c62, 0x3a, 0x1f, 0x94, 0x3c, 0xef, 0xfc   /* debug print, second form (the BT code's) */
+    STUB 18, 0x600ea0, 0xfc, 0x01, 0x51, 0xcf, 0x80, 0x18   /* function-name trace print */
+#endif
