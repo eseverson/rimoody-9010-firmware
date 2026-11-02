@@ -27,6 +27,7 @@ enum { F_FIRST = 1, F_LAST = 2, F_WHOLE = 3, F_CONTROL = 4, F_ENC = 8 };
 
 static const struct aa_platform *pf;
 static struct aa_status st;
+#define AA_VIDEO_UNACKED 4   /* video: more frames in flight only add display lag (16 made the picture trail touches) */
 #ifndef AA_MAX_UNACKED
 #define AA_MAX_UNACKED 16  /* video/audio frames the phone may send before our ack (1 made it stop-and-wait: 37 ms per frame over Wi-Fi;
                               * 4 starved audio over Wi-Fi, 45k of 48k samples/s, 2026-11-02) */
@@ -331,7 +332,7 @@ static void on_channel(int ch, int ctrl, const u8 *m, int n)
     if (ch == CH_VIDEO || ch == CH_MEDIA_AUDIO || ch == CH_SPEECH_AUDIO || ch == CH_SYSTEM_AUDIO) {
         if (id == 0x8000) {   /* setup -> ready, AA_MAX_UNACKED frames in flight, config 0 */
             pb_u(&b, 1, 2);
-            pb_u(&b, 2, AA_MAX_UNACKED);
+            pb_u(&b, 2, ch == CH_VIDEO ? AA_VIDEO_UNACKED : AA_MAX_UNACKED);
             pb_u(&b, 3, 0);
             send_pb(ch, 0, 0x8003, &b, buf);
             if (ch == CH_VIDEO) {   /* and take video focus */

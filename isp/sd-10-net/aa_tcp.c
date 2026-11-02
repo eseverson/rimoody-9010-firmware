@@ -90,6 +90,8 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     for (struct pbuf *q = p; q; q = q->next)
         aa_rx(q->payload, q->len);
     tcp_recved(pcb, p->tot_len);
+    tcp_set_flags(pcb, TF_ACK_NOW);   /* no delayed ACK: lwIP holds it up to 250 ms (its TCP timer), and the phone waits on it */
+    tcp_output(pcb);
     pbuf_free(p);
     return ERR_OK;
 }

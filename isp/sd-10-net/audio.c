@@ -39,8 +39,11 @@ static aud_logf logf;
 static void eq_apply_all(void);
 /* PCM mixer state (see "PCM: a small mixer over ring 10" below) */
 #define NSRC 4
-#define LEAD (48 * 4 * 30)   /* 30 ms */
-static u32 rpos, zpos, cur[NSRC], dropped[NSRC], taken[NSRC];
+#define LEAD (48 * 4 * 30)   /* 30 ms: test tone / system sounds */
+/* where a source restarts after running dry, ahead of the DSP: a jitter buffer for audio that arrives over Wi-Fi in
+ * bursts (30 ms for AA media made every network hiccup an audible gap, 2026-11-02) */
+static const u32 src_lead[4] = { 48 * 4 * 250, 48 * 4 * 120, 48 * 4 * 60, LEAD };
+static u32 rpos, zpos, cur[NSRC], dropped[NSRC], taken[NSRC], underruns, underrun_bytes;
 static int ready, chip651, tone_hz;
 static u32 tone_phase;
 /* the PCM ring in use: stream 1 (the "main" media path, through the PCM decoder: master volume and EQ apply) or, as
@@ -556,8 +559,11 @@ static void track_r(void)
 {
     u32 r = REG(ring_r) % ring_size, ro = rpos % ring_size;
     rpos += (r + ring_size - ro) % ring_size;
-    if ((int)(zpos - rpos) < 0)   /* underrun: the DSP went past everything written */
+    if ((int)(zpos - rpos) < 0) {   /* underrun: the DSP went past everything written (an audible gap if a source was playing) */
+        if ((int)(cur[0] - zpos) >= 0 && taken[0])
+            underruns++, underrun_bytes += rpos - zpos;
         zpos = rpos;
+    }
 }
 
 static void zero_to(u32 end)   /* extend the valid region to end, zero-filled */
@@ -588,8 +594,8 @@ static int mix(int src, const short *lr, int frames, int mono_x3)
     if (!ready || !ring || src < 0 || src >= NSRC)
         return 0;
     track_r();
-    if ((int)(cur[src] - (rpos + 128)) < 0)   /* idle or fell behind: start just ahead of the DSP */
-        cur[src] = rpos + LEAD;
+    if ((int)(cur[src] - (rpos + 128)) < 0)   /* idle or fell behind: restart a jitter buffer ahead of the DSP */
+        cur[src] = rpos + src_lead[src];
     u32 limit = rpos + ring_size - 128;   /* never write within 128 bytes behind R */
     u32 room = (int)(limit - cur[src]) > 0 ? (limit - cur[src]) / 4 : 0;
     u32 out = mono_x3 ? (u32)frames * 3 : (u32)frames;   /* 16 kHz mono sources are repeated 3x into 48 kHz stereo */
@@ -689,10 +695,10 @@ int aud_status(char *o, aud_fmt fmt)
     k += fmt(o + k, "; ");
     o += k;
     return k + fmt(o, "audio: %s state %08x (sys %d front %d) heartbeat %x (%u changes) 1880 %08x 18a8 %08x msgs %u timeouts %u "
-                  "path %u ring %08x W %x R %x played %u KB; taken/dropped media %u/%u guide %u/%u tone %u/%u; tone %d Hz vol %02x "
+                  "path %u ring %08x W %x R %x played %u KB; underruns %u (%u ms); taken/dropped media %u/%u guide %u/%u tone %u/%u; tone %d Hz vol %02x "
                   "1e14 %08x banks %08x %08x %08x",
                ready ? "ready" : "NOT ready", REG(0x18b0), state(0), state(7), REG(0x18b4), hb_seen, REG(0x1880), REG(0x18a8),
-               msgs, cmd_timeouts, path, ring, REG(ring_w), REG(ring_r), rpos >> 10, taken[0], dropped[0], taken[1] + taken[2],
+               msgs, cmd_timeouts, path, ring, REG(ring_w), REG(ring_r), rpos >> 10, underruns, underrun_bytes / 192, taken[0], dropped[0], taken[1] + taken[2],
                dropped[1] + dropped[2], taken[3], dropped[3], tone_hz,
                dsp_get(APP, 0x3d) & 0xff, REG(0x1e14), REG(0x1744), REG(0x1750), REG(0x1758));
 }
