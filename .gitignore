@@ -25,3 +25,6 @@ __pycache__/
 # mbedtls archive built at -O2
 isp/sd-10-net/obj/
 isp/sd-10-net/mbedtls.a
+
+# brainstorming mockups
+.superpowers/
