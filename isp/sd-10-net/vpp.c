@@ -1,6 +1,7 @@
 /* VPP0 video layer bring-up (notes/vpp0_display.md), HU1 op 24, net task only. Every change to the display
  * registers is undone by vpp_restore (the saved blocks written back), automatically after the requested seconds. */
 #include "vpp.h"
+#include "vdec.h"
 
 typedef unsigned int u32;
 #define R(a) (*(volatile u32 *)(a))
@@ -81,6 +82,7 @@ static u32 fl[8];   /* DDFCH error flags (0x7EC) after each setup stage, for bis
 #define FL(i) (fl[i] = R(0x9c0057ec))
 static void init_fetch(u32 w, u32 h, u32 pitch)
 {
+    vdec_bg2d_ensure();   /* DDFCH locks up on its first fetch without the BG2D init (notes/vpp0_display.md, root cause) */
     FL(0);
     init_post();
     FL(1);
@@ -158,18 +160,27 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             R(0x9c0057f0) &= ~1u;
             /* eCos's display path (0x5270de): the frame's BG2D entries get gp = 2 (the decoder writes gp = 1), progressive
              * scan bits; then the mode-0xB handoff bits: 0x784 b8 (index mode), D84 b9, DC[17:16] = 1, A80 b8 */
-            for (int e = 0; e < 2; e++) {
+            /* p[4] variant: 0 index mode with eCos's gp-2 rewrite of the frame's BG2D entries, 1 index mode on the
+             * decoder's own entries (gp 1), 2 physical addresses of the slot (tiled data: scrambled, but shows the fetch) */
+            int var = n >= 5 ? p[4] : 0;
+            for (int e = 0; e < 2 && var == 0; e++) {
                 u32 a2 = 0x9c00a400 + 4 * (e ? chroma_idx : luma_idx);
                 R(a2) = (R(a2) & ~(3u << 19)) | 2u << 19;
             }
-            setbits(0x9c005784, 1u << 28 | 1u << 20 | 1u << 21 | 1u << 8, 1u << 20 | 1u << 8);
+            if (var == 2)
+                setbits(0x9c005784, 1u << 28 | 1u << 20 | 1u << 21 | 1u << 8, 0);
+            else
+                setbits(0x9c005784, 1u << 28 | 1u << 20 | 1u << 21 | 1u << 8, 1u << 20 | 1u << 8);
             setbits(0x9c005d84, 1u << 9, 0);   /* mode 0xB case 0x52a744: r5 = 0 -> D84 b9 = 0 (round 3 correction) */
             /* config_0: b4 "il c" 0 = frame, b5 "fid c" 0 = top (Sunplus doc); the 0xB case clears both, hal_vpp_init had set b4 */
             setbits(0x9c0057dc, 3u << 16 | 1u << 5 | 1u << 4 | 1u, 1u << 16 | 1u);
             setbits(0x9c005a80, 1u << 8 | 1u << 9 | 1u << 12, 1u << 8);
             setbits(0x9c005788, 0x1c, 0x10);
-            R(0x9c005798) = luma_idx, R(0x9c00579c) = luma_idx, R(0x9c0057a0) = luma_idx;
-            R(0x9c0057a4) = chroma_idx, R(0x9c0057a8) = chroma_idx, R(0x9c0057ac) = chroma_idx;
+            u32 ly = luma_idx, lc = chroma_idx;
+            if (var == 2)   /* the slot's physical addresses from its BG2D entries (address field = phys >> 10) */
+                ly = R(0x9c00a400 + 4 * luma_idx) & 0x7ffff, lc = R(0x9c00a400 + 4 * chroma_idx) & 0x7ffff;
+            R(0x9c005798) = ly, R(0x9c00579c) = ly, R(0x9c0057a0) = ly;
+            R(0x9c0057a4) = lc, R(0x9c0057a8) = lc, R(0x9c0057ac) = lc;
         }
         /* DMIX layer mode, 2 bits per layer at field (layer - 1): 0 blend (plane alpha), 1 transparent (U-Boot's
          * setting for VPP0 on L1), 2 opaque, as the SP7021 driver; default field 0, mode 2 */
@@ -180,7 +191,7 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
     } else if (c == 3) {
         vpp_restore();
     } else if (c == 6) {   /* linear NV12 color bars at 0x04E00000, DDFCH as the SP7021 driver (ddfch_setting) */
-        const u32 w = 800, h = 480, pitch = 896, Y = n >= 5 && p[4] ? 0x03700000u : 0x04e00000u, C = Y + pitch * h;
+        const u32 w = 800, h = 480, pitch = 896, Y = n >= 5 && p[4] ? 0x03700000u : 0x00e00000u, C = Y + pitch * h;
         static const unsigned char bars[8][3] = { { 235, 128, 128 }, { 210, 16, 146 }, { 170, 166, 16 }, { 145, 54, 34 },
                                                   { 106, 202, 222 }, { 81, 90, 240 }, { 41, 240, 110 }, { 16, 128, 128 } };
         for (u32 y = 0; y < h; y++)
@@ -228,7 +239,7 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
                               * 0x04600000, CbCr +0x180000), 1 the same with CbCr = luma (one master port's region only).
                               * No restore: `vpp restore` afterwards. */
         int real = n >= 2 && (p[1] & 1), where = n >= 3 ? p[2] : 0;
-        u32 Y = where == 2 ? 0x03700000u : 0x04600000u, C = where == 1 ? Y : where == 2 ? 0x03800000u : Y + 0x180000u;
+        u32 Y = where == 2 ? 0x03700000u : 0x00600000u, C = where == 1 ? Y : where == 2 ? 0x03800000u : Y + 0x180000u;
         int full = n >= 4 && p[3];   /* p[3]: 1 = 1024 x 600, no scaling */
         save();
         init_fetch(full ? 1024 : 800, full ? 600 : 480, 1920);
@@ -264,7 +275,7 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
         u32 w = full ? 1024 : 800, h = full ? 600 : 480;
         /* where 3: below 64 MB in eCos's image area (unused by the payload). The unit has 64 MB of DRAM; addresses from
          * 0x04000000 up alias the low 64 MB for the CPU (2026-11-01), so 0x04600000 is not real memory for an AXI master. */
-        u32 Y = where == 3 ? 0x00400000u : where == 2 ? 0x03700000u : 0x04600000u,
+        u32 Y = where == 3 ? 0x00400000u : where == 2 ? 0x03700000u : 0x00600000u,
             C = where == 3 ? 0x00500000u : where == 1 ? Y : where == 2 ? 0x03800000u : Y + 0x180000u;
         save();
         init_fetch(w, h, pitch ? pitch : 1920);
@@ -497,7 +508,7 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
         for (int t = 0; t < 2; t++) {
             if (!(m & (256u << t)))
                 continue;
-            u32 Y = t ? 0x04600000u : 0x07a00000u, C = Y + 0x100000;
+            u32 Y = t ? 0x00600000u : 0x01000000u, C = Y + 0x100000;
             R(0x9c0057f0) = 0x80801002;              /* BIST off (SP7021 value) */
             setbits(0x9c005784, 1u << 28 | 1u << 20, 0);
             R(0x9c005798) = R(0x9c00579c) = R(0x9c0057a0) = Y >> 10;

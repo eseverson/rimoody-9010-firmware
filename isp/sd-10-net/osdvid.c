@@ -12,8 +12,8 @@ typedef unsigned char u8;
 
 #define OSD0     0x9c006200u
 #define HDR      0x03661000u   /* our region header (the console's is at 0x03660000) */
-#define BUF0     0x07A00000u   /* up to 1024 x 600 x 2 = 0x12C000 each, free DRAM after the decoder's slots */
-#define BUF1     0x07C00000u
+#define BUF0     0x01000000u   /* up to 1024 x 600 x 2 = 0x12C000 each, after the decoder's slots; was 0x07A00000, */
+#define BUF1     0x01200000u   /* which is 0x03A00000 (the unit has 64 MB) and ran into U-Boot's code at 0x03CC3000 */
 #define PANEL_W  1024u
 #define PANEL_H  600u
 #define PITCH    1920u         /* the decoder's pitch */

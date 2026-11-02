@@ -17,3 +17,4 @@ int vdec_feed(const unsigned char *p, unsigned int n, char *o, vdec_fmt fmt);   
 int vdec_last_slot(unsigned int *luma, unsigned int *chroma);
 void vdec_dims(unsigned int *w, unsigned int *h);   /* the stream's cropped size (0 before an SPS) */
 #endif
+void vdec_bg2d_ensure(void);   /* BG2D (2dbg) init if not done yet; the display fetch needs it */

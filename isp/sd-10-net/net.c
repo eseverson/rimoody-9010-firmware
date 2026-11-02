@@ -3462,7 +3462,7 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         return vdec_status(t, vfmt_n);
     }
     case 23: {   /* MEMBENCH: read 64 KB 8 times at several regions (cache / DRAM speed), read-only */
-        static const u32 regions[] = { 0x01810000, 0x01d80000, 0x02300000, 0x02800000, 0x03800000, 0x04900000 };
+        static const u32 regions[] = { 0x01810000, 0x01d80000, 0x02300000, 0x02800000, 0x03800000, 0x00900000 };
         int k = vfmt_n(t, "membench (MB/s, 8 x 64 KB reads; first pass excluded):");
         for (unsigned r = 0; r < sizeof regions / sizeof regions[0]; r++) {
             volatile const u32 *m = (volatile const u32 *)regions[r];
@@ -3544,7 +3544,7 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
     case 10: {   /* EXEC src len: checked here, run from net_loop after this reply has gone out */
         u32 src = n >= 8 ? le32(p) : 0, len = n >= 8 ? le32(p + 4) : 0;
         const u32 *img = (const u32 *)src;
-        if (n < 8 || (src & 3) || src < 0x00100000 || len < 0x100 || len > 0x100000 || src + len > 0x07000000 ||
+        if (n < 8 || (src & 3) || src < 0x00100000 || len < 0x100 || len > 0x100000 || src + len > 0x04000000 ||
             (src < (u32)__bss_end && src + len > 0x01800000) || (src < TRAMP_ADDR + 0x10000 && src + len > TRAMP_ADDR))
             return vfmt_n(t, "ERR exec: src 4-aligned, 0x100 <= len <= 0x100000, not over the payload/trampoline");
         if (img[0x40 / 4] != 0x454e5548 || img[0x44 / 4] != 1)

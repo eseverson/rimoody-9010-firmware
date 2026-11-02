@@ -12,13 +12,15 @@ typedef unsigned int u32;
 typedef unsigned char u8;
 #define M(o) (*(volatile u32 *)(0x9c000000u + (o)))
 
-/* DRAM for the decoder: above everything else we use (payload 0x018, log 0x01A, heap 0x022, uploads 0x030,
- * console framebuffer 0x034-0x0366, trampoline 0x02F) */
-#define EVB_ADDR   0x04000000u
+/* DRAM for the decoder, physical addresses. The unit has 64 MB (notes/vpp0_display.md, issue #7): CPU addresses
+ * 0x04000000.. alias 0x00000000.., and DMA masters (the display fetch in particular) need the real address. These are
+ * the same physical buffers the decoder used before as 0x04xxxxxx aliases, below the payload (0x018, log 0x01A,
+ * heap 0x022, trampoline 0x02F, uploads 0x030, console framebuffer 0x034-0x0366, U-Boot from ~0x03A). */
+#define EVB_ADDR   0x00000000u
 #define EVB_KB     2500u          /* 0x9C4 KB, as eCos for codec 6 ("Streaming H264") */
-#define SPMP_ADDR  0x04400000u
+#define SPMP_ADDR  0x00400000u
 #define SPMP_KB    1028u          /* 0x404 KB */
-#define SCS_ADDR   0x04500000u
+#define SCS_ADDR   0x00500000u
 #define SCS_KB     2u
 #define IDX_EVB    0x28
 #define IDX_SPMP   0x29
@@ -88,6 +90,14 @@ static void bg2d_init(void)   /* 0x52ec48, display init's "2dbg" */
         M(0xa400 + 4 * i) = 0x07000000;
     M(0xa39c) |= 0x2000;
     M(0xa39c) |= 0x10;
+}
+
+/* eCos runs the 2dbg init in its display init before the VPP (0x52eb64 before drv_vpp_init): the display fetch
+ * (DDFCH) reads through this unit even with physical addresses and locks up on the first fetch without it. */
+void vdec_bg2d_ensure(void)
+{
+    if (M(0xa400) != 0x07000000 || M(0xa404) != 0x07000000)
+        bg2d_init();
 }
 
 static int soft_reset(void)   /* 0x41325e */
@@ -240,19 +250,19 @@ int vdec_bitread(u32 src, u32 len, char *o, vdec_fmt fmt)
 /* The decoder lays pictures out with the pitch in BG2D "mb size" slot 0 (0x9C00A380 byte 0 = 0x78: 1920 bytes, set
  * by the display init and shared with it), in 64-row stripes of 4 KB macro-tiles 64 pixels wide (notes/h264_decoder.md
  * "Output layout"). So the buffers use that pitch: 1920 x 512 luma, 1920 x 256 interleaved CbCr.
- * Four frame slots (DRAM 0x04600000..0x04DA0000; 0x06000000 is in use by something else): luma at +0, CbCr at
+ * Four frame slots (DRAM 0x00600000..0x01000000): luma at +0, CbCr at
  * +0x100000, co-located motion vectors ("MVC", 0x1A000 for 800x480) at +0x180000. BG2D indices per slot k: luma k,
  * chroma 0x14 + k, MVC 0x2A + k, as eCos's tables. */
 #define FB_PITCH    1920u
 #define FB_LUMA_N   0x168000u      /* 1920 x 768: up to 1280 x 720 (12 stripes of 64 rows) */
 #define FB_CHROMA_N 0xB4000u
-#define WORK_3B     0x04540000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each), after the SCS buffer */
-#define WORK_3C     0x04580000u
+#define WORK_3B     0x00540000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each), after the SCS buffer */
+#define WORK_3C     0x00580000u
 #define NSLOT       4
-/* 1280 x 720 (Android Auto with margins on the 1024 x 600 panel): 0x280000 per slot in 0x04600000..0x05000000, luma
- * 0x168000, CbCr 0xB4000 at +0x180000, MVC 0x3C000 at +0x240000. Not 0x07000000: slots there broke even 800 x 480
- * decodes (2026-11-01; something else uses that memory, or the MFD does not reach it reliably). */
-static const u32 slot_base[NSLOT] = { 0x04600000u, 0x04880000u, 0x04B00000u, 0x04D80000u };
+/* 1280 x 720 (Android Auto with margins on the 1024 x 600 panel): 0x280000 per slot in 0x00600000..0x01000000, luma
+ * 0x168000, CbCr 0xB4000 at +0x180000, MVC 0x3C000 at +0x240000. (The old "0x07000000 broke decodes" was the alias of
+ * 0x03000000, the EXEC upload buffer.) */
+static const u32 slot_base[NSLOT] = { 0x00600000u, 0x00880000u, 0x00B00000u, 0x00D80000u };
 #define SLOT_LUMA(k)   (slot_base[k])
 #define SLOT_CHROMA(k) (slot_base[k] + 0x180000u)
 #define SLOT_MVC(k)    (slot_base[k] + 0x240000u)
