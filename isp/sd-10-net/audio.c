@@ -42,7 +42,7 @@ static void eq_apply_all(void);
 #define LEAD (48 * 4 * 30)   /* 30 ms: test tone / system sounds */
 /* where a source restarts after running dry, ahead of the DSP: a jitter buffer for audio that arrives over Wi-Fi in
  * bursts (30 ms for AA media made every network hiccup an audible gap, 2026-11-02) */
-static const u32 src_lead[4] = { 48 * 4 * 250, 48 * 4 * 120, 48 * 4 * 60, LEAD };
+static const u32 src_lead[4] = { 48 * 4 * 600, 48 * 4 * 120, 48 * 4 * 60, LEAD };   /* media 600 ms: Wi-Fi gaps of 0.6-1 s measured on the bench path */
 static u32 rpos, zpos, cur[NSRC], dropped[NSRC], taken[NSRC], underruns, underrun_bytes;
 static int ready, chip651, tone_hz;
 static u32 tone_phase;
