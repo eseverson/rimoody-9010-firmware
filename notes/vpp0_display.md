@@ -239,3 +239,17 @@ Things learned on the way:
 Applied on our side (`vpp fresh` pokes, fresh9.log): eCos's G181 values, 0x788 b3, VPOST b1, 0x790 = 0xEF, buffers below 64 MB at 1024x600 / pitch 1024, alone or together: still one or two frames, then the sticky 0x20220/0x20230.
 
 **Replaying all 344 captured values** (new `vpp replay LIST N`, vpp.c c == 14, in hal_vpp_init's block order, status/checksum registers left out, then 0x788 and 0x9C005A80 last) **keeps VPP0 running**: DDFCH / VSCL / DMIX checksums 0x903D / 0xF873 / 0x2359 every frame through frame 12, real data (BIST off), error bits present (OR 0xF0F00) but no lock-up. Bisect by block in progress.
+
+## Root cause found: BG2D init + real DRAM (2026-11-01 19:3x, build 20261101-191006) — VPP0 shows our picture
+
+Replay bisect (each block of the 344 eCos values left out once, one full reset each, camera on the panel): VPOST, 0x6F80, 0x7000, G181 (0x9C005A84..), DMIX left out → still runs, color bars on the panel; VSCL left out → green (expected); **BG2D control block (0x9C00A380..0x9C00A3FC) left out → sticky 0x20230 and green, as in all our earlier tests**; PQ run did not happen (EXEC failed that time).
+
+Confirmed with our own code: `vdec init` (runs vdec.c `bg2d_init`, eCos's "2dbg" init 0x52ec48: 0x9C00A384..A3B8 tables, A39C b5 clr / b13 b4 set, all 256 entries 0x07000000) then `hu.py vpp fresh 0xa1 3 1024` (vpp.c init_fetch, physical addresses, NV12 bars at 0x00400000 / 0x00500000 written with `hu.py write`, 1024x600, pitch 1024, BIST off): **VPP0 shows the 8 color bars on the panel, steady every frame** (DDFCH 0x34D3, VSCL 0xE2E4 checksums; error bits 0x70F00 still appear transiently, as under eCos). The same with eCos's BG2D control values poked instead of `vdec init` also works.
+
+So the two causes were:
+1. **DDFCH's AXI reads go through the BG2D unit even in physical mode**; with BG2D unconfigured (the state after reset, which U-Boot leaves) both master ports error on the first fetch and DDFCH locks up until a chip reset. eCos runs the 2dbg init in its display init before the VPP.
+2. **The buffers must be real DRAM below 64 MB.** 0x04600000 and friends are CPU aliases (see the eCos snapshot section, issue #7); every earlier test that had BG2D initialized (index mode after `vdec init`) used 0x046xxxxx addresses, and every test below 64 MB had BG2D uninitialized.
+
+Not needed after all: G181 values, 0x788 b3, 0x790 = 0xEF, VPOST/PQ/DMIX extras, TGEN changes. Camera: /dev/video0 (Logitech C270, 046d:081d) looks at the panel; `ffmpeg -f v4l2 -i /dev/video0 -frames:v 12 -update 1 OUT.jpg` with the camera's auto exposure (setting it manual through V4L2 made it worse).
+
+Next: make vpp.c own the BG2D init (call bg2d_init from vdec.c or share it), move the decoder frame slots and every display buffer below 64 MB (issue #7), then show a decoded picture through index mode (BG2D gp 2, eCos's display path) and wire it to the AA stream.
