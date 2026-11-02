@@ -18,7 +18,8 @@ int ui_aa_visible(void);                        /* the AA view is up: show its v
 
 /* hooks the UI calls (net.c); run on the UI task, so they must only queue work for the net task */
 void plat_ui_mute(int on);                      /* MCU system mute and the DSP master mute */
-void plat_ui_volume(int index);                 /* 0..40 (audio.c) */
+void plat_ui_volume(int index);
+void plat_ui_eq(int band, int db);             /* equalizer band 0..9, -12..+12 dB (audio.c) */                 /* 0..40 (audio.c) */
 void plat_ui_reboot(void);
 void plat_ui_boot_stock(void);
 void plat_ui_aa_key(int keycode);               /* 4 BACK */

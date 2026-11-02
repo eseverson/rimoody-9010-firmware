@@ -244,8 +244,9 @@ def main():
     p.add_argument('what', choices=['status', 'show', 'on', 'off', 'fast', 'every']); p.add_argument('secs', nargs='?', type=int, default=0)
     p = sub.add_parser('ui', help='UI tests: tap X Y | button N [HOLD_MS] | drag X1 Y1 X2 Y2 | lights 0|1|2 (forced off/on, input) | shot OUT.png (the OSD0 framebuffer)')
     p.add_argument('what', choices=['tap', 'button', 'drag', 'lights', 'shot']); p.add_argument('args', nargs='*')
-    p = sub.add_parser('audio', help='audio DSP (audio.c): status | init | tone HZ (0 off) | volume 0..40 | mute 0|1')
-    p.add_argument('what', choices=['status', 'init', 'tone', 'volume', 'mute']); p.add_argument('value', nargs='?', type=int, default=0)
+    p = sub.add_parser('audio', help='audio DSP (audio.c): status | init | tone HZ (0 off) | volume 0..40 | mute 0|1 | eq BAND DB')
+    p.add_argument('what', choices=['status', 'init', 'tone', 'volume', 'mute', 'eq']); p.add_argument('value', nargs='?', type=int, default=0)
+    p.add_argument('db', nargs='?', type=float, default=0.0, help='eq: gain in dB (-12..12, 0.5 steps)')
     p.add_argument('--peak', type=int, default=256, help='tone: peak level of 32767 (256 = -42 dBFS)')
     p.add_argument('--ms', type=int, default=2000, help='tone: stops by itself after this many ms (max 10000)')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
@@ -402,8 +403,9 @@ def main():
             Image.frombuffer('RGBA', (1024, 600), raw, 'raw', 'BGRA', 0, 1).convert('RGB').save(a.args[0])
             print('saved', a.args[0])
     elif a.op == 'audio':
-        c = {'status': 0, 'init': 1, 'tone': 2, 'volume': 3, 'mute': 4}[a.what]
-        pl = bytes([c]) + (struct.pack('<HHH', a.value, a.peak, a.ms) if c == 2 else bytes([a.value]) if c in (3, 4) else b'')
+        c = {'status': 0, 'init': 1, 'tone': 2, 'volume': 3, 'mute': 4, 'eq': 5}[a.what]
+        pl = bytes([c]) + (struct.pack('<HHH', a.value, a.peak, a.ms) if c == 2 else bytes([a.value]) if c in (3, 4)
+                           else struct.pack('<Bb', a.value, int(round(a.db * 2))) if c == 5 else b'')
         print(u.call(OP_AUDIO, pl).decode(errors='replace'))
     elif a.op == 'op':
         print(u.call(a.num, bytes.fromhex(a.payload)).decode(errors='replace'))

@@ -14,5 +14,7 @@ void aud_tone(int hz);                   /* test tone into the PCM ring (0 = off
 void aud_tone_ex(int hz, int peak, int ms);   /* peak 1..8192 (of 32767), stops by itself after ms (<= 10 s) */
 int aud_write(const short *lr, int frames);   /* media: 48 kHz s16 stereo, little-endian; returns frames taken */
 int aud_write_mono16k(int src, const short *m, int samples);   /* 1 guidance/speech, 2 system: 16 kHz mono, mixed in */
+#define AUD_EQ_BANDS 10                  /* 31, 63, 125, 250, 500 Hz, 1, 2, 4, 8, 16 kHz */
+void aud_eq_set(int band, int half_db);  /* gain in 0.5 dB steps, -24..24 (+-12 dB); kept and re-applied after an init */
 int aud_status(char *o, aud_fmt fmt);
 #endif

@@ -3207,6 +3207,14 @@ void plat_ui_mute(int on) { ui_req_mute = on; }
 static volatile int ui_vol_want = -1, ui_mute_want;
 static int aud_vol_sent = -1, aud_mute_sent = -1;
 void plat_ui_volume(int index) { ui_vol_want = index; }
+static volatile signed char ui_eq_want[AUD_EQ_BANDS];
+static volatile int ui_eq_gen;
+static int aud_eq_sent = -1;
+void plat_ui_eq(int band, int db)
+{
+    if (band >= 0 && band < AUD_EQ_BANDS)
+        ui_eq_want[band] = (signed char)db, ui_eq_gen++;
+}
 
 /* Audio at boot, as stock eCos power_on 0x47af0a does it around the DSP: MCU system mute (01 01), 200 ms, GPIO13 high
  * (sysio 0x69: probably the 7388 amplifier's ST-BY; low under U-Boot), 100 ms, then the DSP (audio.c), then the MCU
@@ -3221,7 +3229,7 @@ static void audio_boot(void)
     IOREG(0x9c000340) = 0x20002000u;            /* OUT high */
     clk_udelay(100000);
     int r = aud_init(lprintf);
-    aud_vol_sent = aud_mute_sent = -1;
+    aud_vol_sent = aud_mute_sent = aud_eq_sent = -1;
     if (!r && !ui_mute_want) {
         m[1] = 0x00;
         mcu_send(&mcu_st, m, 2, ub_ms(0));
@@ -3725,7 +3733,7 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         int c = n ? p[0] : 0;
         if (c == 1) {
             int r = aud_init(lprintf);
-            aud_vol_sent = aud_mute_sent = -1;   /* init leaves it muted at volume 0: the UI's settings go again */
+            aud_vol_sent = aud_mute_sent = aud_eq_sent = -1;   /* init leaves it muted at volume 0: the UI's settings go again */
             int k = vfmt_n(t, "init %d; ", r);
             return k + aud_status(t + k, vfmt_n);
         }
@@ -3735,6 +3743,8 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             aud_set_volume(p[1]);
         else if (c == 4 && n >= 2)
             aud_set_mute(p[1]);
+        else if (c == 5 && n >= 3)   /* eq: u8 band, s8 gain in 0.5 dB steps */
+            aud_eq_set(p[1], (signed char)p[2]);
         return aud_status(t, vfmt_n);
     }
     case 26: {   /* UI input injection (tests): 0 tap x u16, y u16; 1 button n [u8 hold in 100 ms units, default 1] */
@@ -4032,6 +4042,12 @@ static void net_loop(void)
                     aud_set_volume(v), aud_vol_sent = v;
                 if (mu != aud_mute_sent)
                     aud_set_mute(mu), aud_mute_sent = mu;
+                int g = ui_eq_gen;
+                if (g != aud_eq_sent) {
+                    for (int b = 0; b < AUD_EQ_BANDS; b++)
+                        aud_eq_set(b, 2 * ui_eq_want[b]);
+                    aud_eq_sent = g;
+                }
             }
             if (ui_req_key) {
                 aa_send_key(ui_req_key, 1);

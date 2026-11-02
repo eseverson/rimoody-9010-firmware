@@ -31,7 +31,20 @@ static int volume = 20, muted, dark = 1;
  * (dark while the headlights are on) */
 static int bright_day = 100, bright_night = 40, theme_mode = 1;
 static int lights;   /* debounced headlight input */
-static int boot_console = 1;   /* UI.TXT boot=1: power up into the text console (Home goes to the home screen) */
+static int boot_console = 1;
+/* equalizer: 10 octave bands (audio.c), -12..+12 dB each; presets are ours, not stock's */
+#define EQ_N 10
+static signed char eq_db[EQ_N];
+static const char *const eq_label[EQ_N] = { "31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k" };
+static const signed char eq_preset[][EQ_N] = {
+    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },           /* Flat */
+    { 6, 5, 4, 2, 0, 0, 0, 0, 0, 0 },           /* Bass */
+    { 5, 4, 2, 0, -1, -1, 0, 2, 4, 5 },         /* Loud: both ends up, for low listening levels */
+    { -2, -1, 0, 1, 3, 4, 3, 1, 0, -1 },        /* Voice */
+    { 0, 0, 0, 0, 0, 0, 1, 3, 5, 6 },           /* Treble */
+};
+static const char *const eq_preset_map[] = { "Flat", "Bass", "Loud", "Voice", "Treble", "" };
+#define EQ_PRESETS 5   /* UI.TXT boot=1: power up into the text console (Home goes to the home screen) */
 static char settings_text[256];
 static void settings_save(void);
 
@@ -245,6 +258,34 @@ static int kv_int(const char *t, const char *key, int dflt, int lo, int hi)   /*
     return dflt;
 }
 
+static void kv_list(const char *t, const char *key, signed char *out, int n, int lo, int hi)   /* "key=1,-2,3" */
+{
+    for (const char *p = t; *p;) {
+        int i = 0;
+        while (key[i] && p[i] == key[i])
+            i++;
+        if (!key[i] && p[i] == '=') {
+            p += i + 1;
+            for (int k = 0; k < n && *p && *p != '\n'; k++) {
+                int neg = *p == '-', v = 0;
+                if (neg)
+                    p++;
+                while (*p >= '0' && *p <= '9')
+                    v = v * 10 + (*p++ - '0');
+                v = neg ? -v : v;
+                out[k] = (signed char)(v < lo ? lo : v > hi ? hi : v);
+                if (*p == ',')
+                    p++;
+            }
+            return;
+        }
+        while (*p && *p != '\n')
+            p++;
+        if (*p)
+            p++;
+    }
+}
+
 static void settings_load(void)
 {
     bright_day = kv_int(settings_text, "day", bright_day, 0, 100);
@@ -253,14 +294,17 @@ static void settings_load(void)
     aa_enabled = kv_int(settings_text, "aa", aa_enabled, 0, 1);
     volume = kv_int(settings_text, "vol", volume, 0, VOL_MAX);
     boot_console = kv_int(settings_text, "boot", boot_console, 0, 1);
+    kv_list(settings_text, "eq", eq_db, EQ_N, -12, 12);
     plat_ui_aa_enable(aa_enabled);
 }
 
 static void settings_save(void)
 {
-    char t[96];
-    lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\nvol=%d\nboot=%d\n", bright_day, bright_night, theme_mode,
-                aa_enabled, volume, boot_console);
+    char t[200];
+    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\nvol=%d\nboot=%d\neq=", bright_day, bright_night,
+                        theme_mode, aa_enabled, volume, boot_console);
+    for (int i = 0; i < EQ_N; i++)
+        k += lv_snprintf(t + k, sizeof t - (unsigned)k, "%d%s", eq_db[i], i < EQ_N - 1 ? "," : "\n");
     plat_ui_settings_save(t);
 }
 
@@ -552,6 +596,102 @@ static lv_obj_t *page(lv_obj_t *parent, int i, const char *name, lv_obj_t *nav)
     return p;
 }
 
+/* ---- equalizer page: presets, then one vertical slider per band ---- */
+
+static lv_obj_t *eq_slider[EQ_N], *eq_val[EQ_N], *eq_presets;
+
+static void eq_show(int b)
+{
+    lv_label_set_text_fmt(eq_val[b], "%+d", eq_db[b]);
+    if (!eq_db[b])
+        lv_label_set_text(eq_val[b], "0");
+}
+
+static void eq_preset_mark(void)   /* highlight the preset the bands match, if any */
+{
+    int which = -1;
+    for (int pr = 0; pr < EQ_PRESETS && which < 0; pr++) {
+        int same = 1;
+        for (int b = 0; b < EQ_N; b++)
+            same &= eq_db[b] == eq_preset[pr][b];
+        if (same)
+            which = pr;
+    }
+    lv_buttonmatrix_clear_button_ctrl_all(eq_presets, LV_BUTTONMATRIX_CTRL_CHECKED);
+    if (which >= 0)
+        lv_buttonmatrix_set_button_ctrl(eq_presets, (uint32_t)which, LV_BUTTONMATRIX_CTRL_CHECKED);
+}
+
+static void eq_slider_cb(lv_event_t *e)
+{
+    int b = (int)(intptr_t)lv_event_get_user_data(e);
+    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+        eq_db[b] = (signed char)lv_slider_get_value(lv_event_get_target(e));
+        eq_show(b);
+        plat_ui_eq(b, eq_db[b]);
+    } else {
+        eq_preset_mark();
+        settings_save();
+    }
+}
+
+static void eq_preset_cb(lv_event_t *e)
+{
+    uint32_t pr = lv_buttonmatrix_get_selected_button(lv_event_get_target(e));
+    if (pr >= EQ_PRESETS)
+        return;
+    for (int b = 0; b < EQ_N; b++) {
+        eq_db[b] = eq_preset[pr][b];
+        lv_slider_set_value(eq_slider[b], eq_db[b], LV_ANIM_OFF);
+        eq_show(b);
+        plat_ui_eq(b, eq_db[b]);
+    }
+    eq_preset_mark();
+    settings_save();
+}
+
+static void build_eq(lv_obj_t *p)
+{
+    lv_obj_t *r = row(p, "Equalizer");
+    eq_presets = lv_buttonmatrix_create(r);
+    lv_buttonmatrix_set_map(eq_presets, eq_preset_map);
+    lv_buttonmatrix_set_button_ctrl_all(eq_presets, LV_BUTTONMATRIX_CTRL_CHECKABLE);
+    lv_buttonmatrix_set_one_checked(eq_presets, true);
+    lv_obj_set_size(eq_presets, 470, 60);
+    lv_obj_set_style_pad_all(eq_presets, 4, 0);
+    lv_obj_add_event_cb(eq_presets, eq_preset_cb, LV_EVENT_VALUE_CHANGED, 0);
+    lv_obj_t *bands = lv_obj_create(p);
+    lv_obj_add_style(bands, &st_row, 0);
+    lv_obj_remove_flag(bands, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(bands, LV_PCT(100), 420);
+    lv_obj_set_flex_flow(bands, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bands, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_ver(bands, 10, 0);
+    for (int b = 0; b < EQ_N; b++) {
+        lv_obj_t *col = lv_obj_create(bands);
+        lv_obj_remove_style_all(col);
+        lv_obj_set_size(col, 60, LV_PCT(100));
+        lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(col, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_remove_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+        eq_val[b] = lv_label_create(col);
+        lv_obj_add_style(eq_val[b], &st_section, 0);
+        lv_obj_t *sl = eq_slider[b] = lv_slider_create(col);
+        lv_obj_set_size(sl, 14, 300);   /* taller than wide: vertical */
+        lv_slider_set_range(sl, -12, 12);
+        lv_slider_set_mode(sl, LV_SLIDER_MODE_SYMMETRICAL);   /* the bar grows from 0 dB, up or down */
+        lv_slider_set_value(sl, eq_db[b], LV_ANIM_OFF);
+        lv_obj_set_ext_click_area(sl, 20);   /* easier to grab with a finger in a car */
+        lv_obj_add_event_cb(sl, eq_slider_cb, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)b);
+        lv_obj_add_event_cb(sl, eq_slider_cb, LV_EVENT_RELEASED, (void *)(intptr_t)b);
+        lv_obj_t *l = lv_label_create(col);
+        lv_label_set_text(l, eq_label[b]);
+        lv_obj_add_style(l, &st_section, 0);
+        eq_show(b);
+    }
+    eq_preset_mark();
+}
+
 static void build_settings(void)
 {
     scr_settings = screen(0);
@@ -608,7 +748,7 @@ static void build_settings(void)
     lv_obj_add_event_cb(bm, theme_cb, LV_EVENT_VALUE_CHANGED, 0);
 
     p = page(scr_settings, 3, "Audio", nav);
-    row(p, "Equalizer");
+    build_eq(p);
 
     p = page(scr_settings, 4, "System", nav);
     r = row(p, "Restart the head unit");
@@ -810,6 +950,8 @@ static void ui_task(void *arg)
     apply_backlight();
     plat_ui_night(lights);
     plat_ui_volume(volume);
+    for (int b = 0; b < EQ_N; b++)
+        plat_ui_eq(b, eq_db[b]);
     apply_theme();
     build_home();
     build_aa();

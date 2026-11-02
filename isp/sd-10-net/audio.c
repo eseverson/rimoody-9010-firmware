@@ -35,6 +35,7 @@ static const u8 vol_code[41] = { 0,   67,  75,  83,  91,  99,  107, 111, 119, 12
                                  181, 185, 187, 189, 191, 193, 195, 197, 199, 201, 203, 205, 207 };
 
 static aud_logf logf;
+static void eq_apply_all(void);
 /* PCM mixer state (see "PCM: a small mixer over ring 10" below) */
 #define NSRC 4
 #define LEAD (48 * 4 * 30)   /* 30 ms */
@@ -475,6 +476,7 @@ int aud_init(aud_logf log)
     if (r)
         return r;
     post_boot();
+    eq_apply_all();
     int sr = stream1_start();
     if (sr) {
         if (logf)
@@ -502,6 +504,45 @@ void aud_set_volume(int index)
     u16 v = dsp_get(APP, 0x3d);
     dsp_set(APP, 0x3d, (u16)((v & 0xff00u) | vol_code[index]));
     send_cmd(5, 4, 0, 0);
+}
+
+/* ---- equalizer (notes/audio_eq.md): the DSP designs the filters itself from per-slot descriptors in the "App" area
+ * (id 0x27, info +0x36), 20 slots per channel, channels 0..3 at halfword offsets 0x00/0x28/0x50/0x78. A slot is two
+ * halfwords, stored byte-swapped: w0 = (2·dB & 0x7f) << 9 | type << 6 | code (type 3 = peaking, code = 32/Q),
+ * w1 = frequency in Hz (0 = off). eCos sends no mailbox command after these writes. Our bands: a 10-band octave EQ. */
+static const u16 eq_hz[AUD_EQ_BANDS] = { 31, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000 };
+static signed char eq_half[AUD_EQ_BANDS];   /* gain per band in 0.5 dB steps, -24..24 */
+#define EQ_Q_CODE 23                          /* 32 / 1.41: one octave wide */
+
+static void eq_slot(int ch, int slot, int type, unsigned hz, int half_db, unsigned code)
+{
+    u16 o = info(0x36);
+    if (!o || ch < 0 || ch > 5 || slot < 0 || slot > 19)
+        return;
+    static const u8 base[6] = { 0x00, 0x28, 0x50, 0x78, 0xa0, 0xc8 };
+    half_db = half_db > 24 ? 24 : half_db < -24 ? -24 : half_db;
+    u16 w0 = (u16)(((u32)half_db & 0x7f) << 9 | (u32)type << 6 | (code & 0x3f));
+    u16 w1 = (u16)(hz > 20000 ? 20000 : hz);
+    u32 a = data + (u32)o * 128 + 2u * (base[ch] + 2u * (u32)slot);
+    *(volatile u32 *)a = (u32)bswap16(w1) << 16 | bswap16(w0);   /* both halfwords in one aligned store */
+    dc_wb(a, 4);
+}
+
+void aud_eq_set(int band, int half_db)
+{
+    if (band < 0 || band >= AUD_EQ_BANDS)
+        return;
+    eq_half[band] = (signed char)(half_db > 24 ? 24 : half_db < -24 ? -24 : half_db);
+    if (!data)
+        return;
+    for (int ch = 0; ch < 4; ch++)
+        eq_slot(ch, band, 3, eq_hz[band], eq_half[band], EQ_Q_CODE);
+}
+
+static void eq_apply_all(void)
+{
+    for (int b = 0; b < AUD_EQ_BANDS; b++)
+        aud_eq_set(b, eq_half[b]);
 }
 
 /* ---- PCM: a small mixer over ring 10 ----
@@ -641,7 +682,12 @@ int aud_status(char *o, aud_fmt fmt)
 {
     if (!data)
         return fmt(o, "audio: not initialized");
-    return fmt(o, "audio: %s state %08x (sys %d front %d) heartbeat %x (%u changes) 1880 %08x 18a8 %08x msgs %u timeouts %u "
+    int k = fmt(o, "eq");
+    for (int b = 0; b < AUD_EQ_BANDS; b++)
+        k += fmt(o + k, " %u:%d", eq_hz[b], eq_half[b]);
+    k += fmt(o + k, "; ");
+    o += k;
+    return k + fmt(o, "audio: %s state %08x (sys %d front %d) heartbeat %x (%u changes) 1880 %08x 18a8 %08x msgs %u timeouts %u "
                   "path %u ring %08x W %x R %x played %u KB; taken/dropped media %u/%u guide %u/%u tone %u/%u; tone %d Hz vol %02x "
                   "1e14 %08x banks %08x %08x %08x",
                ready ? "ready" : "NOT ready", REG(0x18b0), state(0), state(7), REG(0x18b4), hb_seen, REG(0x1880), REG(0x18a8),
