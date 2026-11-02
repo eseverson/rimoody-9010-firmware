@@ -106,7 +106,10 @@ class Unit:
     def write(self, addr, data):
         for off in range(0, len(data), CHUNK):
             part = data[off:off + CHUNK]
-            crc = struct.unpack('<I', self.call(OP_WRITE, struct.pack('<I', addr + off) + part)[:4])[0]
+            r = self.call(OP_WRITE, struct.pack('<I', addr + off) + part)
+            if len(r) > 4 and r.startswith(b'ERR'):
+                raise IOError('%s (0x%x)' % (r.decode(errors='replace'), addr + off))
+            crc = struct.unpack('<I', r[:4])[0]
             if crc != zlib.crc32(part) & 0xFFFFFFFF:
                 raise IOError('CRC mismatch writing 0x%x' % (addr + off))
 

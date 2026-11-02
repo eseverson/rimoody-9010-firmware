@@ -403,7 +403,7 @@ static void cmd_rx(const cu8 *smac, cu32 sip, int sport, const cu8 *d, int n)
         cu32 addr = le32(p);
         int cnt = pn - 4;
         if (pn < 4 || !plat_mem_ok(addr, (cu32)cnt, 1)) {
-            len = plat_fmt(t, "ERR write refused");
+            len = plat_fmt(t, "ERR write refused: protected region (payload, log, HU1 buffer) or past memory");
             break;
         }
         plat_mem_write(addr, p + 4, cnt);
@@ -419,7 +419,7 @@ static void cmd_rx(const cu8 *smac, cu32 sip, int sport, const cu8 *d, int n)
         cu32 addr = le32(p);
         int cnt = pn >= 6 ? p[4] | p[5] << 8 : 0;
         if (pn < 6 || cnt > HU_MAX_DATA || (addr & 3) || !plat_mem_ok(addr, (cu32)cnt, 0)) {
-            len = plat_fmt(t, "ERR read: addr must be 4-aligned, len <= 1200");
+            len = plat_fmt(t, "ERR read: addr 4-aligned, len <= 1200, not 0x08000000..0x9bffffff (no memory there, the bus hangs)");
             break;
         }
         plat_mem_read(addr, rbuf, (cnt + 3) & ~3);

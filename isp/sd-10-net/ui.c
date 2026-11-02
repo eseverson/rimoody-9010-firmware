@@ -8,6 +8,7 @@
 #include "lvgl.h"
 #include "ui.h"
 #include "clk.h"
+#include "memmap.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
@@ -111,8 +112,9 @@ static void dcache_wb_range(unsigned int a, unsigned int n)
 
 /* LVGL renders each dirty area completely in an off-screen buffer; only finished pixels are copied into the
  * framebuffer OSD0 scans, so a scroll never shows a half-drawn row (owner: settings flashed while scrolling) */
-#define DRAW_BUF 0x02B00000u   /* free DRAM after the LVGL heap (0x02A00000, 1 MB), before the EXEC trampoline */
+#define DRAW_BUF MM_LVGL_DRAW   /* memmap.h: after the LVGL heap */
 #define DRAW_ROWS 120
+_Static_assert(PANEL_W * DRAW_ROWS * 4 <= MM_LVGL_DRAW_SZ, "LVGL draw buffer outgrows MM_LVGL_DRAW");
 static void flush_cb(lv_display_t *d, const lv_area_t *a, uint8_t *px)
 {
     unsigned int w = (unsigned int)(a->x2 - a->x1 + 1);

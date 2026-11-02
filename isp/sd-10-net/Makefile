@@ -21,8 +21,8 @@ LVGL_SRC := $(shell find lvgl/src -name '*.c')
 LVGL_OBJ := $(patsubst lvgl/%.c,obj/lvgl/%.o,$(LVGL_SRC))
 LVGL_CFLAGS := -DLV_CONF_INCLUDE_SIMPLE -Ilvgl
 LWIP_SRC := $(wildcard lwip/src/core/*.c lwip/src/core/ipv4/*.c) lwip/src/netif/ethernet.c
-SRCS    := head.S net.c crypto.c wpa.c ip.c mcu.c irq.c irq.S clk.c ehci.c usbh.c sd.c diskio.c fatfs/ff.c wpa_ap.c ap80211.c lwnet.c vdec.c h264p.c aa.c aa_tls.c aa_tcp.c vpp.c osdvid.c audio.c ui.c ui_logo.c $(LWIP_SRC) gt9.c console.c libc.c fw.S tramp_bin.S $(RTOS)
-HDRS    := FreeRTOSConfig.h freertos/port/portmacro.h freertos/port/port_nds32.h crypto.h wpa.h ip.h mcu.h irq.h clk.h ehci.h usbh.h wpa_ap.h ap80211.h lwnet.h vdec.h h264p.h aa.h aa_tls.h aa_tcp.h aa_tls_config.h vpp.h osdvid.h ui.h lv_conf.h lwip/lwipopts.h sd.h fatfs/ff.h fatfs/ffconf.h fatfs/diskio.h usbdev.h gt9.h console.h font8x16.h ub_sig.h rtl8188f_tables.h rtl8xxxu_regs.h
+SRCS    := head.S memmap_check.c net.c crypto.c wpa.c ip.c mcu.c irq.c irq.S clk.c ehci.c usbh.c sd.c diskio.c fatfs/ff.c wpa_ap.c ap80211.c lwnet.c vdec.c h264p.c aa.c aa_tls.c aa_tcp.c vpp.c osdvid.c audio.c ui.c ui_logo.c $(LWIP_SRC) gt9.c console.c libc.c fw.S tramp_bin.S $(RTOS)
+HDRS    := memmap.h FreeRTOSConfig.h freertos/port/portmacro.h freertos/port/port_nds32.h crypto.h wpa.h ip.h mcu.h irq.h clk.h ehci.h usbh.h wpa_ap.h ap80211.h lwnet.h vdec.h h264p.h aa.h aa_tls.h aa_tcp.h aa_tls_config.h vpp.h osdvid.h ui.h lv_conf.h lwip/lwipopts.h sd.h fatfs/ff.h fatfs/ffconf.h fatfs/diskio.h usbdev.h gt9.h console.h font8x16.h ub_sig.h rtl8188f_tables.h rtl8xxxu_regs.h
 
 all: NET.BIN net.dis TRAMP.BIN tramp.dis
 

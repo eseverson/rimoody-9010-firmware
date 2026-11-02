@@ -11,6 +11,7 @@
  * Unexpected exceptions write a crash record at 0x01F00000 and reset like U-Boot's reset_cpu(0) (0xf0aa26). */
 #include "irq.h"
 #include "crypto.h"
+#include "memmap.h"
 #include "freertos/port/port_nds32.h"
 
 typedef unsigned int u32;
@@ -23,8 +24,8 @@ typedef unsigned char u8;
 #define REG(a) (*(volatile u32 *)(a))
 #define MSYNC() __asm__ volatile("msync all" ::: "memory")
 
-#define VEC_BASE   0x01F10000u
-#define CRASH_ADDR 0x01F00000u
+#define VEC_BASE   MM_VECTORS
+#define CRASH_ADDR MM_CRASH
 #define CRASH_MAGIC 0x32435548u   /* "HUC2": version 2 (with a note); builds before 20261031-17 used "HUCR" */
 
 #define INTC_TYPE    0x9c000780u

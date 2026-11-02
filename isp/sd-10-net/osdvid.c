@@ -5,15 +5,16 @@
  * to the finished one. Net task only. */
 #include "osdvid.h"
 #include "irq.h"
+#include "memmap.h"
 
 typedef unsigned int u32;
 typedef unsigned char u8;
 #define R(a) (*(volatile u32 *)(a))
 
 #define OSD0     0x9c006200u
-#define HDR      0x03661000u   /* our region header (the console's is at 0x03660000) */
-#define BUF0     0x01000000u   /* up to 1024 x 600 x 2 = 0x12C000 each, after the decoder's slots; was 0x07A00000, */
-#define BUF1     0x01200000u   /* which is 0x03A00000 (the unit has 64 MB) and ran into U-Boot's code at 0x03CC3000 */
+#define HDR      MM_OSDVID_HDR   /* our region header (the console's is MM_FB_HDR) */
+#define BUF0     MM_OSDVID_BUF0   /* up to 1024 x 600 x 2 each, after the decoder's slots */
+#define BUF1     MM_OSDVID_BUF1
 #define PANEL_W  1024u
 #define PANEL_H  600u
 #define PITCH    1920u         /* the decoder's pitch */

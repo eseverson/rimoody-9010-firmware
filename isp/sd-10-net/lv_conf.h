@@ -59,7 +59,7 @@
     #define LV_MEM_POOL_EXPAND_SIZE 0
 
     /*Set an address for the memory pool instead of allocating it as a normal array. Can be in external SRAM too.*/
-    #define LV_MEM_ADR 0x02A00000u   /* 1 MB of free DRAM between the RTOS heap (to 0x02A00000) and the EXEC trampoline (0x02F00000) */
+    #define LV_MEM_ADR 0x02A00000u   /* MM_LVGL_HEAP (memmap.h; memmap_check.c asserts they match) */
     /*Instead of an address give a memory allocator that will be called to get a memory pool for LVGL. E.g. my_malloc*/
     #if LV_MEM_ADR == 0
         #undef LV_MEM_POOL_INCLUDE

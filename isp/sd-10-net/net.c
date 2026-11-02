@@ -53,6 +53,7 @@ typedef signed char s8;
 #include "semphr.h"
 #include "freertos/port/port_nds32.h"
 #include "console.h"
+#include "memmap.h"
 
 static char crash_brief[64];
 static int pending_crash_save;   /* "vec7/itype..@ipc" of a crash record found at start, for PING */
@@ -121,9 +122,9 @@ struct stdio_dev {
 };
 
 /* ---- memory map ---- */
-#define HELLO_BUF ((char *)0x01500000)
-#define LOG_BUF   ((char *)0x01a00000)
-#define LOG_MAX   0x000f0000
+#define HELLO_BUF ((char *)MM_HELLO)
+#define LOG_BUF   ((char *)MM_LOG)
+#define LOG_MAX   MM_LOG_SZ
 
 static u32 log_len, log_hooked;
 static struct stdio_dev *hooked[2];
@@ -332,9 +333,9 @@ static int run(const char *f, ...)
  * new file, copied first into a 64-byte aligned bounce buffer (U-Boot's SD driver moves data by halfword PIO,
  * 0xf7707a: an odd source address faulted, and the log ring may move while fatwrite reads it). Used for a crash report
  * and for the MCU's shutdown request only. */
-#define LOG_BOUNCE ((char *)0x01b00000)   /* 0x40000 bytes, after the log (0x01a00000-0x01af0000) */
-#define PREV_LOG ((char *)0x01c00000)     /* the previous run's log tail when it ended in a crash record */
-#define PREV_LOG_MAX 0x40000
+#define LOG_BOUNCE ((char *)MM_LOG_BOUNCE)   /* MM_LOG_BOUNCE_SZ bytes, after the log */
+#define PREV_LOG ((char *)MM_PREV_LOG)    /* the previous run's log tail when it ended in a crash record */
+#define PREV_LOG_MAX MM_PREV_LOG_SZ
 static u32 prev_log_len;
 static void hb_tick(void);
 
@@ -428,7 +429,8 @@ static void save_log(const char *name)
 {
     hb_tick();
     lprintf("--- saving the log as %s t=%u\n", name, ub_ms(0));
-    u32 len = log_len, start = len > 0x40000 ? len - 0x40000 : 0;
+    u32 len = log_len, start = len > MM_LOG_BOUNCE_SZ ? len - MM_LOG_BOUNCE_SZ : 0;
+    _Static_assert(MM_LOG_BOUNCE == 0x01b00000u, "the fatwrite command below names the bounce buffer's address");
     len -= start;
     for (u32 i = 0; i < len; i++)
         LOG_BOUNCE[i] = LOG_BUF[start + i];
@@ -1580,8 +1582,9 @@ static char *fmt_mac(char *o, const u8 *m)
 
 /* Bytes the MCU sends us: raw hex text with a ms timestamp per burst at RX_TXT (as before), and through the frame
  * parser in mcu.c, which logs one decoded line per frame and answers a4 / 00. */
-#define RX_TXT ((char *)0x01600000)
+#define RX_TXT ((char *)MM_MCU_RX)
 #define RX_MAX 0x4000
+_Static_assert(RX_MAX <= MM_MCU_RX_SZ, "MCU RX text outgrows MM_MCU_RX");
 static u32 rx_len, rx_bytes, rx_last;
 static struct mcu mcu_st;
 
@@ -1653,7 +1656,7 @@ static void rng_bytes(u8 *out, int n)
 void hu_random(unsigned char *out, int n) { rng_bytes(out, n); }   /* aa_tls.c (mbedtls entropy) */
 
 /* ---- configuration from /WIFI.TXT (never logged, wiped from RAM after parsing) ---- */
-#define WIFI_TXT ((char *)0x02100000)
+#define WIFI_TXT ((char *)MM_WIFI_TXT)
 static u8 cfg_ssid[33], cfg_pmk[32], cfg_token[32];
 static int cfg_ssid_len;
 static u32 cfg_ip;
@@ -2783,7 +2786,7 @@ static void mlme_tick(void)
 }
 
 /* ---- platform for ip.c and wpa.c ---- */
-#define RBUF ((u8 *)0x02000000)   /* HU1 reply buffer, HU_MAX_REPLY + 256 */
+#define RBUF ((u8 *)MM_HU1_REPLY)   /* HU1 reply buffer, HU_MAX_REPLY + 256 */
 extern u32 __bss_start[], __bss_end[];
 void plat_logf(const char *fmt, ...)   /* any task: its own buffer, not the net task's fmtbuf */
 {
@@ -2837,17 +2840,25 @@ int plat_cmd(const char *c, cu8 *out, int max)
     return cap_len + vfmt_n((char *)out + cap_len, "[rc=%d]\n", rc);
 }
 
+/* HU1 READ / WRITE: 0x08000000..0x9BFFFFFF hangs the bus (only 64 MB of DRAM; 0x04000000..0x07FFFFFF are aliases of it,
+ * which U-Boot itself runs from, so they stay readable). Writes are checked against the protected regions by physical
+ * address, so an alias cannot get around them. */
 int plat_mem_ok(cu32 a, cu32 n, int write)
 {
     if (a + n < a)
         return 0;
+    if (a < 0x9c000000u && a + n > MM_ALIAS_END)
+        return 0;
     if (!write)
         return 1;
-    static const u32 keep[][2] = { { 0x01800000, 0 }, { 0x01a00000, 0x01a00000 + LOG_MAX },
-                                   { 0x02000000, 0x02000000 + HU_MAX_REPLY + 256 } };
+    if (a < MM_ALIAS_END && MM_PHYS(a) + n > MM_DRAM_END)   /* would wrap around the alias boundary */
+        return 0;
+    static const u32 keep[][2] = { { MM_PAYLOAD, 0 }, { MM_LOG, MM_LOG + LOG_MAX },
+                                   { MM_HU1_REPLY, MM_HU1_REPLY + HU_MAX_REPLY + 256 } };
+    u32 pa = a < MM_ALIAS_END ? MM_PHYS(a) : a;
     for (unsigned i = 0; i < 3; i++) {
         u32 lo = keep[i][0], hi = i ? keep[i][1] : (u32)__bss_end;
-        if (a < hi && a + n > lo)
+        if (pa < hi && pa + n > lo)
             return 0;
     }
     return 1;
@@ -2944,8 +2955,8 @@ void plat_ip_event(cu32 ip, cu32 mask, cu32 router, int how)
 }
 
 /* ---- framebuffer console on OSD0 (console.c; notes/console.md) ---- */
-#define FB_ADDR 0x03400000u   /* 1024 x 600 x 4 = 0x258000 bytes, up to 0x03658000 */
-#define FB_HDR  0x03660000u   /* 128-byte OSD region header */
+#define FB_ADDR MM_FB   /* 1024 x 600 x 4 */
+#define FB_HDR  MM_FB_HDR   /* 128-byte OSD region header */
 #define OSD0    0x9c006200u
 #define IOREG(a) (*(volatile u32 *)(a))
 static int fb_on_flag, fb_renders, fb_rows;
@@ -3062,7 +3073,7 @@ void plat_mcu_shutdown(void)
 
 const char *plat_build(void) { return hu_build_id; }
 
-#define TRAMP_ADDR 0x02f00000u
+#define TRAMP_ADDR MM_TRAMP
 static u32 exec_src, exec_len;
 static int exec_pending, fatal_pending;
 static u32 deferred_at;   /* EXEC / fatal trap wait this long after their HU1 reply so it leaves the radio first */
@@ -3814,7 +3825,7 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
     case 10: {   /* EXEC src len: checked here, run from net_loop after this reply has gone out */
         u32 src = n >= 8 ? le32(p) : 0, len = n >= 8 ? le32(p + 4) : 0;
         const u32 *img = (const u32 *)src;
-        if (n < 8 || (src & 3) || src < 0x00100000 || len < 0x100 || len > 0x180000 || src + len > 0x04000000 ||
+        if (n < 8 || (src & 3) || src < 0x00100000 || len < 0x100 || len > 0x180000 || src + len > MM_DRAM_END ||
             (src < (u32)__bss_end && src + len > 0x01800000) || (src < TRAMP_ADDR + 0x10000 && src + len > TRAMP_ADDR))
             return vfmt_n(t, "ERR exec: src 4-aligned, 0x100 <= len <= 0x180000, not over the payload/trampoline");
         if (img[0x40 / 4] != 0x454e5548 || img[0x44 / 4] != 1)
@@ -4282,6 +4293,24 @@ static void net_task(void *arg)
     fail_or_stay(104, "Wi-Fi bring-up failed");
 }
 
+/* Our fixed buffers end at MM_UBOOT (memmap.h); check that U-Boot's live stack (with MM_UBOOT_STACK_MIN of headroom)
+ * and its relocated code really sit above it. gd: +0x2c relocaddr, +0x3c start_addr_sp (check_uboot). Logs only. */
+static void mem_boot_check(void)
+{
+    u32 sp, gd;
+    __asm__ volatile("mov55 %0, $sp" : "=r"(sp));
+    __asm__ volatile("mov55 %0, $r10" : "=r"(gd));
+    if (gd < 0x00100000 || gd >= MM_ALIAS_END - 0x40) {
+        lprintf("mem: gd %x implausible, U-Boot extent not checked\n", gd);
+        return;
+    }
+    u32 reloc = rd32((const void *)(gd + 0x2c)), ssp = rd32((const void *)(gd + 0x3c));
+    u32 low = MM_PHYS(sp < ssp ? sp : ssp) - MM_UBOOT_STACK_MIN;
+    int ok = low >= MM_UBOOT && MM_PHYS(reloc) >= MM_UBOOT && MM_PHYS(gd) >= MM_UBOOT;
+    lprintf("mem: U-Boot sp %x, start_addr_sp %x, gd %x, code %x (phys from %x); ours end at %x: %s\n", sp, ssp, gd, reloc,
+            low, MM_UBOOT, ok ? "ok" : "OVERLAP");
+}
+
 __attribute__((section(".text.entry"), used))
 /* One-shot boot of the stock eCos with the snapshot hook (isp/ecos-snap, tools/ecos_snap.py card): if /ECOSRUN.FLG is
  * on the card, delete it, load /ECOSP.BIN (the decompressed eCos with the hook call sites patched) to 0x00301040,
@@ -4373,6 +4402,7 @@ int payload_entry(int argc, char *const argv[])
     ecos_boot_check();   /* returns unless /ECOSRUN.FLG asks for a stock eCos snapshot run */
     vdec_hw_reset();   /* a decoder left running by the previous run stops here */
     lprintf("net main, build %s\n", hu_build_id);
+    mem_boot_check();
     {
         static char crumb_msg[96];
         if (vdec_crumb_report(crumb_msg, vfmt_n))

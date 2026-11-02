@@ -12,15 +12,16 @@
  * (eCos snapshot runs 3..5, 2026-11-02). */
 #include "audio.h"
 #include "clk.h"
+#include "memmap.h"
 
 typedef unsigned int u32;
 typedef unsigned short u16;
 typedef unsigned char u8;
 #define REG(x) (*(volatile u32 *)(0x9c000000u + (x)))
 
-/* DSP window: after the FreeRTOS heap (0x02200000, 2 MB), before the LVGL heap (0x02A00000). Same size as eCos'. */
-#define AUD_BASE 0x02400000u
-#define AUD_SIZE 0x004C4800u
+/* DSP window (memmap.h): after the FreeRTOS heap, before the LVGL heap. Same size as eCos'. */
+#define AUD_BASE MM_DSP
+#define AUD_SIZE MM_DSP_SZ
 static const u32 bank_size[6] = { 0x33400, 0x18100, 0x18100, 0xcf00, 0xcf00, 0x14500 };   /* per-class maxima (0x3bfc7e) */
 static u32 bank_addr[6], data;   /* data = DSP data memory (params at +0, App params +0x180, DSP info table +0x280) */
 

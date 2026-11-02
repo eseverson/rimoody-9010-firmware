@@ -4,6 +4,7 @@
  * the hardware bit reader (0x9C00D400 + 4n reads n bits) and its SPS parsed that way, to compare with h264p.c.
  * Every poll is bounded; a bus stall would be caught by the hardware watchdog (irq.c). */
 #include "vdec.h"
+#include "memmap.h"
 #include "h264p.h"
 #include "clk.h"
 #include <string.h>
@@ -16,11 +17,11 @@ typedef unsigned char u8;
  * 0x04000000.. alias 0x00000000.., and DMA masters (the display fetch in particular) need the real address. These are
  * the same physical buffers the decoder used before as 0x04xxxxxx aliases, below the payload (0x018, log 0x01A,
  * heap 0x022, trampoline 0x02F, uploads 0x030, console framebuffer 0x034-0x0366, U-Boot from ~0x03A). */
-#define EVB_ADDR   0x00000000u
+#define EVB_ADDR   MM_VDEC_EVB
 #define EVB_KB     2500u          /* 0x9C4 KB, as eCos for codec 6 ("Streaming H264") */
-#define SPMP_ADDR  0x00400000u
+#define SPMP_ADDR  MM_VDEC_SPMP
 #define SPMP_KB    1028u          /* 0x404 KB */
-#define SCS_ADDR   0x00500000u
+#define SCS_ADDR   MM_VDEC_SCS
 #define SCS_KB     2u
 #define IDX_EVB    0x28
 #define IDX_SPMP   0x29
@@ -33,15 +34,15 @@ struct vdec_stats vdec_stats;
 
 /* Breadcrumb that survives a reset (DRAM is kept): the step a risky operation is in, written back to memory before
  * the step runs. The next boot reports it (vdec_crumb_report) so a hang off the network still says where it was. */
-#define CRUMB ((volatile u32 *)0x01F0F000u)
+#define CRUMB ((volatile u32 *)MM_CRUMB)
 #define CRUMB_MAGIC 0x56444543u   /* "VDEC" */
 static void crumb(u32 step)
 {
     CRUMB[0] = CRUMB_MAGIC, CRUMB[1] = step, CRUMB[2] = CRUMB[2] + 1;
-    __asm__ volatile("cctl %0, L1D_VA_WB\n\tcctl %1, L1D_VA_WB\n\tmsync all" ::"r"(0x01F0F000u), "r"(0x01F0F020u)
+    __asm__ volatile("cctl %0, L1D_VA_WB\n\tcctl %1, L1D_VA_WB\n\tmsync all" ::"r"(MM_CRUMB), "r"(MM_CRUMB + 0x20)
                      : "memory");
 }
-static void crumb_clear(void) { CRUMB[0] = 0; __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(0x01F0F000u) : "memory"); }
+static void crumb_clear(void) { CRUMB[0] = 0; __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(MM_CRUMB) : "memory"); }
 
 int vdec_crumb_report(char *o, vdec_fmt fmt)   /* at boot: a step left behind by the previous run, then cleared */
 {
@@ -261,13 +262,14 @@ int vdec_bitread(u32 src, u32 len, char *o, vdec_fmt fmt)
 #define FB_PITCH    1920u
 #define FB_LUMA_N   0x168000u      /* 1920 x 768: up to 1280 x 720 (12 stripes of 64 rows) */
 #define FB_CHROMA_N 0xB4000u
-#define WORK_3B     0x00540000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each), after the SCS buffer */
-#define WORK_3C     0x00580000u
+#define WORK_3B     MM_VDEC_WORK_3B  /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each), after the SCS buffer */
+#define WORK_3C     MM_VDEC_WORK_3C
 #define NSLOT       4
 /* 1280 x 720 (Android Auto with margins on the 1024 x 600 panel): 0x280000 per slot in 0x00600000..0x01000000, luma
  * 0x168000, CbCr 0xB4000 at +0x180000, MVC 0x3C000 at +0x240000. (The old "0x07000000 broke decodes" was the alias of
  * 0x03000000, the EXEC upload buffer.) */
-static const u32 slot_base[NSLOT] = { 0x00600000u, 0x00880000u, 0x00B00000u, 0x00D80000u };
+static const u32 slot_base[NSLOT] = { MM_VDEC_SLOTS, MM_VDEC_SLOTS + MM_VDEC_SLOT_STEP, MM_VDEC_SLOTS + 2 * MM_VDEC_SLOT_STEP,
+                                      MM_VDEC_SLOTS + 3 * MM_VDEC_SLOT_STEP };
 #define SLOT_LUMA(k)   (slot_base[k])
 #define SLOT_CHROMA(k) (slot_base[k] + 0x180000u)
 #define SLOT_MVC(k)    (slot_base[k] + 0x240000u)

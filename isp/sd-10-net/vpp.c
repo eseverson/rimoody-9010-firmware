@@ -272,7 +272,7 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
         active = 1;
     } else if (c == 3) {
         vpp_restore();
-    } else if (c == 6) {   /* linear NV12 color bars at 0x04E00000, DDFCH as the SP7021 driver (ddfch_setting) */
+    } else if (c == 6) {   /* linear NV12 color bars at 0x00E00000 (decoder slot 3; 0x03700000 with p[4]), DDFCH as the SP7021 driver (ddfch_setting) */
         const u32 w = 800, h = 480, pitch = 896, Y = n >= 5 && p[4] ? 0x03700000u : 0x00e00000u, C = Y + pitch * h;
         static const unsigned char bars[8][3] = { { 235, 128, 128 }, { 210, 16, 146 }, { 170, 166, 16 }, { 145, 54, 34 },
                                                   { 106, 202, 222 }, { 81, 90, 240 }, { 41, 240, 110 }, { 16, 128, 128 } };
