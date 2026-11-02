@@ -3123,6 +3123,7 @@ static void vpp_restore_now(void)
 static u8 aa_cert[8192], aa_key[8192];
 static int aa_listening;
 static char aa_vmsg[160];
+static unsigned int osd_interval_us = 100000;
 static u32 aa_verr_logged;
 
 static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
@@ -3133,13 +3134,13 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
         unsigned int l, c;
         /* the conversion takes ~37 ms of this task: show at most one picture per 100 ms so the network keeps up
            (issue #5 makes it cheaper) */
-        static unsigned long long next_show;
+        static unsigned long long next_show;   /* osd_interval_us: file scope, set by op 25 */
         unsigned long long now = clk_us();
         if (osdvid_on_now() && now >= next_show && vdec_last_slot(&l, &c) >= 0) {
             unsigned int w, h;
             vdec_dims(&w, &h);
             osdvid_frame(l, c, w, h);
-            next_show = now + 100000;
+            next_show = now + osd_interval_us;
         }
     } else {
         for (u32 i = 0; i < sizeof aa_vmsg - 1; i++)
@@ -3521,8 +3522,15 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             osdvid_off();
             osdvid_until = 0;
         }
-        return vfmt_n(t, "osdvid: %s, %u frames, last conversion %u us", osdvid_on_now() ? "on" : "off", osdvid_frames(),
-                      osdvid_last_us());
+        if (c == 4 && n >= 2)   /* 4 FAST: whole-cache (1) or per-line (0) maintenance */
+            osdvid_fast = p[1];
+        if (c == 5 && n >= 2)   /* 5 MS/10: minimum time between shown pictures */
+            osd_interval_us = 10000u * p[1];
+        unsigned int ti, tl, to;
+        osdvid_times(&ti, &tl, &to);
+        return vfmt_n(t, "osdvid: %s, %u frames, last conversion %u us (cache in %u, pixels %u, out %u), fast %d, every %u ms",
+                      osdvid_on_now() ? "on" : "off", osdvid_frames(), osdvid_last_us(), ti, tl, to, osdvid_fast,
+                      osd_interval_us / 1000);
     }
     case 22:   /* AA: 0 status, 1 start listening [port u16] */
         return aa_op(n ? p[0] : 0, p, n, t);

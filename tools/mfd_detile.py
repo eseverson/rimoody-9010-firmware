@@ -4,7 +4,7 @@
 
   mfd_detile.py LUMA.bin REF.nv12 [--chroma CHROMA.bin] [--frame N]
 
-REF.nv12 holds one or more 800x480 NV12 frames (ffmpeg -f rawvideo -pix_fmt nv12); --frame picks which one."""
+REF.nv12 holds one or more NV12 frames (800x480 unless --size WxH) (ffmpeg -f rawvideo -pix_fmt nv12); --frame picks which one."""
 import argparse
 W, H, P = 800, 480, 1920
 def off(x, y):
@@ -24,10 +24,12 @@ def compare(name, out, ref, w):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('luma'); ap.add_argument('ref'); ap.add_argument('--chroma'); ap.add_argument('--frame', type=int, default=0)
+    ap.add_argument('--size', default='%dx%d' % (W, H))
     a = ap.parse_args()
+    W, H = map(int, a.size.split('x'))
     fsz = W * H * 3 // 2
     ref = open(a.ref, 'rb').read()[a.frame * fsz:(a.frame + 1) * fsz]
-    ok = compare('luma', detile(open(a.luma, 'rb').read()), ref[:W * H], W)
+    ok = compare('luma', detile(open(a.luma, 'rb').read(), W, H), ref[:W * H], W)
     if a.chroma:
         ok &= compare('chroma', detile(open(a.chroma, 'rb').read(), W, H // 2), ref[W * H:], W)
     raise SystemExit(0 if ok else 1)

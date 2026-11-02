@@ -7,4 +7,6 @@ void osdvid_frame(unsigned int luma, unsigned int chroma, unsigned int w, unsign
 int osdvid_on_now(void);
 unsigned int osdvid_frames(void);
 unsigned int osdvid_last_us(void);
+void osdvid_times(unsigned int *in, unsigned int *loop, unsigned int *out);   /* last conversion: cache in, pixels, cache out (us) */
+extern int osdvid_fast;   /* 1: whole-cache maintenance instead of per-line */
 #endif

@@ -4,6 +4,7 @@
  * margins) shows its center 1:1 full screen; a smaller one is centered. Two buffers: the header's data address flips
  * to the finished one. Net task only. */
 #include "osdvid.h"
+#include "irq.h"
 
 typedef unsigned int u32;
 typedef unsigned char u8;
@@ -61,6 +62,19 @@ static void cache_range(u32 a, u32 n, int wb)
 
 extern unsigned long long clk_us(void);
 
+/* Whole L1D write-back + invalidate (a few hundred lines) instead of ~80000 per-line operations for the source planes;
+ * interrupts off in between so an ISR cannot dirty a line that the invalidate would then drop. */
+static void dcache_wb_inval_all(void)
+{
+    u32 f = irq_save();
+    __asm__ volatile("cctl l1d_wball, alevel\n\tcctl l1d_invalall\n\tmsync all" ::: "memory");
+    irq_restore(f);
+}
+static void dcache_wb_all(void) { __asm__ volatile("cctl l1d_wball, alevel\n\tmsync all" ::: "memory"); }
+
+static u32 t_in, t_loop, t_out;
+int osdvid_fast = 1;
+
 void osdvid_frame(u32 luma, u32 chroma, u32 src_w, u32 src_h)
 {
     if (!on || !src_w || !src_h)
@@ -71,18 +85,30 @@ void osdvid_frame(u32 luma, u32 chroma, u32 src_w, u32 src_h)
         W = PANEL_W, H = PANEL_H, x0 = ((src_w - PANEL_W) / 2) & ~15u, y0 = ((src_h - PANEL_H) / 2) & ~1u;
     else
         W = src_w & ~15u, H = src_h & ~1u, x0 = 0, y0 = 0;
-    cache_range(luma, PITCH * ((y0 + H + 63) & ~63u), 0);
-    cache_range(chroma, PITCH * ((y0 + H) / 2 + 32), 0);
+    if (osdvid_fast)
+        dcache_wb_inval_all();
+    else {
+        cache_range(luma, PITCH * ((y0 + H + 63) & ~63u), 0);
+        cache_range(chroma, PITCH * ((y0 + H) / 2 + 32), 0);
+    }
+    unsigned long long t1 = clk_us();
     u32 dst = cur ? BUF0 : BUF1;   /* the one not being shown */
     for (u32 y = 0; y < H; y++) {
         u32 *o = (u32 *)(dst + y * W * 2);
-        for (u32 x = 0; x < W; x += 16) {
-            const u32 *l = (const u32 *)(luma + run(x0 + x, y0 + y));
-            const u32 *c = (const u32 *)(chroma + run(x0 + x, (y0 + y) / 2));
+        u32 ly = y0 + y, cy = ly / 2;
+        /* offsets of the four 16-pixel runs of a 64-pixel group (run()), for this luma row and its chroma row */
+        u32 lst = ly / 64, cst = cy / 64, lp = (ly & 1) ^ (lst & 1), cp = (cy & 1) ^ (cst & 1);
+        u32 lrow = luma + lst * PITCH * 64 + ((ly % 64) / 2) * 16, crow = chroma + cst * PITCH * 64 + ((cy % 64) / 2) * 16;
+        u32 lo[4], co[4];
+        for (u32 g = 0; g < 4; g++)
+            lo[g] = ((lp ^ (g & 1)) * 0x800) + g * 0x200, co[g] = ((cp ^ (g & 1)) * 0x800) + g * 0x200;
+        for (u32 x = x0; x < x0 + W; x += 16) {
+            u32 g = (x / 16) & 3, grp = (x / 64) * 4096;
+            const u32 *l = (const u32 *)(lrow + grp + lo[g]);
+            const u32 *c = (const u32 *)(crow + grp + co[g]);
             /* each 8-byte group is stored byte-reversed: pixels 0..3 = bswap(word 1), 4..7 = bswap(word 0) */
-            u32 y0w = bswap(l[1]), y1w = bswap(l[0]), y2w = bswap(l[3]), y3w = bswap(l[2]);
-            u32 c0 = bswap(c[1]), c1 = bswap(c[0]), c2 = bswap(c[3]), c3 = bswap(c[2]);   /* U V U V ... */
-            u32 ys[4] = { y0w, y1w, y2w, y3w }, cs[4] = { c0, c1, c2, c3 };
+            u32 ys[4] = { bswap(l[1]), bswap(l[0]), bswap(l[3]), bswap(l[2]) };
+            u32 cs[4] = { bswap(c[1]), bswap(c[0]), bswap(c[3]), bswap(c[2]) };   /* U V U V ... */
             for (int k = 0; k < 4; k++) {   /* 4 pixels (2 pairs) per step: Y0 U Y1 V little-endian */
                 u32 yy = ys[k], cc = cs[k];
                 o[0] = (yy & 0xff) | (cc & 0xff) << 8 | (yy >> 8 & 0xff) << 16 | (cc >> 8 & 0xff) << 24;
@@ -91,13 +117,21 @@ void osdvid_frame(u32 luma, u32 chroma, u32 src_w, u32 src_h)
             }
         }
     }
-    cache_range(dst, W * H * 2, 1);
+    unsigned long long t2 = clk_us();
+    if (osdvid_fast)
+        dcache_wb_all();
+    else
+        cache_range(dst, W * H * 2, 1);
     out_w = W, out_h = H;
     put_hdr(dst);
     cur = !cur;
     frames++;
-    last_us = (u32)(clk_us() - t0);
+    unsigned long long t3 = clk_us();
+    t_in = (u32)(t1 - t0), t_loop = (u32)(t2 - t1), t_out = (u32)(t3 - t2);
+    last_us = (u32)(t3 - t0);
 }
+
+void osdvid_times(unsigned int *in, unsigned int *loop, unsigned int *out) { *in = t_in, *loop = t_loop, *out = t_out; }
 
 void osdvid_on(void)
 {

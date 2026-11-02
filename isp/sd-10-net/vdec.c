@@ -246,12 +246,13 @@ int vdec_bitread(u32 src, u32 len, char *o, vdec_fmt fmt)
 #define FB_PITCH    1920u
 #define FB_LUMA_N   0x168000u      /* 1920 x 768: up to 1280 x 720 (12 stripes of 64 rows) */
 #define FB_CHROMA_N 0xB4000u
-#define WORK_3B     0x047A0000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each), after slot 0's MVC */
-#define WORK_3C     0x047C0000u
+#define WORK_3B     0x04540000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each), after the SCS buffer */
+#define WORK_3C     0x04580000u
 #define NSLOT       4
-/* 1280 x 720 (Android Auto with margins on the 1024 x 600 panel): 0x280000 per slot in the free DRAM from 0x07000000
- * (notes/h264_decoder.md), luma 0x168000, CbCr 0xB4000 at +0x180000, MVC 0x3C000 at +0x240000 */
-static const u32 slot_base[NSLOT] = { 0x07000000u, 0x07280000u, 0x07500000u, 0x07780000u };
+/* 1280 x 720 (Android Auto with margins on the 1024 x 600 panel): 0x280000 per slot in 0x04600000..0x05000000, luma
+ * 0x168000, CbCr 0xB4000 at +0x180000, MVC 0x3C000 at +0x240000. Not 0x07000000: slots there broke even 800 x 480
+ * decodes (2026-11-01; something else uses that memory, or the MFD does not reach it reliably). */
+static const u32 slot_base[NSLOT] = { 0x04600000u, 0x04880000u, 0x04B00000u, 0x04D80000u };
 #define SLOT_LUMA(k)   (slot_base[k])
 #define SLOT_CHROMA(k) (slot_base[k] + 0x180000u)
 #define SLOT_MVC(k)    (slot_base[k] + 0x240000u)
