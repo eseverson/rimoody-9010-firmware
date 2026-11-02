@@ -3253,6 +3253,36 @@ void plat_ui_aa_key(int keycode) { ui_req_key = keycode; }
 void plat_ui_aa_enable(int on) { ui_aa_enabled = on; }
 static int ui_aa_dpi = 160;
 void plat_ui_aa_dpi(int dpi) { ui_aa_dpi = dpi; }
+/* Bluetooth name: the AC6965A keeps its radio off (not connectable, not discoverable) until the host sends the name,
+ * `ac 19 <len> <name>`, as eCos's 0x38538c does after BT_INIT (notes/android_auto.md). Sent once the chip has had time
+ * to start Bluetooth (~5 s after its power-up), and again whenever the name changes. */
+static char ui_bt_name[24];
+static volatile int ui_bt_gen;
+void plat_ui_bt_name(const char *name)
+{
+    int n = 0;
+    for (; name[n] && n < (int)sizeof ui_bt_name - 1; n++)
+        ui_bt_name[n] = name[n];
+    ui_bt_name[n] = 0;
+    ui_bt_gen++;
+}
+static void bt_name_tick(void)
+{
+    static int sent;
+    int g = ui_bt_gen;
+    if (g == sent || !ui_bt_name[0] || ub_ms(0) < 8000)
+        return;
+    int n = 0;
+    while (ui_bt_name[n])
+        n++;
+    u8 f[3 + sizeof ui_bt_name];
+    f[0] = 0xac, f[1] = 0x19, f[2] = (u8)n;
+    for (int i = 0; i < n; i++)
+        f[3 + i] = (u8)ui_bt_name[i];
+    mcu_send(&mcu_st, f, 3 + n, ub_ms(0));
+    sent = g;
+    lprintf("bt: name \"%s\" sent\n", ui_bt_name);
+}
 void plat_ui_brightness(int percent) { ui_req_bright = percent < 0 ? 0 : percent > 100 ? 100 : percent; }
 
 /* Backlight: MCU frame `ee <level>`, an inverted duty: 00 brightest, e1 dim but lit, f0 and up off (camera sweep
@@ -4043,6 +4073,7 @@ static void net_loop(void)
             if (aa_was && !aac)
                 ui_aa_session(0);
             aa_was = aac;
+            bt_name_tick();
             if (ui_req_mute >= 0) {   /* MCU system mute: 01 01 on, 01 00 off (notes/audio.md) */
                 u8 m[2] = { 0x01, (u8)ui_req_mute };
                 mcu_send(&mcu_st, m, 2, ub_ms(0));

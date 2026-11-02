@@ -29,6 +29,8 @@ static volatile int aa_view;
 static int aa_enabled = 1;
 static int aa_dpi = 160;   /* screen density Android Auto lays its UI out for: lower = smaller elements, more map */
 #define AA_DPI_MIN 100
+#define BT_NAME_MAX 20
+static char bt_name[BT_NAME_MAX + 1] = "Miata";   /* the Bluetooth name phones see (sent to the AC6965A at boot) */
 #define AA_DPI_MAX 240
 static int volume = 20, muted, dark = 1;
 /* display settings (UI.TXT): backlight in percent by day and with the headlights on; theme 0 light, 1 dark, 2 auto
@@ -52,7 +54,8 @@ static const char *const eq_preset_map[] = { "Flat", "Bass", "Loud", "Voice", "T
 static char settings_text[256];
 static void settings_save(void);
 
-static lv_obj_t *scr_home, *scr_aa, *scr_settings, *scr_wifi;
+static lv_obj_t *scr_home, *scr_aa, *scr_settings, *scr_wifi, *scr_btname;
+static lv_obj_t *bt_ta, *bt_msg, *bt_label;
 static lv_obj_t *wifi_ssid, *wifi_psk, *wifi_kb, *wifi_msg;
 static lv_obj_t *aa_card, *status_label, *vol_panel, *vol_bar, *vol_icon, *vol_num;
 static lv_timer_t *vol_timer;
@@ -304,6 +307,28 @@ static void kv_list(const char *t, const char *key, signed char *out, int n, int
     }
 }
 
+static void kv_str(const char *t, const char *key, char *out, int max)   /* "key=text" up to the end of the line */
+{
+    for (const char *p = t; *p;) {
+        int i = 0;
+        while (key[i] && p[i] == key[i])
+            i++;
+        if (!key[i] && p[i] == '=') {
+            p += i + 1;
+            int k = 0;
+            while (k < max && p[k] >= 0x20 && p[k] < 0x7f)
+                out[k] = p[k], k++;
+            if (k)
+                out[k] = 0;
+            return;
+        }
+        while (*p && *p != '\n')
+            p++;
+        if (*p)
+            p++;
+    }
+}
+
 static void settings_load(void)
 {
     bright_day = kv_int(settings_text, "day", bright_day, 0, 100);
@@ -311,18 +336,20 @@ static void settings_load(void)
     theme_mode = kv_int(settings_text, "theme", theme_mode, 0, 2);
     aa_enabled = kv_int(settings_text, "aa", aa_enabled, 0, 1);
     aa_dpi = kv_int(settings_text, "aadpi", aa_dpi, AA_DPI_MIN, AA_DPI_MAX) / 10 * 10;
+    kv_str(settings_text, "btname", bt_name, BT_NAME_MAX);
     volume = kv_int(settings_text, "vol", volume, 0, VOL_MAX);
     boot_console = kv_int(settings_text, "boot", boot_console, 0, 1);
     kv_list(settings_text, "eq", eq_db, EQ_N, -12, 12);
     plat_ui_aa_enable(aa_enabled);
     plat_ui_aa_dpi(aa_dpi);
+    plat_ui_bt_name(bt_name);
 }
 
 static void settings_save(void)
 {
-    char t[200];
-    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nvol=%d\nboot=%d\neq=", bright_day,
-                        bright_night, theme_mode, aa_enabled, aa_dpi, volume, boot_console);
+    char t[256];
+    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nbtname=%s\nvol=%d\nboot=%d\neq=",
+                        bright_day, bright_night, theme_mode, aa_enabled, aa_dpi, bt_name, volume, boot_console);
     for (int i = 0; i < EQ_N; i++)
         k += lv_snprintf(t + k, sizeof t - (unsigned)k, "%d%s", eq_db[i], i < EQ_N - 1 ? "," : "\n");
     plat_ui_settings_save(t);
@@ -575,6 +602,65 @@ static void build_wifi(void)
     lv_obj_add_event_cb(wifi_kb, wifi_kb_cb, LV_EVENT_ALL, 0);
 }
 
+/* Bluetooth name: 1..BT_NAME_MAX printable characters; the AC6965A takes it at once (phones may show the old name
+ * until they look again) */
+static void bt_kb_cb(lv_event_t *e)
+{
+    lv_event_code_t c = lv_event_get_code(e);
+    if (c == LV_EVENT_CANCEL) {
+        lv_screen_load(scr_settings);
+    } else if (c == LV_EVENT_READY) {
+        const char *s = lv_textarea_get_text(bt_ta);
+        int n = 0, ok = 1;
+        for (; s[n]; n++)
+            ok &= s[n] >= 0x20 && s[n] < 0x7f;
+        while (n && s[n - 1] == ' ')
+            n--;
+        if (!n || n > BT_NAME_MAX || !ok || s[0] == ' ') {
+            lv_label_set_text(bt_msg, "1-20 letters, digits or symbols.");
+            return;
+        }
+        for (int i = 0; i < n; i++)
+            bt_name[i] = s[i];
+        bt_name[n] = 0;
+        lv_label_set_text(bt_label, bt_name);
+        plat_ui_bt_name(bt_name);
+        settings_save();
+        lv_screen_load(scr_settings);
+    }
+}
+
+static void bt_open_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_textarea_set_text(bt_ta, bt_name);
+    lv_label_set_text(bt_msg, "");
+    lv_screen_load(scr_btname);
+}
+
+static void build_btname(void)
+{
+    scr_btname = screen(0);
+    lv_obj_add_style(scr_btname, &st_scr, 0);
+    lv_obj_t *t = lv_label_create(scr_btname);
+    lv_label_set_text(t, "Bluetooth name");
+    lv_obj_add_style(t, &st_title, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 32, 16);
+    bt_ta = lv_textarea_create(scr_btname);
+    lv_textarea_set_one_line(bt_ta, true);
+    lv_textarea_set_max_length(bt_ta, BT_NAME_MAX);
+    lv_obj_set_width(bt_ta, 460);
+    lv_obj_align(bt_ta, LV_ALIGN_TOP_LEFT, 32, 66);
+    bt_msg = lv_label_create(scr_btname);
+    lv_obj_add_style(bt_msg, &st_section, 0);
+    lv_obj_align(bt_msg, LV_ALIGN_TOP_LEFT, 32, 124);
+    lv_obj_t *kb = lv_keyboard_create(scr_btname);
+    lv_obj_set_size(kb, PANEL_W, 400);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_textarea(kb, bt_ta);
+    lv_obj_add_event_cb(kb, bt_kb_cb, LV_EVENT_ALL, 0);
+}
+
 /* ---- settings: categories down the left, one page each that fits without scrolling (scrolling a full-height list
  * is choppy on this CPU, and a car screen should not need it) ---- */
 
@@ -743,6 +829,13 @@ static void build_settings(void)
     if (aa_enabled)
         lv_obj_add_state(sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(sw, aa_switch_cb, LV_EVENT_VALUE_CHANGED, 0);
+    r = row(p, "Bluetooth name");
+    bt_label = lv_label_create(r);
+    lv_label_set_text(bt_label, bt_name);
+    lv_obj_set_style_pad_right(bt_label, 16, 0);
+    lv_obj_t *bb = lv_button_create(r);
+    lv_label_set_text(lv_label_create(bb), "Change");
+    lv_obj_add_event_cb(bb, bt_open_cb, LV_EVENT_CLICKED, 0);
     r = row(p, "Interface size");
     lv_obj_t *dl = lv_label_create(r);
     lv_obj_t *ds = lv_slider_create(r);
@@ -924,7 +1017,7 @@ static void on_button(int b, int pressed)
     } else if (b == 3 && pressed) {
         if (ui_aa_visible())
             plat_ui_aa_key(4);
-        else if (lv_screen_active() == scr_wifi)
+        else if (lv_screen_active() == scr_wifi || lv_screen_active() == scr_btname)
             lv_screen_load(scr_settings);   /* keeps its scroll position: coming back from a sub-screen */
         else if (lv_screen_active() != scr_home)
             show_home();
@@ -990,6 +1083,7 @@ static void ui_task(void *arg)
     build_aa();
     build_settings();
     build_wifi();
+    build_btname();
     build_volume();
     lv_timer_create(status_timer, 500, 0);
     lv_timer_create(lights_timer, 200, 0);
