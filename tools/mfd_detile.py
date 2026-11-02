@@ -2,17 +2,24 @@
 """De-tile planes dumped from the Sunplus MFD H.264 decoder and compare with an ffmpeg NV12 reference
 (notes/h264_decoder.md, "Output layout").
 
-  mfd_detile.py LUMA.bin REF.nv12 [--chroma CHROMA.bin] [--frame N]
+  mfd_detile.py LUMA.bin REF.nv12 [--chroma CHROMA.bin] [--frame N] [--scan 0|1]
+
+--scan picks the layout the frame BG2D entries asked for (vdec.c vdec_scan_type): 0 the bring-up layout (b22|b24|2<<25),
+1 eCos's layout (b24|3<<25), the one VPP0's index mode reads (notes/vpp0_display.md).
 
 REF.nv12 holds one or more NV12 frames (800x480 unless --size WxH) (ffmpeg -f rawvideo -pix_fmt nv12); --frame picks which one."""
 import argparse
 W, H, P = 800, 480, 1920
+SCAN = 0
 def off(x, y):
     """byte offset of (x, y) in the MFD output (64x64 macro-tiles of 8 blocks, 8-byte groups reversed); the CbCr plane
     uses the same layout with x in bytes (Cb, Cr interleaved) and half the rows"""
     stripe, mx = y // 64, x // 64
     xg, par, r = (x // 16) % 4, y & 1, (y % 64) // 2
-    o = stripe * P * 64 + mx * 4096 + ((par ^ (xg & 1) ^ (stripe & 1)) * 0x800) + xg * 0x200 + r * 16 + (x % 16)
+    if SCAN:   # rows in order (16 bytes each), 16-pixel groups at 0 / 0x800 / 0x400 / 0xC00, flipped on odd stripes
+        o = stripe * P * 64 + mx * 4096 + (((xg & 1) ^ (stripe & 1)) * 0x800) + (xg >> 1) * 0x400 + (y % 64) * 16 + (x % 16)
+    else:
+        o = stripe * P * 64 + mx * 4096 + ((par ^ (xg & 1) ^ (stripe & 1)) * 0x800) + xg * 0x200 + r * 16 + (x % 16)
     return (o & ~7) | (7 - (o & 7))
 def detile(raw, w=W, h=H):
     return bytes(raw[off(x, y)] for y in range(h) for x in range(w))
@@ -24,8 +31,9 @@ def compare(name, out, ref, w):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('luma'); ap.add_argument('ref'); ap.add_argument('--chroma'); ap.add_argument('--frame', type=int, default=0)
-    ap.add_argument('--size', default='%dx%d' % (W, H))
+    ap.add_argument('--size', default='%dx%d' % (W, H)); ap.add_argument('--scan', type=int, default=0)
     a = ap.parse_args()
+    SCAN = a.scan
     W, H = map(int, a.size.split('x'))
     fsz = W * H * 3 // 2
     ref = open(a.ref, 'rb').read()[a.frame * fsz:(a.frame + 1) * fsz]

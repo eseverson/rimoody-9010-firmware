@@ -28,7 +28,7 @@ typedef unsigned char u8;
 static int inited;
 /* BG2D layout bits of the frame entries: 0 = b22|b24|2<<25 (bring-up default), 1 = b24|3<<25 (what eCos uses for decoded
  * frames and its display entries; notes/vpp0_display.md, eCos index-mode snapshot). HU1 op 19 sub 6. */
-int vdec_scan_type;
+int vdec_scan_type = 1;
 struct vdec_stats vdec_stats;
 
 /* Breadcrumb that survives a reset (DRAM is kept): the step a risky operation is in, written back to memory before
@@ -292,8 +292,11 @@ static void cache_inval(u32 a, u32 n)   /* L1D_VA_INVAL over a range (the decode
 
 static u32 tiled(u32 x, u32 y)   /* byte offset of luma pixel (x, y) in the decoder's layout (tools/mfd_detile.py) */
 {
-    u32 st = y / 64, xg = (x / 16) % 4;
-    u32 o = st * FB_PITCH * 64 + (x / 64) * 4096 + (((y & 1) ^ (xg & 1) ^ (st & 1)) * 0x800) + xg * 0x200 +
+    u32 st = y / 64, xg = (x / 16) % 4, o;
+    if (vdec_scan_type)   /* eCos's layout (b24|3<<25), the one VPP0's index mode reads: rows in order, groups 0/0x800/0x400/0xC00 */
+        o = st * FB_PITCH * 64 + (x / 64) * 4096 + (((xg & 1) ^ (st & 1)) * 0x800) + (xg >> 1) * 0x400 + (y % 64) * 16 + (x % 16);
+    else
+        o = st * FB_PITCH * 64 + (x / 64) * 4096 + (((y & 1) ^ (xg & 1) ^ (st & 1)) * 0x800) + xg * 0x200 +
             ((y % 64) / 2) * 16 + (x % 16);
     return (o & ~7u) | (7 - (o & 7));
 }

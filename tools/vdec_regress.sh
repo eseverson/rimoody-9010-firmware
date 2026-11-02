@@ -8,6 +8,8 @@ T=isp/sd-10-net/test/h264
 O=${1:-$(mktemp -d)}; mkdir -p "$O"
 hu() { python3 tools/hu.py "$@" 2>&1 | grep -v "HU1 hello"; }
 hu vdec init >/dev/null
+SCAN=${VDEC_SCAN:-1}   # frame layout (vdec.c vdec_scan_type; 1 = eCos/VPP0 layout, the default)
+hu op 19 060$SCAN >/dev/null
 fail=0
 # stream:pictures
 for t in noise:1 bars:1 grey:1 ip1:10 ip3:12 slices4_nodeblock:2 slices4:4 base_p:20; do
@@ -20,7 +22,7 @@ for t in noise:1 bars:1 grey:1 ip1:10 ip3:12 slices4_nodeblock:2 slices4:4 base_
     hu read "0x$L" 0xF0000 -o "$O/l.bin" >/dev/null
     hu read "0x$C" 0x78000 -o "$O/c.bin" >/dev/null
     printf '%-18s %-40s ' "${t%:*} x$n" "$(echo "$r" | grep -o 'mean [0-9]*, max [0-9]*') us"
-    python3 tools/mfd_detile.py "$O/l.bin" "$O/ref.nv12" --chroma "$O/c.bin" --frame $((n - 1)) | tr '\n' ' '
+    python3 tools/mfd_detile.py "$O/l.bin" "$O/ref.nv12" --chroma "$O/c.bin" --frame $((n - 1)) --scan $SCAN | tr '\n' ' '
     [ "${PIPESTATUS[0]}" = 0 ] || fail=1
     echo
 done
