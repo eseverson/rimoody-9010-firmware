@@ -594,7 +594,10 @@ static int mix(int src, const short *lr, int frames, int mono_x3)
     if (!ready || !ring || src < 0 || src >= NSRC)
         return 0;
     track_r();
-    if ((int)(cur[src] - (rpos + 128)) < 0)   /* idle or fell behind: restart a jitter buffer ahead of the DSP */
+    /* idle, fell behind, or about to run dry: restart a jitter buffer ahead of the DSP (silence fills the jump). The DSP
+     * waits at W instead of running past it, so a stream that once ran dry kept playing 10-15 ms ahead and stuttered at
+     * every Wi-Fi hiccup (29 times in 3 min, 2026-11-02); now it re-primes once and has src_lead in hand again. */
+    if ((int)(cur[src] - rpos) < (int)(src_lead[src] / 6))
         cur[src] = rpos + src_lead[src];
     u32 limit = rpos + ring_size - 128;   /* never write within 128 bytes behind R */
     u32 room = (int)(limit - cur[src]) > 0 ? (limit - cur[src]) / 4 : 0;
@@ -655,10 +658,42 @@ static short sine(u32 ph)   /* ph: 0..65535 per period; parabolic approximation,
     return (short)(v * tone_amp / 8192);
 }
 
+/* playback monitor (stutters with no underrun counted, 2026-11-02): while media plays, log when the data written
+ * ahead of the DSP drops under 20 ms (starving), when the DSP read pointer stops moving for 30 ms with data queued
+ * (DSP / bus stall), and when the ring is within 100 ms of full */
+static u32 mon_low, mon_stall, mon_full, mon_logged;
+static void play_monitor(void)
+{
+    static unsigned long long last_t, r_moved_t;
+    static u32 last_taken, last_r, low_on, stall_on, full_on;
+    unsigned long long now = clk_us();
+    if (now - last_t < 2000)
+        return;
+    last_t = now;
+    track_r();
+    u32 r = REG(ring_r);
+    if (r != last_r)
+        last_r = r, r_moved_t = now;
+    int active = taken[0] != last_taken;
+    last_taken = taken[0];
+    if (!active && (int)(cur[0] - rpos) <= 0)
+        return;
+    int lead = (int)(zpos - rpos), lead_ms = lead / 192;
+    int low = lead < 192 * 20, stall = lead > 192 * 5 && now - r_moved_t > 30000, full = lead > (int)ring_size - 192 * 100;
+    if (low && !low_on && (mon_low++, mon_logged++ < 60) && logf)
+        logf("audio: low %d ms ahead at t=%u ms\n", lead_ms, (u32)(now / 1000));
+    if (stall && !stall_on && (mon_stall++, mon_logged++ < 60) && logf)
+        logf("audio: DSP read stalled %u ms with %d ms queued at t=%u ms\n", (u32)((now - r_moved_t) / 1000), lead_ms, (u32)(now / 1000));
+    if (full && !full_on && (mon_full++, mon_logged++ < 60) && logf)
+        logf("audio: ring nearly full (%d ms) at t=%u ms\n", lead_ms, (u32)(now / 1000));
+    low_on = low, stall_on = stall, full_on = full;
+}
+
 void aud_poll(void)
 {
     if (!ready)
         return;
+    play_monitor();
     service_msgs();
     u32 hb = REG(0x18b4) & 0xffff;
     if (hb != hb_last)
@@ -695,10 +730,10 @@ int aud_status(char *o, aud_fmt fmt)
     k += fmt(o + k, "; ");
     o += k;
     return k + fmt(o, "audio: %s state %08x (sys %d front %d) heartbeat %x (%u changes) 1880 %08x 18a8 %08x msgs %u timeouts %u "
-                  "path %u ring %08x W %x R %x played %u KB; underruns %u (%u ms); taken/dropped media %u/%u guide %u/%u tone %u/%u; tone %d Hz vol %02x "
+                  "path %u ring %08x W %x R %x played %u KB; underruns %u (%u ms), low %u stall %u full %u; taken/dropped media %u/%u guide %u/%u tone %u/%u; tone %d Hz vol %02x "
                   "1e14 %08x banks %08x %08x %08x",
                ready ? "ready" : "NOT ready", REG(0x18b0), state(0), state(7), REG(0x18b4), hb_seen, REG(0x1880), REG(0x18a8),
-               msgs, cmd_timeouts, path, ring, REG(ring_w), REG(ring_r), rpos >> 10, underruns, underrun_bytes / 192, taken[0], dropped[0], taken[1] + taken[2],
+               msgs, cmd_timeouts, path, ring, REG(ring_w), REG(ring_r), rpos >> 10, underruns, underrun_bytes / 192, mon_low, mon_stall, mon_full, taken[0], dropped[0], taken[1] + taken[2],
                dropped[1] + dropped[2], taken[3], dropped[3], tone_hz,
                dsp_get(APP, 0x3d) & 0xff, REG(0x1e14), REG(0x1744), REG(0x1750), REG(0x1758));
 }

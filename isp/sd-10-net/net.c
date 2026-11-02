@@ -4250,6 +4250,38 @@ static void car_net_start(const char *why)
     ap_start(ch, ss, pk);
 }
 
+/* Car network: this PC cannot reach the unit, so the unit keeps its own record on the card. Every 15 s a stats line
+ * goes into the log (AA per-channel frames and gaps, the audio ring and its monitor counters, Wi-Fi drops), and every
+ * 60 s the last 48 KB of the log is written to CARLOG.TXT (small enough to fit inside the audio buffer). */
+static int aa_op(int c, const u8 *p, int n, char *t);
+static void car_stats_tick(void)
+{
+    static u32 stat_at, save_at;
+    u32 now = ub_ms(0);
+    if (jstate != J_AP) {
+        stat_at = save_at = now;
+        return;
+    }
+    if (now - stat_at >= 15000) {
+        static char t[1200];
+        stat_at = now;
+        u8 c6[1] = { 6 };
+        aa_op(6, c6, 1, t);
+        lprintf("car: t=%u aa %s\n", now, t);
+        aud_status(t, vfmt_n);
+        lprintf("car: audio %s\n", t);
+        lprintf("car: wifi station %d replay=%u/%u rxovf=%u decfail=%u rx=%u\n", sta_st, replays, replays_new, rxff_ovf,
+                dec_fail, rx_frames);
+    }
+    if (now - save_at >= 60000) {
+        save_at = now;
+        u32 len = log_len, start = len > 0xC000 ? len - 0xC000 : 0;
+        u32 t0 = ub_ms(0);
+        int r = fs_save("CARLOG.TXT", LOG_BUF + start, len - start);
+        lprintf("car: CARLOG.TXT %u bytes %s in %u ms\n", len - start, r ? "NOT saved" : "saved", ub_ms(0) - t0);
+    }
+}
+
 static void car_net_tick(void)
 {
     u32 now = ub_ms(0);
@@ -4421,6 +4453,7 @@ static void net_loop(void)
             log_s("hwsec: no HU1 command within 60 s of enabling it, back to software CCMP\n");
         }
         car_net_tick();
+        car_stats_tick();
         {   /* RX FIFO overflow on the chip (the host did not drain it in time): latched in HISRE bit 8, write 1 to clear */
             static u32 ovf_at;
             if (wdev && !errs && ub_ms(0) - ovf_at >= 100) {
