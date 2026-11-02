@@ -26,6 +26,9 @@ typedef unsigned char u8;
 #define IDX_SPMP   0x29
 
 static int inited;
+/* BG2D layout bits of the frame entries: 0 = b22|b24|2<<25 (bring-up default), 1 = b24|3<<25 (what eCos uses for decoded
+ * frames and its display entries; notes/vpp0_display.md, eCos index-mode snapshot). HU1 op 19 sub 6. */
+int vdec_scan_type;
 struct vdec_stats vdec_stats;
 
 /* Breadcrumb that survives a reset (DRAM is kept): the step a risky operation is in, written back to memory before
@@ -341,8 +344,8 @@ static int decode_pic(const struct vslice *sl, int ns, const struct h264_sps *sp
     volatile u8 *lastpx = (volatile u8 *)(SLOT_LUMA(cur) + tiled(sps->width - 1, sps->height - 1));
     *lastpx = 0x55;
     __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"((u32)lastpx & ~31u) : "memory");
-    bg2d_set(IDX_LUMA(cur), SLOT_LUMA(cur), 1, 0);
-    bg2d_set(IDX_CHROMA(cur), SLOT_CHROMA(cur), 1, 0);
+    bg2d_set(IDX_LUMA(cur), SLOT_LUMA(cur), 1, vdec_scan_type);
+    bg2d_set(IDX_CHROMA(cur), SLOT_CHROMA(cur), 1, vdec_scan_type);
     bg2d_set(IDX_MVC(cur), SLOT_MVC(cur), 1, 0);
     bg2d_set(0x3b, WORK_3B, 0, 1);   /* working buffers keep the init layout bits ("scan type != 0"), gp 0 (0x431a70) */
     bg2d_set(0x3c, WORK_3C, 0, 1);

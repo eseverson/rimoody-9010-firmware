@@ -3453,6 +3453,10 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         int c = n ? p[0] : 0;
         if (c == 1)
             return vdec_init(t, vfmt_n);
+        if (c == 6 && n >= 2) {   /* frame BG2D layout bits: 0 bring-up, 1 eCos's (b24|3<<25) */
+            vdec_scan_type = p[1];
+            return vfmt_n(t, "vdec: frame scan type %d", vdec_scan_type);
+        }
         if (c == 2 && n >= 9)
             return vdec_bitread(le32(p + 1), le32(p + 5), t, vfmt_n);
         if ((c == 3 || c == 5) && n >= 9)
@@ -3851,6 +3855,70 @@ static void net_task(void *arg)
 }
 
 __attribute__((section(".text.entry"), used))
+/* One-shot boot of the stock eCos with the snapshot hook (isp/ecos-snap, tools/ecos_snap.py card): if /ECOSRUN.FLG is
+ * on the card, delete it, load /ECOSP.BIN (the decompressed eCos with the hook call sites patched) to 0x00301040,
+ * /ENTRY.BIN to 0x00301000 and /HOOK.BIN to 0x02F40000, and enter eCos the way U-Boot's `bootsp ecos nor` does. This
+ * runs first thing in a cold boot, before the payload touches the MCU, USB or interrupts, so eCos sees the fresh MCU
+ * power-on it needs to turn the panel on. The hook resets the unit when it is done; the flag is gone by then. */
+static int ecos_load_hb(const char *name, u8 *dst, u32 max, u32 *len)   /* fs_load in 256 KB chunks with MCU heartbeats */
+{
+    static FIL f;
+    UINT got;
+    *len = 0;
+    FRESULT r = f_open(&f, name, FA_READ);
+    if (r != FR_OK)
+        return r;
+    while (*len < max) {
+        u32 want = max - *len < 0x40000u ? max - *len : 0x40000u;
+        r = f_read(&f, dst + *len, want, &got);
+        hb_send();   /* the MCU cuts power after ~9 s without `d1 00`; the 4 MB image takes ~7 s to read */
+        if (r != FR_OK || !got)
+            break;
+        *len += got;
+    }
+    f_close(&f);
+    return r;
+}
+
+static void ecos_boot_check(void)
+{
+    static u8 flag[16];
+    static char msg[128];
+    u32 n = 0, ne = 0, nh = 0;
+    if (fs_load("ECOSRUN.FLG", flag, sizeof flag, &n))
+        return;
+    f_unlink("ECOSRUN.FLG");
+    hb_send();
+    int r1 = ecos_load_hb("ECOSP.BIN", (u8 *)0x00301040u, 0x3D6038u, &n);
+    int r2 = fs_load("ENTRY.BIN", (void *)0x00301000u, 64, &ne);
+    int r3 = fs_load("HOOK.BIN", (void *)0x02F40000u, 0x7F00u, &nh);
+    int ok = !r1 && n == 0x3D6038u && !r2 && ne && !r3 && nh;
+    int k = vfmt_n(msg, "ecosrun: ECOSP %d/%u ENTRY %d/%u HOOK %d/%u at t=%u ms -> %s\n", r1, n, r2, ne, r3, nh, ub_ms(0),
+                   ok ? "jump" : "normal boot");
+    fs_save("ECOSRUN.LOG", msg, (u32)k);   /* a record that survives the MCU's power cut */
+    hb_send();
+    if (!ok)
+        return;
+    volatile u32 *prm = (volatile u32 *)0x02F47F00u;
+    prm[0] = 0x434e4c45u, prm[1] = n, prm[2] = 0, prm[4] = 0;
+    for (volatile u32 *z = (volatile u32 *)0x02F48000u; z < (volatile u32 *)0x02F88000u; z++)
+        *z = 0;
+    prm[3] = 0x544f4f42u;   /* "BOOT": started from the card at power-on */
+    /* hardware watchdog ~13 s, routed to reset; the hook pets it every tick (isp/ecos-snap/launch.c) */
+    IOREG(0x9c000630) = 0x3877, IOREG(0x9c000630) = 0xab00, IOREG(0x9c000634) = 0xffff, IOREG(0x9c000630) = 0xab01;
+    IOREG(0x9c000630) = 0x7482, IOREG(0x9c0000f4) = 0x00120012, IOREG(0x9c000630) = 0x4a4b;
+    IOREG(0x9c000084) = 0x60000000u | 1u << 13;   /* bootsp's SetBootDev(SPI_NOR, 1) */
+    IOREG(0x9c000088) = 0x00030000u | 1u;
+    __asm__ volatile("setgie.d\n\tdsb\n\tcctl l1d_wball, alevel\n\tmsync all\n\tcctl l1d_invalall\n\tdsb" ::: "memory");
+    for (u32 p = 0x00301000u; p < 0x00301040u + n; p += 16)
+        __asm__ volatile("cctl %0, L1I_VA_INVAL" ::"r"(p) : "memory");
+    for (u32 p = 0x02F40000u; p < 0x02F47F00u; p += 16)
+        __asm__ volatile("cctl %0, L1I_VA_INVAL" ::"r"(p) : "memory");
+    __asm__ volatile("dsb\n\tisb" ::: "memory");
+    hb_send();
+    ((void (*)(int, int, int))0x00301040u)(0, 0, 0);
+}
+
 int payload_entry(int argc, char *const argv[])
 {
     const char *cmd = argc > 1 ? argv[1] : "";
@@ -3874,6 +3942,7 @@ int payload_entry(int argc, char *const argv[])
             PREV_LOG[i] = LOG_BUF[start + i];
     }
     irq_log_len_ptr = (volatile unsigned int *)&log_len;
+    ecos_boot_check();   /* returns unless /ECOSRUN.FLG asks for a stock eCos snapshot run */
     vdec_hw_reset();   /* a decoder left running by the previous run stops here */
     lprintf("net main, build %s\n", hu_build_id);
     {

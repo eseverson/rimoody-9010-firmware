@@ -5,6 +5,8 @@ snapshot"; code in isp/ecos-snap/).
   ecos_snap.py run ECOS.BIN      patch the decompressed eCos image (flash 0x95CF40, LZO; bootsp loads it to 0x301040),
                                  upload it, HOOK.BIN and the launcher's parameters, then EXEC LAUNCH.BIN. eCos boots,
                                  the hook snapshots at vsync calls 120 / 600 / 1500 and resets the unit at 1560 (~26 s).
+  ecos_snap.py card ECOS.BIN      write the patched image, ENTRY.BIN and HOOK.BIN to the SD card (power-on path)
+  ecos_snap.py arm -              write /ECOSRUN.FLG: the next cold boot runs eCos with the hook (net.c ecos_boot_check)
   ecos_snap.py collect OUT.BIN   after the unit is back on our payload: read the snapshot area, save it, print a summary.
   ecos_snap.py show OUT.BIN      print the summary of a saved snapshot.
 """
@@ -54,10 +56,42 @@ def run(path):
     if open(tmp + '.rb', 'rb').read() != bytes(img):
         sys.exit('read-back of the uploaded image differs (%s); not starting eCos' % back)
     print('read-back ok; EXEC launcher')
-    print(hu('say', 'eCos snapshot run %s: screen goes to stock eCos, unit resets ITSELF within ~45 s. Hands off.'
+    print(hu('say', 'eCos snapshot run %s: screen goes to stock eCos, unit resets ITSELF ~3 s after video playback starts (or after 4 min).'
              % time.strftime('%H:%M')))
     print(hu('exec', os.path.join(SNAPDIR, 'LAUNCH.BIN'), '--wait', '3'))
     print('eCos should be booting now; the hook resets the unit ~26 s after its display starts (or the watchdog ~13 s after a hang), then run `collect`.')
+
+
+def card(path):
+    """Write the patched eCos, entry.S and the hook to the SD card for the payload's power-on path (net.c
+    ecos_boot_check); `arm` then writes the one-shot flag, and the next cold boot (ACC cycle) runs eCos."""
+    img = bytearray(open(path, 'rb').read())
+    for a, old, new in PATCHES:
+        o = a - ECOS_BASE
+        if img[o:o + 4] != old:
+            sys.exit('eCos bytes at %#x are %s, expected %s' % (a, img[o:o + 4].hex(), old.hex()))
+        img[o:o + 4] = new
+    tmp = os.path.join(SNAPDIR, 'ecos_patched.bin')
+    open(tmp, 'wb').write(img)
+    for name, src in (('ECOSP.BIN', tmp), ('ENTRY.BIN', os.path.join(SNAPDIR, 'ENTRY.BIN')),
+                      ('HOOK.BIN', os.path.join(SNAPDIR, 'HOOK.BIN'))):
+        data = open(src, 'rb').read()
+        print(hu('write', '0x600000', src))
+        print(hu('--timeout', '60', 'fs', 'write', name, '0x600000', str(len(data))))
+        r = hu('--timeout', '60', 'fs', 'crc', name)
+        want = '%08x' % (zlib.crc32(data) & 0xFFFFFFFF)
+        print(r, 'OK' if want in r else 'MISMATCH (want %s)' % want)
+        if want not in r:
+            sys.exit(1)
+
+
+def arm(_):
+    flag = os.path.join(SNAPDIR, 'flag.bin')
+    open(flag, 'wb').write(b'ECOSRUN\n')
+    print(hu('write', '0x600000', flag))
+    print(hu('fs', 'write', 'ECOSRUN.FLG', '0x600000', '8'))
+    print('armed: the next cold boot (ACC off/on) starts the stock eCos with the hook; the hook resets the unit ~3 s '
+          'after video playback starts (or after 4 min), then `collect`.')
 
 
 def collect(out):
@@ -96,12 +130,12 @@ def blocks(data, off):
 
 def show(path):
     data = open(path, 'rb').read()
-    h = struct.unpack_from('<20I', data, 0)
+    h = struct.unpack_from('<21I', data, 0)
     if h[0] != 0x50414E53:
         print('no snapshot header (magic %08x): the hook never ran, or the area was overwritten' % h[0])
         return
     names = ['magic', 'ver', 'calls', 'done', 'first_err_call', 'first_err_flags', 'first_ck_call', 'first_ck',
-             'snap0', 'snap1', 'snap2', 'snap3', 'or_flags', 'ck_changes', 'last_flags', 'last_ck', 'ticks', 'calls_disp1', 't0', 't_last']
+             'snap0', 'snap1', 'snap2', 'snap3', 'or_flags', 'ck_changes', 'last_flags', 'last_ck', 'ticks', 'calls_disp1', 't0', 't_last', 'trig_tick']
     print(' '.join('%s=%x' % (n, v) for n, v in zip(names, h)))
     print('hook ran for %.2f s of wall clock, %d calls' % (((h[19] - h[18]) & 0xFFFFFFFF) / 1e6, h[2]))
     for name, off, n, step in (('tick', 0x100, min((h[2] + 7) // 8, NHIST), 8),
@@ -126,6 +160,6 @@ def show(path):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 3 or sys.argv[1] not in ('run', 'collect', 'show'):
+    if len(sys.argv) != 3 or sys.argv[1] not in ('run', 'card', 'arm', 'collect', 'show'):
         sys.exit(__doc__)
-    {'run': run, 'collect': collect, 'show': show}[sys.argv[1]](sys.argv[2])
+    {'run': run, 'card': card, 'arm': arm, 'collect': collect, 'show': show}[sys.argv[1]](sys.argv[2])

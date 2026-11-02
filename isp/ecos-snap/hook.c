@@ -21,6 +21,7 @@ struct hdr {
     u32 or_flags, max_ck_changes, last_flags, last_ck;
     u32 by_src[2];   /* calls from f_0050f284 (display 0) / f_0050f7c0 (display 1) */
     u32 t0, t_last;  /* 1 MHz counter at the first and the latest call */
+    u32 trig_call;   /* tick at which 0x9C005784 b20 (DDFCH index mode: eCos showing a decoded picture) was first seen */
 };
 
 #define CRUMB 0x02F47F10u   /* last step reached, written back at once (outside the area the hook zeroes) */
@@ -49,7 +50,8 @@ static const u32 blocks[][2] = {
     { 0x9c006f80, 32 },
     { 0x9c007000, 32 },
     { 0x9c009a00, 8 }, { 0x9c009b00, 8 }, { 0x9c009b80, 8 }, { 0x9c009c00, 8 },
-    { 0x9c00a380, 32 },   /* BG2D control + first entries */
+    { 0x9c00a380, 32 },   /* BG2D control */
+    { 0x9c00a400, 256 },  /* BG2D entry table (index mode resolves the frame indices through it) */
 };
 
 static u32 put_block(u32 *o, u32 a, u32 n)
@@ -145,19 +147,20 @@ __attribute__((section(".text.entry"))) void snap_hook(u32 which)
     }
     h->t_last = t;
     u32 dt = t - h->t0;   /* wall clock, with call-count fallbacks (the dispatchers do not run every frame) */
-    if (!h->snap_call[0] && (dt >= 3000000u || c >= 3000)) {
+    /* Trigger: eCos switches DDFCH to index mode (0x784 b20) when it shows a decoded picture (video playback). Snapshot
+     * 0 at 1 s and 1 at 3 s after the trigger, then reset. No trigger within 240 s: snapshot 0 and reset. */
+    if (!h->trig_call && (R(0x9c005784) & (1u << 20)))
+        h->trig_call = c + 1;
+    u32 since = h->trig_call ? c + 1 - h->trig_call : 0;
+    if (!h->snap_call[0] && ((h->trig_call && since >= 1000) || dt >= 240000000u || c >= 240000)) {
         crumb(0x200);
         snapshot(0, 0);
         crumb(0x201);
-    } else if (!h->snap_call[1] && (dt >= 10000000u || c >= 10000)) {
+    } else if (h->trig_call && !h->snap_call[1] && since >= 3000) {
         crumb(0x300);
         snapshot(1, 0);
         crumb(0x301);
-    } else if (!h->snap_call[2] && (dt >= 25000000u || c >= 25000)) {
-        crumb(0x400);
-        snapshot(2, 1);
-        crumb(0x401);
-    } else if (h->snap_call[2] && (dt >= 28000000u || c >= 28000)) {
+    } else if (h->snap_call[0] && (!h->trig_call || h->snap_call[1])) {
         h->done = 1;
         crumb(0x500);
         reset_now();
