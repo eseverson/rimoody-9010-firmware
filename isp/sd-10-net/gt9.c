@@ -270,16 +270,28 @@ void gt9_tick(u32 now)
     if (ev_state < 0 || now - last < 25 || !claim())
         return;
     last = now;
-    if (!ev_state) {
-        take();
-        int ok = bus_ok() && probe_addr(0x5d);
-        ev_state = ok ? 1 : -1;
-        plat_logf("touch: events %s\n", ok ? "on (gt911 at 0x5d)" : "off (no ack at 0x5d)");
-        if (!ok) {
+    if (!ev_state) {   /* find the controller: it picks 0x5D or 0x14 from the INT level at power-on (cold boots have
+                        * come up at 0x14); neither: reset it into 0x5D (eCos's sequence) and try again 2 s later */
+        static u32 retry_at;
+        static int tries;
+        if (retry_at && (int)(now - retry_at) < 0) {
             busy = 0;
             return;
         }
-        addr = 0x5d;
+        take();
+        int a = !bus_ok() ? 0 : probe_addr(0x5d) ? 0x5d : probe_addr(0x14) ? 0x14 : 0;
+        if (!a) {
+            char tmp[64];
+            if (tries++ < 3 || !(tries % 15))
+                plat_logf("touch: no controller at 0x5d / 0x14 (try %d): resetting it\n", tries);
+            reset(tmp);
+            retry_at = now + 2000;
+            busy = 0;
+            return;
+        }
+        ev_state = 1;
+        addr = (u8)a;
+        plat_logf("touch: events on (gt911 at 0x%x%s)\n", a, tries ? ", after a reset" : "");
     }
     u8 b[12];
     if (rd(0x814e, b, 10) == 0 && (b[0] & 0x80)) {

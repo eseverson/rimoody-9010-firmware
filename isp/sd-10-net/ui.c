@@ -31,6 +31,7 @@ static int volume = 20, muted, dark = 1;
  * (dark while the headlights are on) */
 static int bright_day = 100, bright_night = 40, theme_mode = 1;
 static int lights;   /* debounced headlight input */
+static int boot_console = 1;   /* UI.TXT boot=1: power up into the text console (Home goes to the home screen) */
 static char settings_text[256];
 static void settings_save(void);
 
@@ -251,14 +252,15 @@ static void settings_load(void)
     theme_mode = kv_int(settings_text, "theme", theme_mode, 0, 2);
     aa_enabled = kv_int(settings_text, "aa", aa_enabled, 0, 1);
     volume = kv_int(settings_text, "vol", volume, 0, VOL_MAX);
+    boot_console = kv_int(settings_text, "boot", boot_console, 0, 1);
     plat_ui_aa_enable(aa_enabled);
 }
 
 static void settings_save(void)
 {
     char t[96];
-    lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\nvol=%d\n", bright_day, bright_night, theme_mode, aa_enabled,
-                volume);
+    lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\nvol=%d\nboot=%d\n", bright_day, bright_night, theme_mode,
+                aa_enabled, volume, boot_console);
     plat_ui_settings_save(t);
 }
 
@@ -817,6 +819,8 @@ static void ui_task(void *arg)
     lv_timer_create(status_timer, 500, 0);
     lv_timer_create(lights_timer, 200, 0);
     lv_screen_load(scr_home);
+    if (boot_console)
+        show_console();
     running = 1;
     int seen = 0;
     for (;;) {
