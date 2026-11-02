@@ -179,8 +179,8 @@ static int send_service_discovery(void)
     pb_u(&b, 1, 3);    /* keycodes: HOME */
     pb_u(&b, 1, 4);    /* BACK */
     y = pb_open(&b, 2);
-    pb_u(&b, 1, pf->hd ? 1280 : 800);   /* touch in video coordinates */
-    pb_u(&b, 2, pf->hd ? 720 : 480);
+    pb_u(&b, 1, pf->touch_w ? (u64)pf->touch_w : pf->hd ? 1280 : 800);   /* touch coordinate space */
+    pb_u(&b, 2, pf->touch_h ? (u64)pf->touch_h : pf->hd ? 720 : 480);
     pb_close(&b, y);
     pb_close(&b, x);
     pb_close(&b, c);

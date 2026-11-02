@@ -204,6 +204,39 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             k0++;
         return k0 + fmt(o + k0, "vpp linear: checksum %x -> %x, error flags %x -> %x, 7f4 %x 7f8 %x 7fc %x, 7bc %x 7c0 %x", c0,
                    R(0x9c0057e8), e0, R(0x9c0057ec), R(0x9c0057f4), R(0x9c0057f8), R(0x9c0057fc), R(0x9c0057bc), R(0x9c0057c0));
+    } else if (c == 10 && n >= 7) {   /* bit scan: p[1..4] register (LE), p[5] first bit, p[6] count. After the probe's step 1
+                                        * (eCos init, DDFCH color bar, fetch on, VPP0 opaque), flip each bit alone for ~3 frames
+                                        * and report every bit after which a stage shows data. `vpp restore` afterwards. */
+        u32 reg = p[1] | (u32)p[2] << 8 | (u32)p[3] << 16 | (u32)p[4] << 24, b0 = p[5], nb = p[6];
+        int ok = (reg >= 0x9c005780 && reg < 0x9c005800) || (reg >= 0x9c005a80 && reg < 0x9c005b80) ||
+                 (reg >= 0x9c005d80 && reg < 0x9c005e80) || (reg >= 0x9c006a80 && reg < 0x9c006b00) ||
+                 (reg >= 0x9c006c80 && reg < 0x9c006d00) || (reg >= 0x9c006080 && reg < 0x9c006100);
+        if (!ok || (reg & 3) || b0 + nb > 32)
+            return fmt(o, "ERR bitscan: register outside the scanned blocks, or bits past 31");
+        save();
+        init_fetch(800, 480, 1920);
+        R(0x9c0057f0) = 0x80801011;
+        setbits(0x9c005788, 0x1c, 0x10);
+        setbits(0x9c006c84, 0xfu, 2u | 1u << 2);
+        R(0x9c005a80) |= 1;
+        for (volatile int i = 0; i < 1000000; i++)
+            ;
+        int k = fmt(o, "bitscan %x bits %u..%u: base %x, idle ddfch %x axi %x hs %x vscl %x;", reg, b0, b0 + nb - 1, R(reg),
+                    R(0x9c0057e8), R(0x9c0057f4), R(0x9c0057fc) & 3, R(0x9c005e58));
+        int hits = 0;
+        for (u32 b = b0; b < b0 + nb; b++) {
+            u32 v = R(reg);
+            R(reg) = v ^ (1u << b);
+            R(0x9c005a80) |= 1;
+            for (volatile int i = 0; i < 1000000; i++)
+                ;
+            u32 d = R(0x9c0057e8), ax = R(0x9c0057f4), hs = R(0x9c0057fc) & 3, vs = R(0x9c005e58), dm = R(0x9c006c9c);
+            R(reg) = v;
+            R(0x9c005a80) |= 1;
+            if (d || ax || hs || vs)
+                k += fmt(o + k, " b%u: ddfch %x axi %x hs %x vscl %x dmix %x;", b, d, ax, hs, vs, dm), hits++;
+        }
+        return k + fmt(o + k, " %d hits", hits);
     } else if (c == 9 && n >= 2) {   /* probe (static analysis rounds 2 and 3): where does VPP0's data path break? Samples the DDFCH
                                       * checksum (0x7E8), VSCL checksum (0x9C005E58, i143 G188.22) and DMIX checksum (0x9C006C9C)
                                       * after each step; a nonzero value past a stage means that stage has data. p[1..2] mask (LE16), p[3] path:

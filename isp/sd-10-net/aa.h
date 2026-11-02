@@ -16,6 +16,7 @@ struct aa_platform {
     int dpi;
     int ver_minor;    /* protocol minor version we ask for (0 = 1) */
     int hd;           /* 1: 1280 x 720 with margins for a 1024 x 600 panel; 0: 800 x 480 */
+    int touch_w, touch_h;   /* touchscreen size we declare (0: the video size) */
     int audio_mask;   /* audio sinks offered: bit 0 media, 1 speech, 2 system; bit 7 = also a microphone source; 0 = none */
 };
 

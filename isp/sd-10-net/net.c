@@ -3169,13 +3169,16 @@ static void aa_touch_hook(int action, unsigned x, unsigned y)
     aa_tq_w = w + 1;
 }
 static int aa_hd = 1;   /* 1280 x 720 with margins: the panel shows the center 1:1 */
+static int aa_touch_panel;   /* 1: touchscreen declared as 1024 x 600, coordinates sent as the panel reports them */
 static void aa_touch_poll(void)   /* net task: panel 1024 x 600 -> video coordinates */
 {
     while (aa_tq_r != aa_tq_w) {
         u32 r = aa_tq_r;
         int act = aa_tq[r % 32].action;
         u32 x = aa_tq[r % 32].x, y = aa_tq[r % 32].y;
-        if (aa_hd)
+        if (aa_touch_panel)
+            x = x > 1023 ? 1023 : x;
+        else if (aa_hd)
             x += (1280 - 1024) / 2, y += (720 - 600) / 2;
         else
             x = x * 800u / 1024u, y = y * 480u / 600u;
@@ -3211,6 +3214,8 @@ static int aa_op(int c, const u8 *p, int n, char *t)
             pf.ver_minor = p[7], pf.audio_mask = p[8];
         if (c == 2 && n >= 10)
             pf.hd = p[9];
+        aa_touch_panel = c == 2 && n >= 11 && p[10];   /* declare the touchscreen as the panel, send raw coordinates */
+        pf.touch_w = aa_touch_panel ? 1024 : 0, pf.touch_h = aa_touch_panel ? 600 : 0;
         aa_hd = pf.hd;
         gt9_hook = aa_touch_hook;
         if (c == 2) {
