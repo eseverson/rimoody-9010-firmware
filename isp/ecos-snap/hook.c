@@ -194,6 +194,17 @@ __attribute__((section(".text.entry"))) void snap_hook(u32 which)
     }
     h->t_last = t;
     u32 dt = t - h->t0;   /* wall clock, with call-count fallbacks (the dispatchers do not run every frame) */
+#ifdef EQ
+    /* EQ run: arm the stubs' logging at 30 s (SNAP + 0xF8), reset at 4 min */
+    if (dt >= 30000000u && !R(SNAP + 0xF8u))
+        R(SNAP + 0xF8u) = 1;
+    if (dt >= 240000000u) {
+        h->done = 1;
+        crumb(0x500);
+        reset_now();
+    }
+    goto pet;
+#endif
 #ifdef BT
     {   /* Bluetooth run (stubs.S -DBT logs the frames): find eCos's RFCOMM connect ack `AC 29` in ring A, then let the
          * wireless AA session run 90 s before resetting; 3 min at most. Progress word SNAP + 0xF0, trigger SNAP + 0xF4. */
@@ -246,7 +257,7 @@ __attribute__((section(".text.entry"))) void snap_hook(u32 which)
         crumb(0x500);
         reset_now();
     }
-#if defined(AUDIO) || defined(BT)
+#if defined(AUDIO) || defined(BT) || defined(EQ)
 pet:
 #endif
     if (c < 8 || !(c & 15))

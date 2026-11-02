@@ -15,6 +15,9 @@ snapshot"; code in isp/ecos-snap/).
   ecos_snap.py card-bt ECOS.BIN  the Bluetooth run: HOOKB.BIN + stubs.S -DBT (every MCU frame eCos sends, the RFCOMM
                                  events, the BT code's prints); resets 90 s after the RFCOMM connect ack, or at 10 min
   ecos_snap.py show-bt OUT.BIN   decode a Bluetooth run
+  ecos_snap.py card-eq ECOS.BIN  the EQ run: DSP parameter setters, effect dispatcher, AUDIF_Set, mailbox, logged from
+                                 30 s after boot (while the stock EQ controls are moved); resets at 4 min
+  ecos_snap.py show-eq OUT.BIN   decode an EQ run
 """
 import os, struct, subprocess, sys, time, zlib
 
@@ -77,18 +80,22 @@ STUBS_ADDR = 0x317cb6
 
 BT_SITES = {32: 0x521aa8, 33: 0x3866ec, 34: 0x385ea2, 35: 0x385ef2, 36: 0x386394, 16: 0x5fd67a, 17: 0x602c62,
             18: 0x600ea0}
+EQ_SITES = {1: 0x3bbf74, 4: 0x3aa8a0, 10: 0x3bd312, 11: 0x3bd336, 12: 0x3bd2ca, 13: 0x3bd2ee, 14: 0x3ab6b8, 7: 0x3aa184,
+            16: 0x5fd67a, 17: 0x602c62}
+AUDIO_NAMES.update({10: 'RISC_set', 11: 'App_set', 12: 'Area27_set', 13: 'Swb_set', 14: 'effect', 17: 'print'})
 BT_NAMES = {32: 'TX', 33: 'RFCOMM_CONNECT', 34: 'RFCOMM_DATA', 35: 'RFCOMM_DATA_END', 36: 'RFCOMM_DISCONNECT'}
 
 
-def audio_patch(img, bt=False):
+def audio_patch(img, bt=False, eq=False):
     """stubs.S over the dead `pwm` handler, and `j stub_N; nop16` over each site's 6-byte prologue"""
-    stubs = open(os.path.join(SNAPDIR, 'STUBSB.BIN' if bt else 'STUBS.BIN'), 'rb').read()
-    sym = {l.split()[2]: int(l.split()[0], 16) for l in open(os.path.join(SNAPDIR, 'stubsb.sym' if bt else 'stubs.sym'))}
+    sfx = 'b' if bt else 'e' if eq else ''
+    stubs = open(os.path.join(SNAPDIR, 'STUBS%s.BIN' % sfx.upper()), 'rb').read()
+    sym = {l.split()[2]: int(l.split()[0], 16) for l in open(os.path.join(SNAPDIR, 'stubs%s.sym' % sfx))}
     o = STUBS_ADDR - ECOS_BASE
     if img[o:o + 2] != bytes.fromhex('fc48') or len(stubs) > 0x508:
         sys.exit('pwm handler bytes at %#x are %s (want fc48), stubs %d bytes (max 0x508)' % (STUBS_ADDR, img[o:o + 2].hex(), len(stubs)))
     img[o:o + len(stubs)] = stubs
-    for i, site in (BT_SITES if bt else AUDIO_SITES).items():
+    for i, site in (BT_SITES if bt else EQ_SITES if eq else AUDIO_SITES).items():
         so = site - ECOS_BASE
         first = img[so:so + 6]
         ok = (first[0] == 0xfc and first[2:4] == bytes.fromhex('51cf')) or first[:2] == bytes.fromhex('3a1f')
@@ -98,7 +105,7 @@ def audio_patch(img, bt=False):
         img[so:so + 6] = struct.pack('>I', 0x48000000 | (d & 0xFFFFFF)) + bytes.fromhex('9200')
 
 
-def card(path, audio=False, bt=False):
+def card(path, audio=False, bt=False, eq=False):
     """Write the patched eCos, entry.S and the hook to the SD card for the payload's power-on path (net.c
     ecos_boot_check); `arm` then writes the one-shot flag, and the next cold boot (ACC cycle) runs eCos."""
     img = bytearray(open(path, 'rb').read())
@@ -107,12 +114,12 @@ def card(path, audio=False, bt=False):
         if img[o:o + 4] != old:
             sys.exit('eCos bytes at %#x are %s, expected %s' % (a, img[o:o + 4].hex(), old.hex()))
         img[o:o + 4] = new
-    if audio or bt:
-        audio_patch(img, bt)
+    if audio or bt or eq:
+        audio_patch(img, bt, eq)
     tmp = os.path.join(SNAPDIR, 'ecos_patched.bin')
     open(tmp, 'wb').write(img)
     for name, src in (('ECOSP.BIN', tmp), ('ENTRY.BIN', os.path.join(SNAPDIR, 'ENTRY.BIN')),
-                      ('HOOK.BIN', os.path.join(SNAPDIR, 'HOOKB.BIN' if bt else 'HOOKA.BIN' if audio else 'HOOK.BIN'))):
+                      ('HOOK.BIN', os.path.join(SNAPDIR, 'HOOKB.BIN' if bt else 'HOOKE.BIN' if eq else 'HOOKA.BIN' if audio else 'HOOK.BIN'))):
         data = open(src, 'rb').read()
         print(hu('write', '0x600000', src))
         print(hu('--timeout', '60', 'fs', 'write', name, '0x600000', str(len(data))))
@@ -309,6 +316,7 @@ def show_bt(path):
 
 if __name__ == '__main__':
     cmds = {'run': run, 'card': card, 'card-audio': lambda p: card(p, True), 'card-bt': lambda p: card(p, bt=True),
+            'card-eq': lambda p: card(p, eq=True), 'show-eq': lambda p: show_audio(p),
             'arm': arm, 'collect': collect, 'show': show, 'show-audio': show_audio, 'show-bt': show_bt}
     if len(sys.argv) != 3 or sys.argv[1] not in cmds:
         sys.exit(__doc__)

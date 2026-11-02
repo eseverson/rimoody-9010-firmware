@@ -7,7 +7,7 @@ CFLAGS  := -march=v3 -mcpu=n9 -mcmodel=large -mno-ext-perf2 -mno-fp-as-gp -Os -f
            -fno-pic -fno-common -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Wextra
 LDFLAGS := -nostdlib -nostartfiles -Wl,--no-relax -Wl,--no-warn-rwx-segments
 
-all: HOOK.BIN hook.dis LAUNCH.BIN launch.dis ENTRY.BIN entry.dis HOOKA.BIN STUBS.BIN stubs.sym HOOKB.BIN STUBSB.BIN stubsb.sym
+all: HOOK.BIN hook.dis LAUNCH.BIN launch.dis ENTRY.BIN entry.dis HOOKA.BIN STUBS.BIN stubs.sym HOOKB.BIN STUBSB.BIN stubsb.sym HOOKE.BIN STUBSE.BIN stubse.sym
 
 # audio run: the hook in AUDIO mode, and the call loggers linked over eCos's dead `pwm` handler (stubs.S)
 hooka.elf: hook.c hook.ld
@@ -61,7 +61,7 @@ entry.dis: entry.elf
 	$(OBJDUMP) -d $< > $@
 
 clean:
-	rm -f hookb.elf HOOKB.BIN stubsb.elf STUBSB.BIN stubsb.sym stubsb.dis hooka.elf HOOKA.BIN stubs.elf STUBS.BIN stubs.sym stubs.dis hook.elf HOOK.BIN hook.dis hook.map launch.elf LAUNCH.BIN launch.dis launch.map entry.elf ENTRY.BIN entry.dis
+	rm -f hooke.elf HOOKE.BIN stubse.elf STUBSE.BIN stubse.sym stubse.dis hookb.elf HOOKB.BIN stubsb.elf STUBSB.BIN stubsb.sym stubsb.dis hooka.elf HOOKA.BIN stubs.elf STUBS.BIN stubs.sym stubs.dis hook.elf HOOK.BIN hook.dis hook.map launch.elf LAUNCH.BIN launch.dis launch.map entry.elf ENTRY.BIN entry.dis
 
 # Bluetooth run: the hook in BT mode (no snapshots; resets 90 s after the RFCOMM connect ack AC 29, or at 10 min)
 hookb.elf: hook.c hook.ld
@@ -79,3 +79,24 @@ STUBSB.BIN: stubsb.elf
 stubsb.sym: stubsb.elf
 	$(CROSS)nm $< | grep -E ' (stub_[0-9]+|common|common_bytes)$$' > $@
 	$(OBJDUMP) -d $< > stubsb.dis
+
+# EQ run: the hook arms the loggers at 30 s and resets at 4 min; stubs for the DSP parameter setters
+EQ_SITES := -Wl,--defsym=site_1=0x3bbf74 -Wl,--defsym=site_4=0x3aa8a0 -Wl,--defsym=site_10=0x3bd312 \
+            -Wl,--defsym=site_11=0x3bd336 -Wl,--defsym=site_12=0x3bd2ca -Wl,--defsym=site_13=0x3bd2ee \
+            -Wl,--defsym=site_14=0x3ab6b8 -Wl,--defsym=site_7=0x3aa184 -Wl,--defsym=site_16=0x5fd67a \
+            -Wl,--defsym=site_17=0x602c62
+hooke.elf: hook.c hook.ld
+	$(CC) $(CFLAGS) -DEQ $(LDFLAGS) -Wl,-T,hook.ld -o $@ hook.c -lgcc
+
+HOOKE.BIN: hooke.elf
+	$(OBJCOPY) -O binary -R .bss $< $@
+
+stubse.elf: stubs.S Makefile
+	$(CC) $(CFLAGS) -DEQ $(LDFLAGS) -Wl,-Ttext=0x317cb6 -Wl,-e,common $(EQ_SITES) -o $@ stubs.S
+
+STUBSE.BIN: stubse.elf
+	$(OBJCOPY) -O binary $< $@
+
+stubse.sym: stubse.elf
+	$(CROSS)nm $< | grep -E ' (stub_[0-9]+|common)$$' > $@
+	$(OBJDUMP) -d $< > stubse.dis
