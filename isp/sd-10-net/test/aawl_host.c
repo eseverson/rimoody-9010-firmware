@@ -1,5 +1,6 @@
-/* Host test for aa_wl.c: plays the phone side of the wireless AA RFCOMM handshake, byte-split, and checks every
- * message the head unit sends against hand-encoded protobuf. */
+/* Host test for aa_wl.c: replays the phone side of stock eCos's wireless AA RFCOMM handshake (logic-analyzer capture
+ * 2026-10-31, Pixel 10 Pro, notes/android_auto.md), byte-split, and checks that every message we send is byte for byte
+ * what stock sent with the same parameters. */
 #include "../aa_wl.c"
 #include <stdio.h>
 static unsigned char out[4][300];
@@ -15,24 +16,35 @@ static void expect(int i, const unsigned char *e, int n, const char *what)
         printf("\n");
     }
 }
+static void feed(const unsigned char *p, int n, int split)
+{
+    for (int i = 0; i < n; i += split)
+        aa_wl_rfcomm_rx(p + i, n - i < split ? n - i : split);
+}
 int main(void)
 {
-    struct aa_wl_ap ap = { "MiataAA", "secret12", "02:11:22:33:44:55", "192.168.43.1", 5288 };
+    struct aa_wl_ap ap = { "DIRECT-phonelink-d9249c", "88888888", "0c:c1:19:57:a2:5d", "192.168.0.1", 8765, 8461480 };
     aa_wl_rfcomm_connected(&ap, snd);
-    /* WifiStartRequest: len 0x11, id 1, {1: "192.168.43.1", 2: 5288} */
-    static const unsigned char start[] = { 0, 0x11, 0, 1, 0x0a, 12, '1', '9', '2', '.', '1', '6', '8', '.', '4', '3', '.', '1', 0x10, 0xa8, 0x29 };
-    expect(0, start, sizeof start, "WifiStartRequest (ip, port 5288)");
-    static const unsigned char req[] = { 0, 0, 0, 2 };   /* WifiInfoRequest, delivered one byte at a time */
-    for (int i = 0; i < 4; i++)
-        aa_wl_rfcomm_rx(req + i, 1);
-    static const unsigned char info[] = { 0, 0x2a, 0, 3, 0x0a, 7, 'M', 'i', 'a', 't', 'a', 'A', 'A', 0x12, 8, 's', 'e', 'c', 'r', 'e', 't', '1', '2',
-        0x1a, 17, '0', '2', ':', '1', '1', ':', '2', '2', ':', '3', '3', ':', '4', '4', ':', '5', '5', 0x20, 8, 0x28, 0 };
-    expect(1, info, sizeof info, "WifiInfoResponse (ssid, key, bssid, WPA2 personal, static)");
-    static const unsigned char st[] = { 0, 2, 0, 7, 0x18, 0, 0, 2, 0, 6, 0x08, 0 };   /* start response status 0, connect status 0 */
-    aa_wl_rfcomm_rx(st, sizeof st);
+    static const unsigned char ver[] = { 0x00, 0x09, 0x00, 0x04, 0x10, 0x00, 0x18, 0x00, 0x20, 0xa8, 0xb9, 0x84, 0x04 };
+    expect(0, ver, sizeof ver, "WifiVersionRequest as stock");
+    static const unsigned char vresp[] = { 0x00, 0x16, 0x00, 0x05, 0x08, 0x00, 0x10, 0x00, 0x1a, 0x0e, '5', '7', '2', '1', '1', 'F',
+                                           'D', 'C', 'H', '0', '0', '5', 'L', '7', 0x20, 0x00 };
+    feed(vresp, sizeof vresp, 1);
+    static const unsigned char start[] = { 0x00, 0x10, 0x00, 0x01, 0x0a, 0x0b, '1', '9', '2', '.', '1', '6', '8', '.', '0', '.', '1',
+                                           0x10, 0xbd, 0x44 };
+    expect(1, start, sizeof start, "WifiStartRequest after the version response, as stock");
+    static const unsigned char req[] = { 0x00, 0x00, 0x00, 0x02 };
+    feed(req, sizeof req, 1);
+    static const unsigned char info[] = { 0x00, 0x38, 0x00, 0x03, 0x0a, 0x17, 'D', 'I', 'R', 'E', 'C', 'T', '-', 'p', 'h', 'o', 'n', 'e',
+                                          'l', 'i', 'n', 'k', '-', 'd', '9', '2', '4', '9', 'c', 0x12, 0x08, '8', '8', '8', '8', '8',
+                                          '8', '8', '8', 0x1a, 0x11, '0', 'c', ':', 'c', '1', ':', '1', '9', ':', '5', '7', ':', 'a',
+                                          '2', ':', '5', 'd', 0x20, 0x08 };
+    expect(2, info, sizeof info, "WifiInfoResponse as stock");
+    static const unsigned char st[] = { 0x00, 0x02, 0x00, 0x07, 0x18, 0x00, 0x00, 0x02, 0x00, 0x06, 0x08, 0x00 };
+    feed(st, sizeof st, 5);
     const struct aa_wl_status *s = aa_wl_status();
-    int ok = s->state == AA_WL_PHONE_CONNECTED && s->rx == 3 && !s->errors && !s->unknown;
-    printf("%s phone start response + connect status parsed (state %d, rx %u)\n", ok ? "PASS" : "FAIL", s->state, s->rx);
+    int ok = s->state == AA_WL_PHONE_CONNECTED && s->rx == 4 && !s->errors && !s->unknown && nout == 3;
+    printf("%s phone start response + connect status parsed (state %d, rx %u, sent %d)\n", ok ? "PASS" : "FAIL", s->state, s->rx, nout);
     fails += !ok;
     printf("%d failures\n", fails);
     return fails != 0;

@@ -45,6 +45,7 @@ cu32 mcu_crc16(const cu8 *p, int n);
 
 /* platform */
 void plat_mcu_write(const cu8 *frame, int n);
+void plat_mcu_bt(const cu8 *p, int n, cu32 now);   /* an `ac` frame's payload after the tag */
 void plat_mcu_shutdown(void);   /* ACC off: save what matters (called between e8 01 and 00) */
 void plat_logf(const char *fmt, ...);
 int plat_fmt(char *out, const char *fmt, ...);

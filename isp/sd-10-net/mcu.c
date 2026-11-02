@@ -58,7 +58,12 @@ int mcu_send(struct mcu *m, const cu8 *p, int n, cu32 now)
     int len = mcu_frame(p, n, f);
     plat_mcu_write(f, len);
     m->tx_frames++;
-    hist_add(m, 't', p, n, now);
+    int secret = n >= 2 && p[0] == 0xac && (p[1] == 0x2a || p[1] == 0x2b);   /* RFCOMM data can carry the Wi-Fi passphrase */
+    hist_add(m, 't', p, secret ? 4 : n, now);
+    if (secret) {
+        plat_logf("mcu: t=%u tx ac %02x (%d data bytes)\n", now, p[1], n - 4);
+        return 0;
+    }
     char t[3 * MCU_MAX_PAYLOAD + 1];
     hexs(t, p, n);
     plat_logf("mcu: t=%u tx%s\n", now, t);
@@ -157,6 +162,9 @@ static void handle(struct mcu *m, const cu8 *p, int n, cu32 now)
         break;
     case 0xa4:
         m->a4_pending = 1, m->a4_at = now;
+        break;
+    case 0xac:   /* Bluetooth events from the AC6965A */
+        plat_mcu_bt(p + 1, n - 1, now);
         break;
     case 0x00:
         if (n == 1) {

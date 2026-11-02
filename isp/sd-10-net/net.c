@@ -40,6 +40,7 @@ typedef signed char s8;
 #include "vdec.h"
 #include "aa.h"
 #include "aa_tcp.h"
+#include "aa_wl.h"
 #include "vpp.h"
 #include "ui.h"
 #include "osdvid.h"
@@ -1660,6 +1661,7 @@ void hu_random(unsigned char *out, int n) { rng_bytes(out, n); }   /* aa_tls.c (
 static u8 cfg_ssid[33], cfg_pmk[32], cfg_token[32];
 static int cfg_ssid_len;
 static u32 cfg_ip;
+static char sta_pass[65];   /* the station passphrase (WIFI.TXT psk=), for the wireless AA handshake */
 
 static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'f' ? (c | 32) - 'a' + 10 : -1; }
 
@@ -1820,7 +1822,7 @@ static int load_config(void)
     else
         pbkdf2_sha1((const u8 *)psk, psk_len, cfg_ssid, cfg_ssid_len, 4096, cfg_pmk, 32);
     for (int i = 0; i < 65; i++)
-        psk[i] = 0;
+        sta_pass[i] = psk[i], psk[i] = 0;   /* wireless AA hands the phone our network's passphrase over Bluetooth */
     lprintf("config: PMK ready in %u ms\n", ub_ms(t0));
     return 0;
 }
@@ -2513,7 +2515,7 @@ static void join_start(void)
  * card's build in station mode). ---- */
 #define AP_DEADLINE_MS (5 * 60 * 1000)
 static struct ap_cfg apc;
-static char ap_ssid[33];
+static char ap_ssid[33], ap_pass[64];
 static u8 ap_pmk[32], ap_gtk[16], sta[6], ap_ie[32];
 static int ap_ie_len, sta_st, ap_eapol_tries, ap_ch;   /* sta_st: 0 none, 1 authenticated, 2 associated, 3 keyed */
 static struct wpa_ap wap;
@@ -2564,7 +2566,8 @@ static void ap_start(int ch, const char *ssid, const char *psk)
     ap_ssid[n] = 0;
     int pl = 0;
     while (psk[pl] && pl < 63)
-        pl++;
+        ap_pass[pl] = psk[pl], pl++;
+    ap_pass[pl] = 0;
     pbkdf2_sha1((const u8 *)psk, pl, (const u8 *)ap_ssid, n, 4096, ap_pmk, 32);
     rng_bytes(ap_gtk, 16);
     apc.ssid = ap_ssid;
@@ -3282,6 +3285,107 @@ static void bt_name_tick(void)
     mcu_send(&mcu_st, f, 3 + n, ub_ms(0));
     sent = g;
     lprintf("bt: name \"%s\" sent\n", ui_bt_name);
+}
+
+/* Wireless AA over the AC6965A's RFCOMM (notes/android_auto.md; frames as stock eCos, logic-analyzer capture
+ * 2026-10-31). In: `ac 18 22 <rfc_info 34>` channel open (+0x0a handle u32 LE, +0x12 service UUID), `ac 19 ..`
+ * closed, `ac 1a <len> <data>` / `ac 1b <len> <data>` data (more / last). Out: `ac 2a <len> <handle u8> <data>`, at
+ * most 50 data bytes, `ac 2b` for the last chunk, 50 ms apart. The phone is told our network: the AP when it is up,
+ * else the station's network (bench: the phone joins the home Wi-Fi and reaches us at our DHCP address). */
+static int bt_handle = -1;
+static char bt_ip[16], bt_bssid[18];
+static struct aa_wl_ap bt_ap;
+static int bt_rfcomm_send(const unsigned char *p, int n)
+{
+    if (bt_handle < 0)
+        return -1;
+    for (int off = 0; off < n;) {
+        int k = n - off > 50 ? 50 : n - off;
+        u8 f[4 + 50];
+        f[0] = 0xac, f[1] = off + k < n ? 0x2a : 0x2b, f[2] = (u8)k, f[3] = (u8)bt_handle;
+        for (int i = 0; i < k; i++)
+            f[4 + i] = p[off + i];
+        if (off)
+            vTaskDelay(pdMS_TO_TICKS(50));
+        mcu_send(&mcu_st, f, 4 + k, ub_ms(0));
+        off += k;
+    }
+    return 0;
+}
+
+static int aa_op(int c, const u8 *p, int n, char *t);
+static void bt_aa_open(int handle, cu32 now)
+{
+    static char reply[600];
+    if (!aa_listening) {   /* the phone will connect over TCP: listen first */
+        u8 st[3] = { 1, 5288 & 0xff, 5288 >> 8 };
+        aa_op(1, st, 3, reply);
+        log_s(reply), log_c('\n');
+    }
+    u8 b[6];
+    if (jstate == J_AP) {
+        cpy(b, my_mac, 6);
+        bt_ap.ssid = ap_ssid, bt_ap.key = ap_pass;
+        vfmt_n(bt_ip, "192.168.43.1");
+    } else {
+        static char ss[33];
+        cpy(ss, cfg_ssid, cfg_ssid_len);
+        ss[cfg_ssid_len] = 0;
+        plat_bssid(b);
+        if (!sta_pass[0]) {   /* an EXEC handoff carries only the PMK: read the passphrase from the card */
+            static char w[1024];
+            u32 wl = 0;
+            if (!fs_load("WIFI.TXT", w, sizeof w - 1, &wl)) {
+                w[wl] = 0;
+                for (char *l = w; *l;) {
+                    char *e = l;
+                    while (*e && *e != '\n' && *e != '\r')
+                        e++;
+                    if (e - l > 4 && same((const u8 *)l, (const u8 *)"psk=", 4) && e - l - 4 < (int)sizeof sta_pass)
+                        cpy(sta_pass, l + 4, e - l - 4), sta_pass[e - l - 4] = 0;
+                    while (*e == '\n' || *e == '\r')
+                        e++;
+                    l = e;
+                }
+                for (u32 i = 0; i < sizeof w; i++)
+                    w[i] = 0;
+            }
+        }
+        bt_ap.ssid = ss, bt_ap.key = sta_pass;
+        ip_fmt_addr(bt_ip, ip_addr());
+    }
+    vfmt_n(bt_bssid, "%02x:%02x:%02x:%02x:%02x:%02x", b[0], b[1], b[2], b[3], b[4], b[5]);
+    bt_ap.bssid = bt_bssid, bt_ap.ip = bt_ip, bt_ap.port = aa_listening ? aa_listening : 5288, bt_ap.stamp = now;
+    bt_handle = handle;
+    lprintf("bt: AA channel %d open: offering '%s' (%s), %s:%d\n", handle, bt_ap.ssid, bt_bssid, bt_ip, bt_ap.port);
+    aa_wl_rfcomm_connected(&bt_ap, bt_rfcomm_send);
+}
+
+void plat_mcu_bt(const cu8 *p, int n, cu32 now)
+{
+    static const u8 aa_uuid[4] = { 0x4d, 0xe1, 0x7a, 0x00 };
+    if (n < 1)
+        return;
+    if ((p[0] == 0x18 || p[0] == 0x19) && n >= 2 + 0x22) {
+        const u8 *ri = p + 2;
+        int h = ri[10] | ri[11] << 8, aa = same(ri + 0x12, aa_uuid, 4);
+        if (p[0] == 0x19) {
+            if (h == bt_handle)
+                bt_handle = -1;
+            lprintf("bt: channel %d closed\n", h);
+        } else if (aa) {
+            bt_aa_open(h, now);
+        } else {
+            lprintf("bt: channel %d open, not Android Auto\n", h);
+        }
+    } else if ((p[0] == 0x1a || p[0] == 0x1b) && n >= 2 && p[1] <= n - 2) {
+        aa_wl_rfcomm_rx(p + 2, p[1]);
+        const struct aa_wl_status *w = aa_wl_status();
+        static int last = -1;
+        if ((int)w->state != last)
+            lprintf("bt: AA handshake state %d (rx %u tx %u, start %d, connect %d)\n", w->state, w->rx, w->tx, w->start_status,
+                    w->connect_status), last = (int)w->state;
+    }
 }
 void plat_ui_brightness(int percent) { ui_req_bright = percent < 0 ? 0 : percent > 100 ? 100 : percent; }
 

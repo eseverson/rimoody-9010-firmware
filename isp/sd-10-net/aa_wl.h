@@ -5,6 +5,7 @@ struct aa_wl_ap {
     const char *ssid, *key, *bssid;   /* bssid as "aa:bb:cc:dd:ee:ff" */
     const char *ip;                   /* our address on the AP, e.g. "192.168.43.1" */
     int port;                         /* TCP port aa.c listens on */
+    unsigned int stamp;               /* WifiVersionRequest field 4 */
 };
 enum aa_wl_state { AA_WL_IDLE, AA_WL_STARTED, AA_WL_INFO_SENT, AA_WL_PHONE_STARTED, AA_WL_PHONE_CONNECTED };
 struct aa_wl_status { enum aa_wl_state state; int start_status, connect_status; unsigned int rx, tx, unknown, errors; };

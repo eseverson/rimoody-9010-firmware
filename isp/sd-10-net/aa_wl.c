@@ -3,6 +3,10 @@
  *
  * RFCOMM (service UUID 4de17a00-52cb-11e6-bdf4-0800200c9a66), each message: length u16be (protobuf bytes only),
  * id u16be, protobuf. As implemented by open wireless-AA projects (unverified against a phone here):
+ * Stock eCos's sequence (logic-analyzer capture 2026-10-31, Pixel 10 Pro): 4 -> phone, 5 <- phone, 1 ->, 2 <-, 3 ->, 7 <-,
+ * 6 <-.
+ *   4 WifiVersionRequest HU -> phone  { 2 0, 3 0, 4 varint (differs per run, a time?) }
+ *   5 WifiVersionResponse phone -> HU { 1 0, 2 0, 3 serial string, 4 0 }
  *   1 WifiStartRequest   HU -> phone  { 1 ip_address string, 2 port int32 }
  *   2 WifiInfoRequest    phone -> HU  {}
  *   3 WifiInfoResponse   HU -> phone  { 1 ssid, 2 key, 3 bssid "aa:bb:..", 4 security_mode (8 = WPA2 personal),
@@ -16,6 +20,8 @@
 typedef unsigned char u8;
 
 static const struct aa_wl_ap *ap;
+static unsigned char rb[512];
+static int rn;
 static int (*bt_send)(const u8 *p, int n);
 static struct aa_wl_status ws;
 
@@ -59,14 +65,22 @@ int aa_wl_rfcomm_connected(const struct aa_wl_ap *a, int (*send)(const unsigned 
     bt_send = send;
     memset(&ws, 0, sizeof ws);
     ws.state = AA_WL_STARTED;
+    rn = 0;
+    u8 pb[32];
+    int k = put_u(pb, 2, 0);
+    k += put_u(pb + k, 3, 0);
+    k += put_u(pb + k, 4, a->stamp);
+    return send_msg(4, pb, k);
+}
+
+static int send_start(void)
+{
     u8 pb[64];
-    int k = put_str(pb, 1, a->ip);
-    k += put_u(pb + k, 2, (unsigned)a->port);
+    int k = put_str(pb, 1, ap->ip);
+    k += put_u(pb + k, 2, (unsigned)ap->port);
     return send_msg(1, pb, k);
 }
 
-static u8 rb[512];
-static int rn;
 
 static unsigned long long get_u(const u8 *p, int n, int field)
 {
@@ -102,13 +116,14 @@ void aa_wl_rfcomm_rx(const unsigned char *p, int n)
                 break;
             const u8 *pb = rb + 4;
             ws.rx++;
-            if (id == 2) {   /* WifiInfoRequest -> our AP */
+            if (id == 5) {   /* WifiVersionResponse -> WifiStartRequest */
+                send_start();
+            } else if (id == 2) {   /* WifiInfoRequest -> our AP */
                 u8 o[256];
                 int m = put_str(o, 1, ap->ssid);
                 m += put_str(o + m, 2, ap->key);
                 m += put_str(o + m, 3, ap->bssid);
-                m += put_u(o + m, 4, 8);   /* WPA2 personal */
-                m += put_u(o + m, 5, 0);   /* static access point */
+                m += put_u(o + m, 4, 8);   /* WPA2 personal (stock sends fields 1-4 only) */
                 send_msg(3, o, m);
                 ws.state = AA_WL_INFO_SENT;
             } else if (id == 7) {

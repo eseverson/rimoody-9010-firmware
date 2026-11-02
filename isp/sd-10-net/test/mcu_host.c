@@ -16,6 +16,7 @@ void plat_mcu_write(const cu8 *f, int n)
     printf("\n");
 }
 void plat_mcu_shutdown(void) { printf("shutdown\n"); }
+void plat_mcu_bt(const cu8 *p, int n, cu32 now) { (void)p, (void)n, (void)now; }
 void plat_logf(const char *fmt, ...)
 {
     va_list ap;
