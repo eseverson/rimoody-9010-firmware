@@ -106,6 +106,7 @@ typedef int (*bulk_fn)(void *dev, u32 pipe, void *data, int len, int *actual, in
 #include "usbh.h"
 #include "sd.h"
 #include "fatfs/ff.h"
+#include "audio.h"
 
 /* ---- time budget, in ub_ms(0) (which starts ~3 s after U-Boot itself; the unit resets ~150 s after U-Boot) ---- */
 #define EHCI_BULK_MS   5000    /* ehci_submit_async gives up on a bulk TD after 5000 ms, others after 1000 (0xf7e562) */
@@ -3183,6 +3184,10 @@ static void aa_log_cb(const char *m) { log_s(m); }
 static volatile int ui_req_mute = -1, ui_req_reboot, ui_req_stock, ui_req_key, ui_req_hide, ui_req_bright = -1;
 static int ui_aa_enabled = 1;
 void plat_ui_mute(int on) { ui_req_mute = on; }
+/* what the UI wants (volume index, mute) and what the DSP has: applied whenever audio is up, again after an init */
+static volatile int ui_vol_want = -1, ui_mute_want;
+static int aud_vol_sent = -1, aud_mute_sent = -1;
+void plat_ui_volume(int index) { ui_vol_want = index; }
 void plat_ui_reboot(void) { ui_req_reboot = 1; }
 void plat_ui_boot_stock(void) { ui_req_stock = 1; }
 void plat_ui_aa_key(int keycode) { ui_req_key = keycode; }
@@ -3675,6 +3680,22 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             vpp_restore_now();
         return k;
     }
+    case 27: {   /* AUDIO (audio.c): 0 status, 1 init, 2 tone u16 Hz (0 off), 3 volume u8 0..40, 4 mute u8 */
+        int c = n ? p[0] : 0;
+        if (c == 1) {
+            int r = aud_init(lprintf);
+            aud_vol_sent = aud_mute_sent = -1;   /* init leaves it muted at volume 0: the UI's settings go again */
+            int k = vfmt_n(t, "init %d; ", r);
+            return k + aud_status(t + k, vfmt_n);
+        }
+        if (c == 2 && n >= 3)
+            aud_tone(p[1] | p[2] << 8);
+        else if (c == 3 && n >= 2)
+            aud_set_volume(p[1]);
+        else if (c == 4 && n >= 2)
+            aud_set_mute(p[1]);
+        return aud_status(t, vfmt_n);
+    }
     case 26: {   /* UI input injection (tests): 0 tap x u16, y u16; 1 button n [u8 hold in 100 ms units, default 1] */
         int c = n ? p[0] : -1;
         if (c == 0 && n >= 5) {
@@ -3961,7 +3982,15 @@ static void net_loop(void)
             if (ui_req_mute >= 0) {   /* MCU system mute: 01 01 on, 01 00 off (notes/audio.md) */
                 u8 m[2] = { 0x01, (u8)ui_req_mute };
                 mcu_send(&mcu_st, m, 2, ub_ms(0));
+                ui_mute_want = ui_req_mute;
                 ui_req_mute = -1;
+            }
+            if (aud_ready()) {
+                int v = ui_vol_want, mu = ui_mute_want;
+                if (v >= 0 && v != aud_vol_sent)
+                    aud_set_volume(v), aud_vol_sent = v;
+                if (mu != aud_mute_sent)
+                    aud_set_mute(mu), aud_mute_sent = mu;
             }
             if (ui_req_key) {
                 aa_send_key(ui_req_key, 1);
@@ -4017,6 +4046,7 @@ static void net_loop(void)
                 run("reset");
             }
         }
+        aud_poll();
         if (aa_listening || aa_tcp_connected()) {
             aa_touch_poll();
             aa_tcp_poll();

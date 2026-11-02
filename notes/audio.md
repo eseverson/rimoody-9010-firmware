@@ -48,7 +48,7 @@ There are no SoC→MCU commands for loudness, EQ, bass, treble, balance or fader
 | system up | `11 01` | `ff aa 02 11 01 ec 1f 1e` |
 | power_on extra | `e6 00` | `ff aa 02 e6 00 18 70 0e` |
 
-The real "mid volume" on this unit is SoC-side: index 20 = −25 dB (dB table at flash 0x5c7b64: −103.5, −70, −66, −62, −58, −54, −50, −48, −44, −42, −40, −38 … −1, 0 for indices 0..40), applied by `0x3aa184`, which clamps to [−103.5, +24] dB and passes the value to the DSP through 0x3b3810.
+The real "mid volume" on this unit is SoC-side: index 20 = −27 dB (dB table at flash 0x5c7b64: −103.5, −70, −66, −62, −58, −54, −50, −48, −44, −42, −40, −38 … −1, 0 for indices 0..40), applied by `0x3aa184`, which clamps to [−103.5, +24] dB and passes the value to the DSP through 0x3b3810.
 
 ## SoC audio block
 

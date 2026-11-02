@@ -250,13 +250,15 @@ static void settings_load(void)
     bright_night = kv_int(settings_text, "night", bright_night, 0, 100);
     theme_mode = kv_int(settings_text, "theme", theme_mode, 0, 2);
     aa_enabled = kv_int(settings_text, "aa", aa_enabled, 0, 1);
+    volume = kv_int(settings_text, "vol", volume, 0, VOL_MAX);
     plat_ui_aa_enable(aa_enabled);
 }
 
 static void settings_save(void)
 {
     char t[96];
-    lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\n", bright_day, bright_night, theme_mode, aa_enabled);
+    lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\nvol=%d\n", bright_day, bright_night, theme_mode, aa_enabled,
+                volume);
     plat_ui_settings_save(t);
 }
 
@@ -643,6 +645,7 @@ static void status_timer(lv_timer_t *t)
 static void vol_hide(lv_timer_t *t)
 {
     lv_obj_add_flag(vol_panel, LV_OBJ_FLAG_HIDDEN);
+    settings_save();   /* the volume, once the presses are over (not one SD write per step) */
     lv_timer_pause(t);   /* kept for the next press (a repeat count would make LVGL delete it) */
 }
 
@@ -678,6 +681,7 @@ static void build_volume(void)
 
 static void vol_show(void)
 {
+    plat_ui_volume(volume);
     lv_label_set_text(vol_icon, muted || !volume ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
     lv_bar_set_value(vol_bar, muted ? 0 : volume, LV_ANIM_OFF);
     lv_label_set_text_fmt(vol_num, "%d", muted ? 0 : volume);
@@ -754,7 +758,10 @@ static void on_button(int b, int pressed)
         if (pressed) {
             volume += vol_dir;
             volume = volume < 0 ? 0 : volume > VOL_MAX ? VOL_MAX : volume;
-            muted = 0;
+            if (muted) {   /* a volume press ends a mute */
+                muted = 0;
+                plat_ui_mute(0);
+            }
             vol_show();
             vol_at = now + 450;   /* held: repeat after a pause */
         }
@@ -800,6 +807,7 @@ static void ui_task(void *arg)
     dark = theme_mode == 2 ? lights : theme_mode;
     apply_backlight();
     plat_ui_night(lights);
+    plat_ui_volume(volume);
     apply_theme();
     build_home();
     build_aa();

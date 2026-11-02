@@ -17,7 +17,8 @@ void ui_aa_session(int active);                 /* a phone's video started (1) o
 int ui_aa_visible(void);                        /* the AA view is up: show its video, send it the touches */
 
 /* hooks the UI calls (net.c); run on the UI task, so they must only queue work for the net task */
-void plat_ui_mute(int on);
+void plat_ui_mute(int on);                      /* MCU system mute and the DSP master mute */
+void plat_ui_volume(int index);                 /* 0..40 (audio.c) */
 void plat_ui_reboot(void);
 void plat_ui_boot_stock(void);
 void plat_ui_aa_key(int keycode);               /* 4 BACK */
