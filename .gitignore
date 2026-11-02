@@ -28,3 +28,4 @@ isp/sd-10-net/mbedtls.a
 
 # brainstorming mockups
 .superpowers/
+tools/ha.env
