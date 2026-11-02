@@ -170,4 +170,15 @@ int aa_tcp_connect(const struct aa_platform *p, unsigned int ip_be, int port)
 }
 
 int aa_tcp_connected(void) { return conn != 0; }
+
+void aa_tcp_close(void)   /* end the session from our side (the phone sees a reset) */
+{
+    struct tcp_pcb *pcb = conn;
+    if (!pcb)
+        return;
+    tcp_arg(pcb, 0), tcp_recv(pcb, 0), tcp_sent(pcb, 0), tcp_err(pcb, 0);
+    conn = 0;
+    tcp_abort(pcb);
+    aa_closed();
+}
 unsigned int aa_tcp_tx_drops(void) { return tx_drops; }

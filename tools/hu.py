@@ -239,8 +239,8 @@ def main():
     p = sub.add_parser('vdec', help='hardware H.264 decoder bring-up: status | init | bitread FILE.h264')
     p.add_argument('what', choices=['status', 'init', 'bitread', 'decode', 'spmp', 'prepare']); p.add_argument('file', nargs='?')
     p.add_argument('--pics', type=int, default=1, help='decode: pictures to decode (0: all)'); p.add_argument('--skip', type=lambda x: int(x, 0), default=0)
-    p = sub.add_parser('aa', help='wireless Android Auto: status | start [PORT] | connect PHONE_IP[:PORT] (cert/key from AACERT.PEM / AAKEY.PEM on the card)')
-    p.add_argument('what', choices=['status', 'start', 'connect']); p.add_argument('target', nargs='?', default='5288'); p.add_argument('extra', nargs='*')
+    p = sub.add_parser('aa', help='wireless Android Auto: status | start [PORT] | stop | connect PHONE_IP[:PORT] (cert/key from AACERT.PEM / AAKEY.PEM on the card)')
+    p.add_argument('what', choices=['status', 'start', 'connect', 'stop']); p.add_argument('target', nargs='?', default='5288'); p.add_argument('extra', nargs='*')
     p = sub.add_parser('vpp', help='VPP0 video layer tests: status | bars [SECS [SLOT]] | show [SECS [SLOT]] | restore | poke ADDR VAL | probe MASK [PATH] (notes/vpp0_display.md round 2; restore afterwards)')
     p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk', 'bisect', 'probe', 'bitscan', 'fetchtest', 'fresh', 'safe', 'replay', 'frame', 'hide', 'aavideo']); p.add_argument('args', nargs='*')
     p = sub.add_parser('osdvid', help='video through the OSD layer: status | show [SECS] | on | off | fast 0|1 | every MS/10')
@@ -365,6 +365,8 @@ def main():
             payload = bytes([2]) + bytes(int(x) for x in host.split('.')) + struct.pack('<H', int(port or 5277))
             if a.extra:   # VER_MINOR AUDIO_MASK [HD] (audio bit 0 media, 1 speech, 2 system, 0x80 microphone; HD 1 = 1280x720 with margins)
                 payload += bytes(int(x, 0) for x in a.extra[:4])   # 4th: 1 = touchscreen declared as the 1024x600 panel
+        elif a.what == 'stop':
+            payload = bytes([3])
         else:
             payload = bytes([0])
         print(u.call(OP_AA, payload).decode(errors='replace'))

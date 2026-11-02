@@ -3586,6 +3586,11 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         aa_listening = port;
         return vfmt_n(t, "aa: listening on TCP %d (cert %u B, key %u B, %d dpi); %s", port, cl, kl, pf.dpi, vm);
     }
+    if (c == 3) {   /* stop: close the session (the listener stays) */
+        int was = aa_tcp_connected();
+        aa_tcp_close();
+        return vfmt_n(t, "aa: %s", was ? "session closed" : "no session");
+    }
     static const char *const names[] = { "idle", "version", "tls", "authed", "discovery", "running", "closed", "error" };
     unsigned int luma = 0, chroma = 0;
     int slot = vdec_last_slot(&luma, &chroma);
