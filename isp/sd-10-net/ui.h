@@ -6,6 +6,7 @@
 
 void ui_start(unsigned int fb_addr);            /* create the UI task (after the scheduler's other tasks) */
 int ui_running(void);                           /* the UI owns the OSD0 framebuffer (the text console stays off) */
+int ui_console_active(void);                    /* the user opened the text console: it draws, the UI does not */
 
 /* input, from the touch task */
 void ui_pointer(int action, unsigned x, unsigned y);   /* 0 down, 1 up, 2 move; panel pixels */

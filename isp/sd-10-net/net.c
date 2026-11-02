@@ -4043,9 +4043,16 @@ extern uint8_t ucHeap[];
 /* Screen: status panel and log tail, redrawn every 500 ms or within 50 ms of a `fb_last = 0` kick. No U-Boot calls. */
 static void console_task(void *arg)
 {
+    int was = 1;
     for (;;) {
         con_lock_take();
-        if (!ui_running())   /* the UI owns the framebuffer once it runs */
+        int want = !ui_running() || ui_console_active();   /* the UI owns the framebuffer unless the console was opened */
+        if (want && !was) {
+            con_init((unsigned int *)FB_ADDR);   /* the UI drew over it: start from a clean console */
+            fb_last = 0;
+        }
+        was = want;
+        if (want)
             console_poll();
         con_lock_give();
         vTaskDelay(pdMS_TO_TICKS(50));

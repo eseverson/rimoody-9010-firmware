@@ -28,9 +28,9 @@ static volatile int aa_view;
 static int aa_enabled = 1;
 static int volume = 20, muted, dark = 1;
 
-static lv_obj_t *scr_home, *scr_aa, *scr_settings, *scr_console, *scr_wifi;
+static lv_obj_t *scr_home, *scr_aa, *scr_settings, *scr_wifi;
 static lv_obj_t *wifi_ssid, *wifi_psk, *wifi_kb, *wifi_msg;
-static lv_obj_t *settings_list, *aa_card, *console_label, *status_label, *vol_panel, *vol_bar, *vol_icon, *vol_num;
+static lv_obj_t *aa_card, *status_label, *vol_panel, *vol_bar, *vol_icon, *vol_num;
 static lv_timer_t *vol_timer;
 static lv_obj_t *dialog;   /* an open confirmation; any navigation closes it */
 
@@ -122,6 +122,7 @@ static void pointer_cb(lv_indev_t *i, lv_indev_data_t *d)
 static void show_home(void);
 static void show_aa(void);
 static void show_settings(void);
+static void show_console(void);
 
 static lv_obj_t *screen(int black)
 {
@@ -142,7 +143,7 @@ static void dock_cb(lv_event_t *e)
     else if (which == 1)
         show_settings();
     else
-        lv_screen_load(scr_console);
+        show_console();
 }
 
 static lv_obj_t *logo(lv_obj_t *parent, lv_opa_t opa)
@@ -218,21 +219,81 @@ static void aa_switch_cb(lv_event_t *e)
 
 static void bright_cb(lv_event_t *e) { plat_ui_brightness(lv_slider_get_value(lv_event_get_target(e))); }
 
+/* ---- colours: explicit per mode (the owner found light mode too low in contrast with translucent text) ---- */
+
+static lv_style_t st_scr, st_row, st_section, st_nav, st_nav_sel, st_title;
+
+static void style_colors(void)
+{
+    lv_color_t scr = dark ? lv_color_hex(0x15171a) : lv_color_hex(0xd9dde3);
+    lv_color_t row_bg = dark ? lv_color_hex(0x272a30) : lv_color_hex(0xffffff);
+    lv_color_t border = dark ? lv_color_hex(0x3b3f47) : lv_color_hex(0xaab2bd);
+    lv_color_t text = dark ? lv_color_hex(0xf2f2f2) : lv_color_hex(0x101214);
+    lv_color_t muted = dark ? lv_color_hex(0xa7adb5) : lv_color_hex(0x3f4650);
+    lv_style_set_bg_color(&st_scr, scr);
+    lv_style_set_bg_opa(&st_scr, LV_OPA_COVER);
+    lv_style_set_text_color(&st_scr, text);
+    lv_style_set_bg_color(&st_row, row_bg);
+    lv_style_set_bg_opa(&st_row, LV_OPA_COVER);
+    lv_style_set_border_color(&st_row, border);
+    lv_style_set_border_width(&st_row, 1);
+    lv_style_set_radius(&st_row, 10);
+    lv_style_set_text_color(&st_row, text);
+    lv_style_set_text_color(&st_section, muted);
+    lv_style_set_text_font(&st_section, &lv_font_montserrat_14);
+    lv_style_set_text_color(&st_title, text);
+    lv_style_set_text_font(&st_title, &lv_font_montserrat_28);
+    lv_style_set_bg_opa(&st_nav, LV_OPA_TRANSP);
+    lv_style_set_shadow_width(&st_nav, 0);
+    lv_style_set_text_color(&st_nav, text);
+    lv_style_set_radius(&st_nav, 10);
+    lv_style_set_bg_color(&st_nav_sel, lv_palette_main(LV_PALETTE_BLUE));
+    lv_style_set_bg_opa(&st_nav_sel, LV_OPA_COVER);
+    lv_style_set_text_color(&st_nav_sel, lv_color_white());
+}
+
 static void apply_theme(void)
 {
+    static int inited;
+    if (!inited) {
+        lv_style_init(&st_scr), lv_style_init(&st_row), lv_style_init(&st_section);
+        lv_style_init(&st_nav), lv_style_init(&st_nav_sel), lv_style_init(&st_title);
+        inited = 1;
+    }
     lv_display_t *d = lv_display_get_default();
     lv_theme_t *t = lv_theme_default_init(d, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_GREY), dark,
                                           &lv_font_montserrat_20);
     lv_display_set_theme(d, t);
+    style_colors();
     /* the bottom layer is created like a screen and picks up the theme's opaque screen colour; it must stay
      * transparent so a transparent screen (the AA view) shows the video on VPP0 */
     lv_obj_set_style_bg_opa(lv_layer_bottom(), LV_OPA_TRANSP, 0);
+    lv_obj_report_style_change(0);
 }
 
 static void dark_cb(lv_event_t *e)
 {
     dark = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
     apply_theme();
+}
+
+/* ---- console mode: the original text console (console.c, drawn by net.c's console task) takes the panel; the UI
+ * stops drawing until Home, Back or a tap ---- */
+
+static volatile int console_on;
+int ui_console_active(void) { return console_on; }
+
+static void show_console(void)
+{
+    dialog_close();
+    console_on = 1;
+}
+
+static void leave_console(void)
+{
+    console_on = 0;
+    lv_obj_invalidate(lv_screen_active());   /* the console drew over everything */
+    lv_obj_invalidate(lv_layer_top());
 }
 
 static void cancel_cb(lv_event_t *e)
@@ -255,7 +316,7 @@ static void sys_cb(lv_event_t *e)   /* restart / stock firmware: ask first, a st
 {
     int which = (int)(intptr_t)lv_event_get_user_data(e);
     if (which == 2) {
-        lv_screen_load(scr_console);
+        show_console();
         return;
     }
     dialog_close();
@@ -270,10 +331,12 @@ static void sys_cb(lv_event_t *e)   /* restart / stock firmware: ask first, a st
     lv_obj_add_event_cb(no, cancel_cb, LV_EVENT_CLICKED, 0);
 }
 
-static lv_obj_t *row(lv_obj_t *list, const char *text)
+static lv_obj_t *row(lv_obj_t *page, const char *text)
 {
-    lv_obj_t *r = lv_obj_create(list);
+    lv_obj_t *r = lv_obj_create(page);
+    lv_obj_add_style(r, &st_row, 0);
     lv_obj_set_size(r, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(r, 72, 0);
     lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(r, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
@@ -285,13 +348,13 @@ static lv_obj_t *row(lv_obj_t *list, const char *text)
     return r;
 }
 
-static void section(lv_obj_t *list, const char *text)
+static void note(lv_obj_t *page, const char *text)
 {
-    lv_obj_t *l = lv_label_create(list);
+    lv_obj_t *l = lv_label_create(page);
     lv_label_set_text(l, text);
-    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_opa(l, LV_OPA_60, 0);
-    lv_obj_set_style_pad_top(l, 12, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_obj_add_style(l, &st_section, 0);
 }
 
 static void wifi_ta_cb(lv_event_t *e)   /* the keyboard types into whichever field was tapped */
@@ -333,9 +396,10 @@ static void wifi_open_cb(lv_event_t *e)
 static void build_wifi(void)
 {
     scr_wifi = screen(0);
+    lv_obj_add_style(scr_wifi, &st_scr, 0);
     lv_obj_t *t = lv_label_create(scr_wifi);
     lv_label_set_text(t, "Wi-Fi network");
-    lv_obj_set_style_text_font(t, &lv_font_montserrat_28, 0);
+    lv_obj_add_style(t, &st_title, 0);
     lv_obj_align(t, LV_ALIGN_TOP_LEFT, 32, 16);
     wifi_ssid = lv_textarea_create(scr_wifi);
     lv_textarea_set_one_line(wifi_ssid, true);
@@ -353,8 +417,7 @@ static void build_wifi(void)
     lv_obj_align(wifi_psk, LV_ALIGN_TOP_RIGHT, -32, 66);
     lv_obj_add_event_cb(wifi_psk, wifi_ta_cb, LV_EVENT_FOCUSED, 0);
     wifi_msg = lv_label_create(scr_wifi);
-    lv_obj_set_style_text_font(wifi_msg, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_opa(wifi_msg, LV_OPA_70, 0);
+    lv_obj_add_style(wifi_msg, &st_section, 0);
     lv_obj_align(wifi_msg, LV_ALIGN_TOP_LEFT, 32, 124);
     wifi_kb = lv_keyboard_create(scr_wifi);
     lv_obj_set_size(wifi_kb, PANEL_W, 400);
@@ -362,99 +425,129 @@ static void build_wifi(void)
     lv_obj_add_event_cb(wifi_kb, wifi_kb_cb, LV_EVENT_ALL, 0);
 }
 
+/* ---- settings: categories down the left, one page each that fits without scrolling (scrolling a full-height list
+ * is choppy on this CPU, and a car screen should not need it) ---- */
+
+#define NPAGES 5
+static lv_obj_t *pages[NPAGES], *navs[NPAGES];
+
+static void show_page(int i)
+{
+    for (int k = 0; k < NPAGES; k++) {
+        if (k == i) {
+            lv_obj_remove_flag(pages[k], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_state(navs[k], LV_STATE_CHECKED);
+        } else {
+            lv_obj_add_flag(pages[k], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_state(navs[k], LV_STATE_CHECKED);
+        }
+    }
+}
+
+static void nav_cb(lv_event_t *e) { show_page((int)(intptr_t)lv_event_get_user_data(e)); }
+
+static lv_obj_t *page(lv_obj_t *parent, int i, const char *name, lv_obj_t *nav)
+{
+    lv_obj_t *b = navs[i] = lv_button_create(nav);
+    lv_obj_add_style(b, &st_nav, 0);
+    lv_obj_add_style(b, &st_nav_sel, LV_STATE_CHECKED);
+    lv_obj_set_size(b, LV_PCT(100), 64);
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, name);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_add_event_cb(b, nav_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    lv_obj_t *p = pages[i] = lv_obj_create(parent);
+    lv_obj_remove_style_all(p);
+    lv_obj_set_size(p, PANEL_W - 300, PANEL_H - 40);
+    lv_obj_align(p, LV_ALIGN_TOP_LEFT, 280, 20);
+    lv_obj_set_flex_flow(p, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(p, 12, 0);
+    lv_obj_remove_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+    return p;
+}
+
 static void build_settings(void)
 {
     scr_settings = screen(0);
-    lv_obj_t *title = lv_label_create(scr_settings);
+    lv_obj_add_style(scr_settings, &st_scr, 0);
+    lv_obj_t *nav = lv_obj_create(scr_settings);
+    lv_obj_remove_style_all(nav);
+    lv_obj_set_size(nav, 240, PANEL_H - 40);
+    lv_obj_align(nav, LV_ALIGN_TOP_LEFT, 20, 20);
+    lv_obj_set_flex_flow(nav, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(nav, 6, 0);
+    lv_obj_remove_flag(nav, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *title = lv_label_create(nav);
     lv_label_set_text(title, "Settings");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 32, 20);
-    lv_obj_t *list = settings_list = lv_obj_create(scr_settings);
-    lv_obj_set_size(list, PANEL_W - 64, PANEL_H - 90);
-    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 74);
-    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(list, 8, 0);
-    lv_obj_set_style_border_width(list, 0, 0);
-    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_add_style(title, &st_title, 0);
+    lv_obj_set_style_pad_bottom(title, 14, 0);
 
-    section(list, "NETWORK");
-    lv_obj_t *r = row(list, "Wi-Fi");
+    lv_obj_t *p = page(scr_settings, 0, "Network", nav);
+    lv_obj_t *r = row(p, "Wi-Fi");
     status_label = lv_label_create(r);
     lv_label_set_text(status_label, "");
-    lv_obj_set_flex_grow(status_label, 1);
-    lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_pad_right(status_label, 16, 0);
     lv_obj_t *wb = lv_button_create(r);
     lv_label_set_text(lv_label_create(wb), "Change");
     lv_obj_add_event_cb(wb, wifi_open_cb, LV_EVENT_CLICKED, 0);
+    note(p, "Change saves the network to WIFI.TXT on the SD card and restarts the unit.");
 
-    section(list, "ANDROID AUTO");
-    r = row(list, "Enabled");
+    p = page(scr_settings, 1, "Android Auto", nav);
+    r = row(p, "Enabled");
     lv_obj_t *sw = lv_switch_create(r);
     if (aa_enabled)
         lv_obj_add_state(sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(sw, aa_switch_cb, LV_EVENT_VALUE_CHANGED, 0);
+    note(p, "When enabled, the unit switches to Android Auto as soon as the phone's video starts.");
 
-    section(list, "DISPLAY");
-    r = row(list, "Brightness");
+    p = page(scr_settings, 2, "Display", nav);
+    r = row(p, "Brightness");
     lv_obj_t *sl = lv_slider_create(r);
-    lv_obj_set_width(sl, 360);
+    lv_obj_set_width(sl, 320);
     lv_slider_set_range(sl, 10, 100);
     lv_slider_set_value(sl, 80, LV_ANIM_OFF);
     lv_obj_add_event_cb(sl, bright_cb, LV_EVENT_RELEASED, 0);
-    r = row(list, "Dark mode");
+    r = row(p, "Dark mode");
     sw = lv_switch_create(r);
     if (dark)
         lv_obj_add_state(sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(sw, dark_cb, LV_EVENT_VALUE_CHANGED, 0);
+    note(p, "Brightness is not connected to the backlight yet.");
 
-    section(list, "AUDIO");
-    row(list, "Equalizer: after audio output is built");
+    p = page(scr_settings, 3, "Audio", nav);
+    row(p, "Equalizer");
+    note(p, "Comes with audio output (not built yet).");
 
-    section(list, "SYSTEM");
-    r = row(list, "Restart the head unit");
+    p = page(scr_settings, 4, "System", nav);
+    r = row(p, "Restart the head unit");
     lv_obj_t *b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Reboot");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)0);
-    r = row(list, "Log console");
+    r = row(p, "Log console (Home or Back returns)");
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Open");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)2);
-    r = row(list, "Start the original firmware once");
+    r = row(p, "Start the original firmware once");
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Boot stock");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)1);
     static char inst[120];
     plat_ui_install_status(inst, sizeof inst);
-    r = row(list, inst);
+    r = row(p, inst);
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Install to flash");
     lv_obj_add_state(b, LV_STATE_DISABLED);   /* stub: writing the app into NOR permanently is not built yet */
+    show_page(0);
 }
 
-static void console_timer(lv_timer_t *t)
+static void status_timer(lv_timer_t *t)
 {
     (void)t;
-    static char buf[2400];
-    if (lv_screen_active() == scr_console) {
-        plat_ui_console(buf, sizeof buf);
-        lv_label_set_text(console_label, buf);
-    }
+    static char buf[200];
     if (lv_screen_active() == scr_settings) {
-        plat_ui_status(buf, 200);
+        plat_ui_status(buf, sizeof buf);
         lv_label_set_text(status_label, buf);
     }
-}
-
-static void build_console(void)
-{
-    scr_console = screen(1);
-    console_label = lv_label_create(scr_console);
-    lv_obj_set_width(console_label, PANEL_W - 32);
-    lv_obj_set_style_text_font(console_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(console_label, lv_color_hex(0xc0c0c0), 0);
-    lv_obj_align(console_label, LV_ALIGN_BOTTOM_LEFT, 16, -8);
-    lv_label_set_text(console_label, "");
 }
 
 /* ---- volume overlay on the top layer: over every screen, including the video ---- */
@@ -520,7 +613,7 @@ static void show_home(void)
 static void show_settings(void)
 {
     dialog_close();
-    lv_obj_scroll_to_y(settings_list, 0, LV_ANIM_OFF);   /* always opens at the top */
+    show_page(0);   /* always opens on the first page */
     lv_screen_load(scr_settings);
 }
 
@@ -543,6 +636,12 @@ static unsigned int vol_at;
 static void on_button(int b, int pressed)
 {
     unsigned int now = tick_cb();
+    if (console_on && pressed && (b == 2 || b == 3)) {   /* Home / Back leave the text console */
+        leave_console();
+        if (b == 2)
+            show_home();
+        return;
+    }
     if (b == 1) {
         if (pressed) {
             btn1_at = now, btn1_fired = 0;
@@ -612,10 +711,9 @@ static void ui_task(void *arg)
     build_home();
     build_aa();
     build_settings();
-    build_console();
     build_wifi();
     build_volume();
-    lv_timer_create(console_timer, 500, 0);
+    lv_timer_create(status_timer, 500, 0);
     lv_screen_load(scr_home);
     running = 1;
     int seen = 0;
@@ -624,6 +722,15 @@ static void ui_task(void *arg)
         while (xQueueReceive(btn_q, &e, 0) == pdTRUE)
             on_button(e >> 1, e & 1);
         poll_held();
+        if (console_on) {   /* the text console owns the panel: no LVGL drawing; a tap (on release) comes back */
+            static int was_down;
+            if (ptr_down)
+                was_down = 1;
+            else if (was_down)
+                was_down = 0, leave_console();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         if (seen != aa_session_seen) {   /* a phone came or went */
             seen = aa_session_seen;
             if (aa_session && aa_enabled)
