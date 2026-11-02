@@ -30,8 +30,16 @@ static int volume = 20, muted, dark = 1;
 
 static lv_obj_t *scr_home, *scr_aa, *scr_settings, *scr_console, *scr_wifi;
 static lv_obj_t *wifi_ssid, *wifi_psk, *wifi_kb, *wifi_msg;
-static lv_obj_t *aa_card, *console_label, *status_label, *vol_panel, *vol_bar, *vol_icon, *vol_num;
+static lv_obj_t *settings_list, *aa_card, *console_label, *status_label, *vol_panel, *vol_bar, *vol_icon, *vol_num;
 static lv_timer_t *vol_timer;
+static lv_obj_t *dialog;   /* an open confirmation; any navigation closes it */
+
+static void dialog_close(void)
+{
+    if (dialog)
+        lv_msgbox_close(dialog);
+    dialog = 0;
+}
 
 int ui_running(void) { return running; }
 int ui_aa_visible(void) { return aa_view && aa_session; }
@@ -81,11 +89,21 @@ static void dcache_wb_range(unsigned int a, unsigned int n)
         __asm__ volatile("cctl %0, L1D_VA_WB" ::"r"(p) : "memory");
 }
 
+/* LVGL renders each dirty area completely in an off-screen buffer; only finished pixels are copied into the
+ * framebuffer OSD0 scans, so a scroll never shows a half-drawn row (owner: settings flashed while scrolling) */
+#define DRAW_BUF 0x02B00000u   /* free DRAM after the LVGL heap (0x02A00000, 1 MB), before the EXEC trampoline */
+#define DRAW_ROWS 120
 static void flush_cb(lv_display_t *d, const lv_area_t *a, uint8_t *px)
 {
-    (void)px;
-    for (int y = a->y1; y <= a->y2; y++)
-        dcache_wb_range(fb + ((unsigned int)y * PANEL_W + (unsigned int)a->x1) * 4, (unsigned int)(a->x2 - a->x1 + 1) * 4);
+    unsigned int w = (unsigned int)(a->x2 - a->x1 + 1);
+    const unsigned int *src = (const unsigned int *)px;
+    for (int y = a->y1; y <= a->y2; y++) {
+        volatile unsigned int *dst = (volatile unsigned int *)(fb + ((unsigned int)y * PANEL_W + (unsigned int)a->x1) * 4);
+        for (unsigned int i = 0; i < w; i++)
+            dst[i] = src[i];
+        src += w;
+        dcache_wb_range((unsigned int)dst, w * 4);
+    }
     __asm__ volatile("msync all" ::: "memory");
     lv_display_flush_ready(d);
 }
@@ -103,6 +121,7 @@ static void pointer_cb(lv_indev_t *i, lv_indev_data_t *d)
 
 static void show_home(void);
 static void show_aa(void);
+static void show_settings(void);
 
 static lv_obj_t *screen(int black)
 {
@@ -121,7 +140,7 @@ static void dock_cb(lv_event_t *e)
     if (which == 0)
         show_aa();
     else if (which == 1)
-        lv_screen_load(scr_settings);
+        show_settings();
     else
         lv_screen_load(scr_console);
 }
@@ -216,13 +235,39 @@ static void dark_cb(lv_event_t *e)
     apply_theme();
 }
 
-static void sys_cb(lv_event_t *e)
+static void cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    dialog_close();
+}
+
+static void confirm_cb(lv_event_t *e)
 {
     int which = (int)(intptr_t)lv_event_get_user_data(e);
+    dialog_close();
     if (which == 0)
         plat_ui_reboot();
     else if (which == 1)
         plat_ui_boot_stock();
+}
+
+static void sys_cb(lv_event_t *e)   /* restart / stock firmware: ask first, a stray tap must not restart the unit */
+{
+    int which = (int)(intptr_t)lv_event_get_user_data(e);
+    if (which == 2) {
+        lv_screen_load(scr_console);
+        return;
+    }
+    dialog_close();
+    lv_obj_t *mb = dialog = lv_msgbox_create(0);
+    lv_obj_set_width(mb, 560);
+    lv_msgbox_add_title(mb, which == 0 ? "Restart the head unit?" : "Start the original firmware?");
+    lv_msgbox_add_text(mb, which == 0 ? "It comes back in about 15 seconds."
+                                      : "It runs until the next ignition cycle, then this app starts again.");
+    lv_obj_t *ok = lv_msgbox_add_footer_button(mb, which == 0 ? "Restart" : "Start it");
+    lv_obj_add_event_cb(ok, confirm_cb, LV_EVENT_CLICKED, (void *)(intptr_t)which);
+    lv_obj_t *no = lv_msgbox_add_footer_button(mb, "Cancel");
+    lv_obj_add_event_cb(no, cancel_cb, LV_EVENT_CLICKED, 0);
 }
 
 static lv_obj_t *row(lv_obj_t *list, const char *text)
@@ -324,7 +369,7 @@ static void build_settings(void)
     lv_label_set_text(title, "Settings");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 32, 20);
-    lv_obj_t *list = lv_obj_create(scr_settings);
+    lv_obj_t *list = settings_list = lv_obj_create(scr_settings);
     lv_obj_set_size(list, PANEL_W - 64, PANEL_H - 90);
     lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 74);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
@@ -371,6 +416,10 @@ static void build_settings(void)
     lv_obj_t *b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Reboot");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)0);
+    r = row(list, "Log console");
+    b = lv_button_create(r);
+    lv_label_set_text(lv_label_create(b), "Open");
+    lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)2);
     r = row(list, "Start the original firmware once");
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Boot stock");
@@ -460,11 +509,19 @@ static void vol_show(void)
 
 static void show_home(void)
 {
+    dialog_close();
     if (aa_view) {
         aa_view = 0;
         plat_ui_video_hide();
     }
     lv_screen_load(scr_home);
+}
+
+static void show_settings(void)
+{
+    dialog_close();
+    lv_obj_scroll_to_y(settings_list, 0, LV_ANIM_OFF);   /* always opens at the top */
+    lv_screen_load(scr_settings);
 }
 
 static void show_aa(void)
@@ -502,7 +559,7 @@ static void on_button(int b, int pressed)
         if (ui_aa_visible())
             plat_ui_aa_key(4);
         else if (lv_screen_active() == scr_wifi)
-            lv_screen_load(scr_settings);
+            lv_screen_load(scr_settings);   /* keeps its scroll position: coming back from a sub-screen */
         else if (lv_screen_active() != scr_home)
             show_home();
     } else if (b == 4 || b == 5) {
@@ -546,7 +603,7 @@ static void ui_task(void *arg)
     lv_tick_set_cb(tick_cb);
     lv_display_t *d = lv_display_create(PANEL_W, PANEL_H);
     lv_display_set_color_format(d, LV_COLOR_FORMAT_ARGB8888);
-    lv_display_set_buffers(d, (void *)fb, 0, PANEL_W * PANEL_H * 4, LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_display_set_buffers(d, (void *)DRAW_BUF, 0, PANEL_W * DRAW_ROWS * 4, LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(d, flush_cb);
     lv_indev_t *in = lv_indev_create();
     lv_indev_set_type(in, LV_INDEV_TYPE_POINTER);

@@ -3263,6 +3263,10 @@ static void aa_touch_hook(int action, unsigned x, unsigned y);
 static int aa_touch_on;
 static void touch_route(int action, unsigned x, unsigned y)   /* gt9_hook, touch task: AA view -> the phone, else the UI */
 {
+    /* the GT911's X axis runs right to left relative to the display (owner, 2026-11-02: the dock's left and right
+     * buttons swapped); the front-button strip past x 1024 is handled in gt9.c before this hook */
+    if (x < 1024)
+        x = 1023 - x;
     if (ui_aa_visible() || (!ui_running() && aa_touch_on))
         aa_touch_hook(action, x, y);
     else if (ui_running())
