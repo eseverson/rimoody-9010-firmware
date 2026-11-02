@@ -230,6 +230,81 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
                      R(0x9c0057fc) & 3, R(0x9c005e58), R(0x9c006c9c));
         }
         return k;
+    } else if (c == 12 && n >= 5) {   /* fresh test, one per full reset (a DDFCH AXI error is sticky). Refuses to run when the
+                                        * error flags are already set. p[1] flags: b0 real data (BIST off), b1 frame mode (0x7DC
+                                        * b4 = b5 = 0, one-frame BIST), b2 index mode (BG2D entries 0x40/0x41, gp 2, need `vdec
+                                        * init` first), b3 no fetch enable (BIST alone), b4 direct mode (0x780 = 0), b5 1024x600
+                                        * unscaled, b6 fetch enable before the addresses. p[2] where: 0 Y 0x04600000 / C +1.5 MB,
+                                        * 1 C = Y, 2 Y 0x03700000 / C 0x03800000. p[3..4] 0x7D0 (0 = 1920). Then pokes of 12 bytes
+                                        * (addr, mask, value, LE), applied before the fetch enable. After the commit, a trace of
+                                        * TGEN0 line / frame against every change of the DDFCH flags and checksum, VSCL and DMIX
+                                        * checksums, 0x7F4 and 0x7FC, for 6 frames. No restore. */
+        u32 fl = p[1], where = p[2], pitch = p[3] | (u32)p[4] << 8;
+        if (R(0x9c0057ec))
+            return fmt(o, "ERR fresh: DDFCH flags already %x, reset first (hu.py irq hwwdt)", R(0x9c0057ec));
+        int full = fl & 32;
+        u32 w = full ? 1024 : 800, h = full ? 600 : 480;
+        u32 Y = where == 2 ? 0x03700000u : 0x04600000u, C = where == 1 ? Y : where == 2 ? 0x03800000u : Y + 0x180000u;
+        save();
+        init_fetch(w, h, pitch ? pitch : 1920);
+        if (fl & 2)
+            setbits(0x9c0057dc, 3u << 4, 0);
+        if (fl & 16)
+            R(0x9c005780) = 0;
+        if (fl & 64)
+            setbits(0x9c005788, 0x1c, 0x10);
+        u32 ly = Y >> 10, lc = C >> 10;
+        if (fl & 4) {   /* eCos's display entries: address >> 10, gp 2 (pitch slot 2), progressive scan bits */
+            R(0x9c00a400 + 4 * 0x40) = ly | 2u << 19 | 1u << 22 | 1u << 24 | 2u << 25;
+            R(0x9c00a400 + 4 * 0x41) = lc | 2u << 19 | 1u << 22 | 1u << 24 | 2u << 25;
+            setbits(0x9c005784, 1u << 28 | 1u << 20 | 1u << 21 | 1u << 8, 1u << 20 | 1u << 8);
+            ly = 0x40, lc = 0x41;
+        } else {
+            setbits(0x9c005784, 1u << 28 | 1u << 20, 0);
+        }
+        R(0x9c005798) = R(0x9c00579c) = R(0x9c0057a0) = ly;
+        R(0x9c0057a4) = R(0x9c0057a8) = R(0x9c0057ac) = lc;
+        R(0x9c0057f0) = (fl & 1) ? 0x80801002 : (fl & 2) ? 0x80801013 : 0x80801011;
+        setbits(0x9c006c84, 0xfu, 2u | 1u << 2);   /* VPP0 opaque, OSD0 transparent */
+        int np = 0;
+        for (int i = 5; i + 12 <= n && np < 16; i += 12, np++) {
+            u32 a = p[i] | (u32)p[i + 1] << 8 | (u32)p[i + 2] << 16 | (u32)p[i + 3] << 24;
+            u32 m = p[i + 4] | (u32)p[i + 5] << 8 | (u32)p[i + 6] << 16 | (u32)p[i + 7] << 24;
+            u32 v = p[i + 8] | (u32)p[i + 9] << 8 | (u32)p[i + 10] << 16 | (u32)p[i + 11] << 24;
+            if ((a & 3) || a < 0x9c000000u || a >= 0x9c010000u)
+                return fmt(o, "ERR fresh: poke %x outside 0x9C000000..0x9C00FFFF", a);
+            setbits(a, m, v);
+        }
+        int k = fmt(o, "fresh fl %x Y %x C %x %ux%u pitch %u pokes %d: 784 %x 788 %x 7dc %x 7f0 %x, before flags %x;", fl, Y, C, w,
+                    h, R(0x9c0057d0), np, R(0x9c005784), R(0x9c005788), R(0x9c0057dc), R(0x9c0057f0), R(0x9c0057ec));
+        if (!(fl & 8) && !(fl & 64))
+            setbits(0x9c005788, 0x1c, 0x10);
+        R(0x9c005a80) |= 1;
+        /* trace: an event whenever a watched value changes or TGEN0's line counter wraps (new frame) */
+        u32 prev[6] = { ~0u, ~0u, ~0u, ~0u, ~0u, ~0u }, pl = R(0x9c006ab4) & 0xfff, frame = 0, it = 0;
+        int ev = 0;
+        k += fmt(o + k, " start line %u;", pl);
+        u32 orf = 0, nchg = 0, nfr = (fl & 128) ? 12 : 6;   /* b7: summary, one line per frame (OR of flags, changes seen) */
+        while (frame < nfr && ++it < 40000000u && ev < 48) {
+            u32 ln = R(0x9c006ab4) & 0xfff;
+            u32 cur[6] = { R(0x9c0057ec), R(0x9c0057e8), R(0x9c005e58), R(0x9c006c9c), R(0x9c0057f4), R(0x9c0057fc) & 3 };
+            int wrap = ln < pl, chg = 0;
+            pl = ln;
+            if (wrap)
+                frame++;
+            for (int i = 0; i < 6; i++)
+                chg |= cur[i] != prev[i], prev[i] = cur[i];
+            orf |= cur[0], nchg += chg;
+            if ((fl & 128) && wrap) {
+                k += fmt(o + k, " F%u or %x chg %u ck %x v %x d %x;", frame, orf, nchg, cur[1], cur[2], cur[3]);
+                orf = 0, nchg = 0, ev++;
+            } else if (!(fl & 128) && (chg || wrap)) {
+                k += fmt(o + k, " %s%u.%u fl %x ck %x v %x d %x ax %x hs %x;", wrap ? "F" : "", frame, ln, cur[0], cur[1], cur[2], cur[3],
+                         cur[4], cur[5]);
+                ev++;
+            }
+        }
+        return k + fmt(o + k, " end it %u frames %u", it, frame);
     } else if (c == 10 && n >= 7) {   /* bit scan: p[1..4] register (LE), p[5] first bit, p[6] count. After the probe's step 1
                                         * (eCos init, DDFCH color bar, fetch on, VPP0 opaque), flip each bit alone for ~3 frames
                                         * and report every bit after which a stage shows data. `vpp restore` afterwards. */
