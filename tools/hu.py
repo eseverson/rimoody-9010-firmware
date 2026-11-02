@@ -240,8 +240,8 @@ def main():
     p.add_argument('what', choices=['status', 'start', 'connect']); p.add_argument('target', nargs='?', default='5288'); p.add_argument('extra', nargs='*')
     p = sub.add_parser('vpp', help='VPP0 video layer tests: status | bars [SECS [SLOT]] | show [SECS [SLOT]] | restore | poke ADDR VAL | probe MASK [PATH] (notes/vpp0_display.md round 2; restore afterwards)')
     p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk', 'bisect', 'probe']); p.add_argument('args', nargs='*')
-    p = sub.add_parser('osdvid', help='video through the OSD layer: status | show [SECS] | on | off')
-    p.add_argument('what', choices=['status', 'show', 'on', 'off']); p.add_argument('secs', nargs='?', type=int, default=0)
+    p = sub.add_parser('osdvid', help='video through the OSD layer: status | show [SECS] | on | off | fast 0|1 | every MS/10')
+    p.add_argument('what', choices=['status', 'show', 'on', 'off', 'fast', 'every']); p.add_argument('secs', nargs='?', type=int, default=0)
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -362,11 +362,13 @@ def main():
         c = {'status': 0, 'bars': 1, 'show': 2, 'restore': 3, 'poke': 4, 'clock': 5, 'linear': 6, 'gclk': 7, 'bisect': 8, 'probe': 9}[a.what]
         if c == 4:
             payload = bytes([4]) + struct.pack('<II', int(a.args[0], 0), int(a.args[1], 0))
+        elif c == 9:   # probe MASK [PATH]: 16-bit mask (vpp.c lists the bits), path for mask bit 4
+            payload = bytes([9]) + struct.pack('<H', int(a.args[0], 0)) + bytes([int(a.args[1], 0) if len(a.args) > 1 else 2])
         else:
             payload = bytes([c] + [int(x, 0) for x in a.args])
         print(u.call(OP_VPP, payload).decode(errors='replace'))
     elif a.op == 'osdvid':
-        c = {'status': 0, 'show': 1, 'on': 2, 'off': 3}[a.what]
+        c = {'status': 0, 'show': 1, 'on': 2, 'off': 3, 'fast': 4, 'every': 5}[a.what]
         print(u.call(OP_OSDVID, bytes([c, a.secs])).decode(errors='replace'))
     elif a.op == 'op':
         print(u.call(a.num, bytes.fromhex(a.payload)).decode(errors='replace'))

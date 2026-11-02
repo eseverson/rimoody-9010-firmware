@@ -21,8 +21,9 @@ static const struct { u32 base, n; } blocks[] = {
     { 0x9c005b34, 8 },
     { 0x9c006a80, 1 },    /* TGEN config (pokes) */
     { 0x9c006af4, 1 },    /* TGEN0 source select (probe) */
+    { 0x9c006adc, 1 },    /* TGEN0 adjust1 (probe) */
 };
-static u32 saved[32 + 1 + 48 + 4 + 1 + 12 + 19 + 2 + 2 + 1 + 1 + 1 + 8 + 1 + 1];
+static u32 saved[32 + 1 + 48 + 4 + 1 + 12 + 19 + 2 + 2 + 1 + 1 + 1 + 8 + 1 + 1 + 1];
 static int have_saved, active;
 
 static void save(void)
@@ -199,18 +200,26 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             k0++;
         return k0 + fmt(o + k0, "vpp linear: checksum %x -> %x, error flags %x -> %x, 7f4 %x 7f8 %x 7fc %x, 7bc %x 7c0 %x", c0,
                    R(0x9c0057e8), e0, R(0x9c0057ec), R(0x9c0057f4), R(0x9c0057f8), R(0x9c0057fc), R(0x9c0057bc), R(0x9c0057c0));
-    } else if (c == 9 && n >= 2) {   /* probe (static analysis round 2): where does VPP0's data path break? Samples the DDFCH
+    } else if (c == 9 && n >= 2) {   /* probe (static analysis rounds 2 and 3): where does VPP0's data path break? Samples the DDFCH
                                       * checksum (0x7E8), VSCL checksum (0x9C005E58, i143 G188.22) and DMIX checksum (0x9C006C9C)
-                                      * after each step; a nonzero value past a stage means that stage has data. p[1] mask:
+                                      * after each step; a nonzero value past a stage means that stage has data. p[1..2] mask (LE16), p[3] path:
                                       *  1 eCos-style init (init_fetch) + DDFCH color bar, VPP0 opaque, OSD0 transparent (DMIX only,
                                       *    the console stays on in software), commit
                                       *  2 TGEN0 source select 0x9C006AF4 field 0 (VPP0) <- 0 (eCos 0x52e5fc, SP7021 tgen_source_sel)
-                                      *  4 VSCL path select 0x9C005D84 [13:12] <- p[2] (i143: 0 VPPDMA, 1 OSD0, 2 DDFCH)
+                                      *  4 VSCL path select 0x9C005D84 [13:12] <- p[3] (i143: 0 VPPDMA, 1 OSD0, 2 DDFCH)
                                       *  8 VSCL color bar, 0x9C005D84 b7 (eCos pattern 0xE, i143 0x80)
                                       * 16 DDFCH latch_en off (0x9C005780 = 0) and the BIST register rewritten
                                       * 32 TGEN0 latch mode (0x9C006A80 = 7, SP7021 DRV_TGEN_Init)
+                                      * Round 3 (the scaler's own pattern reaches the mixer, nothing enters the scaler):
+                                      * 64 commit 0x9C005A80 b0 2000 times about one line apart (3 frames: every phase of the frame)
+                                      * 128 handoff written inside vblank: wait for TGEN0's line counter (+0x34 [11:0]) to pass the
+                                      *     field end line (+0x2C), then BIST on, fetch enable, commit
+                                      * 256 physical fetch, BIST off, from the OSD video buffer 0x07A00000 (a region OSD0 reads fine)
+                                      * 512 physical fetch, BIST off, from the decoder's slot 0 at 0x04600000 (tiled, pitch 1920)
+                                      * 1024 mode_option 0x784 = 0xF000 (the value found under U-Boot) then 0x5F000
+                                      * 2048 TGEN0 adjust1 0x9C006ADC = 0x100D (i143 DRV_TGEN_Init: [5:0] = 0xD added to U-Boot's 0x10)
                                       * No auto-restore (the reply must beat hu.py's 2 s timeout): `hu.py vpp restore` afterwards. */
-        u32 m = p[1], path = n >= 3 ? p[2] & 3 : 2;
+        u32 m = p[1] | (n >= 3 ? (u32)p[2] << 8 : 0), path = n >= 4 ? p[3] & 3 : 2;   /* mask is 16 bits (LE) */
         save();
         int k = fmt(o, "vpp probe %x: before AF4=%x D84=%x C80=%x C84=%x;", m, R(0x9c006af4), R(0x9c005d84), R(0x9c006c80),
                     R(0x9c006c84));
@@ -247,6 +256,52 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
         if (m & 32) {
             R(0x9c006a80) = 7;
             SAMPLE("tgen7");
+        }
+        if (m & 64) {
+            for (int j = 0; j < 2000; j++) {
+                R(0x9c005a80) |= 1;
+                for (volatile int i = 0; i < 500; i++)
+                    ;
+            }
+            SAMPLE("commits");
+        }
+        if (m & 128) {
+            u32 fe = R(0x9c006aac) & 0xfff, ln = 0, tries = 0;
+            do
+                ln = R(0x9c006ab4) & 0xfff;
+            while (ln < fe && ++tries < 2000000);
+            R(0x9c0057f0) = 0x80801011;
+            R(0x9c005788) |= 1u << 4;
+            R(0x9c005a80) |= 1;
+            k += fmt(o + k, " [vbl fe=%x line=%x tries=%u]", fe, ln, tries);
+            SAMPLE("vbl");
+        }
+        for (int t = 0; t < 2; t++) {
+            if (!(m & (256u << t)))
+                continue;
+            u32 Y = t ? 0x04600000u : 0x07a00000u, C = Y + 0x100000;
+            R(0x9c0057f0) = 0x80801002;              /* BIST off (SP7021 value) */
+            setbits(0x9c005784, 1u << 28 | 1u << 20, 0);
+            R(0x9c005798) = R(0x9c00579c) = R(0x9c0057a0) = Y >> 10;
+            R(0x9c0057a4) = R(0x9c0057a8) = R(0x9c0057ac) = C >> 10;
+            R(0x9c0057d0) = 1920;
+            R(0x9c0057d4) = 480u << 16 | 800;
+            R(0x9c005788) |= 1u << 4;
+            R(0x9c005a80) |= 1;
+            SAMPLE(t ? "memdpb" : "memosd");
+        }
+        if (m & 1024) {
+            R(0x9c005784) = 0xf000;
+            R(0x9c005a80) |= 1;
+            SAMPLE("mo_f000");
+            R(0x9c005784) = 0x5f000;
+            R(0x9c005a80) |= 1;
+            SAMPLE("mo_5f000");
+        }
+        if (m & 2048) {
+            R(0x9c006adc) = 0x100d;
+            R(0x9c005a80) |= 1;
+            SAMPLE("adj");
         }
 #undef SAMPLE
         active = 1;
