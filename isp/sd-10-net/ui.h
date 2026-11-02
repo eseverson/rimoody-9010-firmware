@@ -25,7 +25,9 @@ void plat_ui_boot_stock(void);
 void plat_ui_aa_key(int keycode);               /* 4 BACK */
 void plat_ui_aa_enable(int on);
 void plat_ui_bt_name(const char *name);         /* Bluetooth name, sent to the AC6965A (AC 19) */
-void plat_ui_aa_dpi(int dpi);                   /* Android Auto screen density, sent at the next connection */
+void plat_ui_aa_dpi(int dpi);
+void plat_ui_wifi_mode(int mode);               /* 0 auto (car network without the home Wi-Fi), 1 home only */
+void plat_ui_car_net(void);                     /* start the car network (own access point) now, until reboot */                   /* Android Auto screen density, sent at the next connection */
 void plat_ui_brightness(int percent);           /* backlight 0..100 (MCU ee frame) */
 int plat_ui_lights(void);                       /* the headlight input right now (1 = lights on); the UI debounces it */
 void plat_ui_night(int on);                     /* debounced headlights changed: Android Auto night mode */

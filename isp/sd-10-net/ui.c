@@ -27,6 +27,7 @@ static QueueHandle_t btn_q;
 static volatile int aa_session, aa_session_seen;
 static volatile int aa_view;
 static int aa_enabled = 1;
+static int wifi_mode;   /* 0 auto (car network when the home Wi-Fi is gone), 1 home network only */
 static int aa_dpi = 160;   /* screen density Android Auto lays its UI out for: lower = smaller elements, more map */
 #define AA_DPI_MIN 100
 #define BT_NAME_MAX 20
@@ -337,19 +338,22 @@ static void settings_load(void)
     aa_enabled = kv_int(settings_text, "aa", aa_enabled, 0, 1);
     aa_dpi = kv_int(settings_text, "aadpi", aa_dpi, AA_DPI_MIN, AA_DPI_MAX) / 10 * 10;
     kv_str(settings_text, "btname", bt_name, BT_NAME_MAX);
+    wifi_mode = kv_int(settings_text, "wifimode", wifi_mode, 0, 1);
     volume = kv_int(settings_text, "vol", volume, 0, VOL_MAX);
     boot_console = kv_int(settings_text, "boot", boot_console, 0, 1);
     kv_list(settings_text, "eq", eq_db, EQ_N, -12, 12);
     plat_ui_aa_enable(aa_enabled);
     plat_ui_aa_dpi(aa_dpi);
     plat_ui_bt_name(bt_name);
+    plat_ui_wifi_mode(wifi_mode);
 }
 
 static void settings_save(void)
 {
     char t[256];
-    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nbtname=%s\nvol=%d\nboot=%d\neq=",
-                        bright_day, bright_night, theme_mode, aa_enabled, aa_dpi, bt_name, volume, boot_console);
+    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nbtname=%s\nwifimode=%d\nvol=%d\nboot=%d\neq=",
+                        bright_day, bright_night, theme_mode, aa_enabled, aa_dpi, bt_name, wifi_mode, volume,
+                        boot_console);
     for (int i = 0; i < EQ_N; i++)
         k += lv_snprintf(t + k, sizeof t - (unsigned)k, "%d%s", eq_db[i], i < EQ_N - 1 ? "," : "\n");
     plat_ui_settings_save(t);
@@ -434,6 +438,21 @@ static void bright_cb(lv_event_t *e)
     else
         bright_day = v;
     apply_backlight();
+    settings_save();
+}
+
+/* Wi-Fi mode: Auto and Home are saved; Car starts the car network now, until the next boot */
+static void wifi_mode_cb(lv_event_t *e)
+{
+    uint32_t i = lv_buttonmatrix_get_selected_button(lv_event_get_target(e));
+    if (i > 2)
+        return;
+    if (i == 2) {
+        plat_ui_car_net();
+        return;
+    }
+    wifi_mode = (int)i;
+    plat_ui_wifi_mode(wifi_mode);
     settings_save();
 }
 
@@ -822,6 +841,16 @@ static void build_settings(void)
     lv_obj_t *wb = lv_button_create(r);
     lv_label_set_text(lv_label_create(wb), "Change");
     lv_obj_add_event_cb(wb, wifi_open_cb, LV_EVENT_CLICKED, 0);
+    r = row(p, "Wi-Fi mode");
+    static const char *const wm_map[] = { "Auto", "Home", "Car", "" };
+    lv_obj_t *wm = lv_buttonmatrix_create(r);
+    lv_buttonmatrix_set_map(wm, wm_map);
+    lv_buttonmatrix_set_button_ctrl_all(wm, LV_BUTTONMATRIX_CTRL_CHECKABLE);
+    lv_buttonmatrix_set_one_checked(wm, true);
+    lv_buttonmatrix_set_button_ctrl(wm, (uint32_t)wifi_mode, LV_BUTTONMATRIX_CTRL_CHECKED);
+    lv_obj_set_size(wm, 330, 64);
+    lv_obj_set_style_pad_all(wm, 4, 0);
+    lv_obj_add_event_cb(wm, wifi_mode_cb, LV_EVENT_VALUE_CHANGED, 0);
 
     p = page(scr_settings, 1, "Android Auto", nav);
     r = row(p, "Enabled");

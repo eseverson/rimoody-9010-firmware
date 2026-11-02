@@ -2520,6 +2520,7 @@ static u8 ap_pmk[32], ap_gtk[16], sta[6], ap_ie[32];
 static int ap_ie_len, sta_st, ap_eapol_tries, ap_ch;   /* sta_st: 0 none, 1 authenticated, 2 associated, 3 keyed */
 static struct wpa_ap wap;
 static u32 ap_t0, sta_t, ap_cmds0;
+static int ap_from_hu1;   /* started by HU1 op 18 (a test): the deadline applies */
 static cu64 ap_gtk_pn, sta_rx_pn;
 static u32 ap_probes, ap_beacon_ok;
 int ap_start_pending, ap_start_ch;
@@ -2761,7 +2762,7 @@ static void ap_tick(void)
             wpa_ap_start(&wap);   /* 1/4 again, next replay counter */
         ap_eapol_send();          /* (3/4 goes out again as built: the station never saw it) */
     }
-    if ((u32)ip_stats[5] == ap_cmds0 && now - ap_t0 > AP_DEADLINE_MS) {
+    if (ap_from_hu1 && (u32)ip_stats[5] == ap_cmds0 && now - ap_t0 > AP_DEADLINE_MS) {
         lprintf("ap: no station with a HU1 command within %u s, resetting to station mode\n", AP_DEADLINE_MS / 1000);
         save_own_log('A');
         irq_fail_reset(107);
@@ -4086,6 +4087,8 @@ static int wifi_init(void)
 
 int plat_ui_status(char *out, int max)
 {
+    if (jstate == J_AP)
+        return vfmt_n(out, "Car network %s  %s", ap_ssid, sta_st >= 3 ? "phone connected" : "no phone");
     char ip[16], ss[34];
     ip_fmt_addr(ip, ip_addr());
     int n = cfg_ssid_len < 32 ? cfg_ssid_len : 32;
@@ -4123,6 +4126,83 @@ static void status_line(void)
             ip_stats[6], ip_stats[7], hb_count, errs);
 }
 
+/* Wi-Fi mode (Settings > Network, UI.TXT wifimode=): 0 auto, 1 home network only. Auto starts the car network (our
+ * own access point, AP.TXT) when the station has had no address for CAR_NET_AFTER_MS: at home the unit stays on the
+ * home Wi-Fi as before, in the car it runs its own network. plat_ui_car_net() starts the car network now, until the
+ * next boot only (forced from the bench, a power cycle brings the home network and this PC's access back). */
+#define CAR_NET_AFTER_MS 30000
+static volatile int ui_wifi_mode, ui_car_req;
+static u32 home_seen_at;   /* last scan that found the home network (join trouble alone never starts the car network) */
+void plat_ui_wifi_mode(int mode) { ui_wifi_mode = mode; }
+void plat_ui_car_net(void) { ui_car_req = 1; }
+
+static void car_net_start(const char *why)
+{
+    static char ss[33], pk[64];
+    static char txt[160];
+    int ch = 6;
+    u32 n = 0;
+    ss[0] = pk[0] = 0;
+    if (!fs_load("AP.TXT", txt, sizeof txt - 1, &n)) {
+        txt[n] = 0;
+        for (char *l = txt; *l;) {
+            char *e = l;
+            while (*e && *e != '\n' && *e != '\r')
+                e++;
+            int len = e - l;
+            if (len > 5 && same((const u8 *)l, (const u8 *)"ssid=", 5) && len - 5 <= 32)
+                cpy(ss, l + 5, len - 5), ss[len - 5] = 0;
+            else if (len > 4 && same((const u8 *)l, (const u8 *)"psk=", 4) && len - 4 <= 63)
+                cpy(pk, l + 4, len - 4), pk[len - 4] = 0;
+            else if (len > 3 && same((const u8 *)l, (const u8 *)"ch=", 3)) {
+                int c = 0;
+                for (char *p = l + 3; p < e && *p >= '0' && *p <= '9'; p++)
+                    c = c * 10 + (*p - '0');
+                if (c >= 1 && c <= 11)
+                    ch = c;
+            }
+            while (*e == '\n' || *e == '\r')
+                e++;
+            l = e;
+        }
+    }
+    int pl = 0;
+    while (pk[pl])
+        pl++;
+    if (!ss[0] || pl < 8) {   /* first time: a name from our MAC and a random 16-character passphrase, kept on the card */
+        static const char al[] = "abcdefghijkmnpqrstuvwxyz23456789";
+        u8 r[16];
+        rng_bytes(r, 16);
+        for (int i = 0; i < 16; i++)
+            pk[i] = al[r[i] & 31];
+        pk[16] = 0;
+        vfmt_n(ss, "Miata-%02x%02x", my_mac[4], my_mac[5]);   /* vfmt has no %X */
+        int k = vfmt_n(txt, "ssid=%s\npsk=%s\nch=%d\n", ss, pk, ch);
+        int r2 = fs_save("AP.TXT", txt, (u32)k);
+        lprintf("car network: new AP.TXT (%s) %s\n", ss, r2 ? "NOT saved" : "saved");
+    }
+    for (u32 i = 0; i < sizeof txt; i++)
+        txt[i] = 0;
+    lprintf("car network: starting '%s' on channel %d (%s)\n", ss, ch, why);
+    ap_from_hu1 = 0;
+    ap_start(ch, ss, pk);
+}
+
+static void car_net_tick(void)
+{
+    u32 now = ub_ms(0);
+    if (jstate == J_AP || ap_start_pending)
+        return;
+    if (!home_seen_at || (jstate >= J_AUTH && jstate <= J_UP))
+        home_seen_at = now;   /* boot, or talking to the home AP */
+    if (ui_car_req) {
+        ui_car_req = 0;
+        car_net_start("asked for in Settings");
+    } else if (ui_wifi_mode == 0 && now - home_seen_at > CAR_NET_AFTER_MS && !aa_tcp_connected()) {
+        car_net_start("no home network");
+    }
+}
+
 static void net_loop(void)
 {
     u32 last_status = ub_ms(0), last_flush_len = log_len;
@@ -4144,7 +4224,7 @@ static void net_loop(void)
             if (r == 0 || scans++ < 2)
                 flush("scanned");
             if (r == 0)
-                join_start();
+                home_seen_at = ub_ms(0), join_start();
             else
                 retry_at = ub_ms(0) + 3000, set_state(J_WAIT);
             continue;
@@ -4278,8 +4358,10 @@ static void net_loop(void)
             hwsec_apply(jstate == J_AP ? sta : bss.addr);
             log_s("hwsec: no HU1 command within 60 s of enabling it, back to software CCMP\n");
         }
+        car_net_tick();
         if (ap_start_pending && (int)(ub_ms(0) - deferred_at) >= 0) {
             ap_start_pending = 0;
+            ap_from_hu1 = 1;
             ap_start(ap_start_ch, ap_req_ssid, ap_req_psk);
             for (int i = 0; i < (int)sizeof ap_req_psk; i++)
                 ap_req_psk[i] = 0;
