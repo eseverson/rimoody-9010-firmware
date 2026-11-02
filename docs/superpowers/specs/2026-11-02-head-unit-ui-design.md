@@ -50,5 +50,13 @@ Exact layouts, colors and icon set; Wi-Fi network list vs manual entry first; wh
 - [x] 2. Home: inverted logo + faint dock (AA, Settings, Console); front buttons handled (mute short / reboot long, home, back, vol ± with repeat)
 - [x] 3. AA loop (build 20261102-002618, tools/aa_phone.py stream): auto-enter on the first decoded picture, Home leaves (VPP0 off), the dock's AA button returns, stream end goes home; OSD0 blends over VPP0 with per-pixel alpha (LVGL's bottom layer had to be made transparent: it picks up the theme's opaque screen colour). Back -> AA key 4 sent but not verified without a real phone.
 - [x] 4. Volume overlay (visual + state; mute sends MCU 01 01/01 00)
-- [ ] 5. Settings: first screen up (Wi-Fi status, AA switch, brightness slider (not wired), dark mode, reboot, boot stock, install stub). To do: Wi-Fi network entry, backlight, verify boot stock and reboot on the unit
+- [~] 5. Settings (build 20261102-003431, persisted): Wi-Fi status + "Change" screen (SSID/password fields, on-screen keyboard; the check key rewrites WIFI.TXT's ssid=/psk=, keeps token=/ip=, restarts; connect not exercised on the unit), Android Auto switch, brightness slider (**not wired**: the PWM duty had no visible effect; the MCU `EE <level>` frame needs the owner present to try), dark mode switch (theme; the home screen stays black), equalizer placeholder, Reboot (verified, also the long press on button 1), Boot stock (one-shot ECOSSTOCK.FLG -> U-Boot `bootsp ecos nor`; **not exercised**: it leaves the unit in eCos until an ACC cycle), install status (reads the NOR boot script + bootcmd, verified "Installed") and the "Install to flash" stub.
 - [x] 6. Console as a debug screen (dock, third button)
+
+## Open items for the owner
+
+- Real-finger touch and the front buttons by hand (all screens were driven by `hu.py ui tap/button/drag` so far).
+- Android Auto with the phone: touch, the Back button (AA key 4), auto-enter/leave.
+- Backlight: try the MCU `EE <level>` frame with the owner watching (`EE FF` is off).
+- Boot stock: try once (then ACC cycle back).
+- Later: audio output (then volume/mute/EQ become real), a Wi-Fi network list from a scan, background image.

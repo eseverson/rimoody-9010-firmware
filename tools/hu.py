@@ -243,7 +243,7 @@ def main():
     p = sub.add_parser('osdvid', help='video through the OSD layer: status | show [SECS] | on | off | fast 0|1 | every MS/10')
     p.add_argument('what', choices=['status', 'show', 'on', 'off', 'fast', 'every']); p.add_argument('secs', nargs='?', type=int, default=0)
     p = sub.add_parser('ui', help='UI tests: tap X Y | button N [HOLD_MS] | shot OUT.png (the OSD0 framebuffer)')
-    p.add_argument('what', choices=['tap', 'button', 'shot']); p.add_argument('args', nargs='*')
+    p.add_argument('what', choices=['tap', 'button', 'drag', 'shot']); p.add_argument('args', nargs='*')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -385,6 +385,8 @@ def main():
     elif a.op == 'ui':
         if a.what == 'tap':
             print(u.call(OP_UI, bytes([0]) + struct.pack('<HH', int(a.args[0]), int(a.args[1]))).decode(errors='replace'))
+        elif a.what == 'drag':
+            print(u.call(OP_UI, bytes([2]) + struct.pack('<HHHH', *[int(v) for v in a.args[:4]])).decode(errors='replace'))
         elif a.what == 'button':
             hold = int(a.args[1]) // 100 if len(a.args) > 1 else 1
             print(u.call(OP_UI, bytes([1, int(a.args[0]), max(1, min(255, hold))])).decode(errors='replace'))

@@ -28,7 +28,8 @@ static volatile int aa_view;
 static int aa_enabled = 1;
 static int volume = 20, muted, dark = 1;
 
-static lv_obj_t *scr_home, *scr_aa, *scr_settings, *scr_console;
+static lv_obj_t *scr_home, *scr_aa, *scr_settings, *scr_console, *scr_wifi;
+static lv_obj_t *wifi_ssid, *wifi_psk, *wifi_kb, *wifi_msg;
 static lv_obj_t *aa_card, *console_label, *status_label, *vol_panel, *vol_bar, *vol_icon, *vol_num;
 static lv_timer_t *vol_timer;
 
@@ -233,6 +234,9 @@ static lv_obj_t *row(lv_obj_t *list, const char *text)
     lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *l = lv_label_create(r);
     lv_label_set_text(l, text);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);   /* long texts wrap instead of running under the control */
+    lv_obj_set_flex_grow(l, 1);
+    lv_obj_set_style_pad_right(l, 16, 0);
     return r;
 }
 
@@ -243,6 +247,74 @@ static void section(lv_obj_t *list, const char *text)
     lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_opa(l, LV_OPA_60, 0);
     lv_obj_set_style_pad_top(l, 12, 0);
+}
+
+static void wifi_ta_cb(lv_event_t *e)   /* the keyboard types into whichever field was tapped */
+{
+    lv_keyboard_set_textarea(wifi_kb, lv_event_get_target(e));
+}
+
+static void wifi_kb_cb(lv_event_t *e)
+{
+    lv_event_code_t c = lv_event_get_code(e);
+    if (c == LV_EVENT_CANCEL) {
+        lv_screen_load(scr_settings);
+    } else if (c == LV_EVENT_READY) {   /* the keyboard's check key: connect */
+        const char *ss = lv_textarea_get_text(wifi_ssid), *pk = lv_textarea_get_text(wifi_psk);
+        int sl = 0, pl = 0;
+        while (ss[sl])
+            sl++;
+        while (pk[pl])
+            pl++;
+        if (!sl || sl > 32 || pl < 8 || pl > 63) {
+            lv_label_set_text(wifi_msg, "Network name 1-32 characters, password 8-63.");
+            return;
+        }
+        lv_label_set_text(wifi_msg, "Saving to WIFI.TXT and restarting...");
+        lv_refr_now(0);
+        plat_ui_wifi_set(ss, pk);
+    }
+}
+
+static void wifi_open_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_textarea_set_text(wifi_psk, "");
+    lv_label_set_text(wifi_msg, "Tap a field, type, then the check key to connect (restarts the unit).");
+    lv_keyboard_set_textarea(wifi_kb, wifi_ssid);
+    lv_screen_load(scr_wifi);
+}
+
+static void build_wifi(void)
+{
+    scr_wifi = screen(0);
+    lv_obj_t *t = lv_label_create(scr_wifi);
+    lv_label_set_text(t, "Wi-Fi network");
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_28, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 32, 16);
+    wifi_ssid = lv_textarea_create(scr_wifi);
+    lv_textarea_set_one_line(wifi_ssid, true);
+    lv_textarea_set_max_length(wifi_ssid, 32);
+    lv_textarea_set_placeholder_text(wifi_ssid, "Network name (SSID)");
+    lv_obj_set_width(wifi_ssid, 460);
+    lv_obj_align(wifi_ssid, LV_ALIGN_TOP_LEFT, 32, 66);
+    lv_obj_add_event_cb(wifi_ssid, wifi_ta_cb, LV_EVENT_FOCUSED, 0);
+    wifi_psk = lv_textarea_create(scr_wifi);
+    lv_textarea_set_one_line(wifi_psk, true);
+    lv_textarea_set_password_mode(wifi_psk, true);
+    lv_textarea_set_max_length(wifi_psk, 63);
+    lv_textarea_set_placeholder_text(wifi_psk, "Password");
+    lv_obj_set_width(wifi_psk, 460);
+    lv_obj_align(wifi_psk, LV_ALIGN_TOP_RIGHT, -32, 66);
+    lv_obj_add_event_cb(wifi_psk, wifi_ta_cb, LV_EVENT_FOCUSED, 0);
+    wifi_msg = lv_label_create(scr_wifi);
+    lv_obj_set_style_text_font(wifi_msg, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_opa(wifi_msg, LV_OPA_70, 0);
+    lv_obj_align(wifi_msg, LV_ALIGN_TOP_LEFT, 32, 124);
+    wifi_kb = lv_keyboard_create(scr_wifi);
+    lv_obj_set_size(wifi_kb, PANEL_W, 400);
+    lv_obj_align(wifi_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_event_cb(wifi_kb, wifi_kb_cb, LV_EVENT_ALL, 0);
 }
 
 static void build_settings(void)
@@ -264,10 +336,12 @@ static void build_settings(void)
     lv_obj_t *r = row(list, "Wi-Fi");
     status_label = lv_label_create(r);
     lv_label_set_text(status_label, "");
-    lv_obj_t *n = lv_label_create(list);
-    lv_label_set_text(n, "To change network: edit WIFI.TXT on the SD card (on-screen entry comes next).");
-    lv_obj_set_style_text_font(n, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_opa(n, LV_OPA_60, 0);
+    lv_obj_set_flex_grow(status_label, 1);
+    lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_pad_right(status_label, 16, 0);
+    lv_obj_t *wb = lv_button_create(r);
+    lv_label_set_text(lv_label_create(wb), "Change");
+    lv_obj_add_event_cb(wb, wifi_open_cb, LV_EVENT_CLICKED, 0);
 
     section(list, "ANDROID AUTO");
     r = row(list, "Enabled");
@@ -301,7 +375,9 @@ static void build_settings(void)
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Boot stock");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)1);
-    r = row(list, "Install: starts from the SD card (boot script in NOR)");
+    static char inst[120];
+    plat_ui_install_status(inst, sizeof inst);
+    r = row(list, inst);
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Install to flash");
     lv_obj_add_state(b, LV_STATE_DISABLED);   /* stub: writing the app into NOR permanently is not built yet */
@@ -425,6 +501,8 @@ static void on_button(int b, int pressed)
     } else if (b == 3 && pressed) {
         if (ui_aa_visible())
             plat_ui_aa_key(4);
+        else if (lv_screen_active() == scr_wifi)
+            lv_screen_load(scr_settings);
         else if (lv_screen_active() != scr_home)
             show_home();
     } else if (b == 4 || b == 5) {
@@ -478,6 +556,7 @@ static void ui_task(void *arg)
     build_aa();
     build_settings();
     build_console();
+    build_wifi();
     build_volume();
     lv_timer_create(console_timer, 500, 0);
     lv_screen_load(scr_home);

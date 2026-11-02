@@ -26,5 +26,7 @@ void plat_ui_video_hide(void);                  /* the AA view went away: VPP0 o
 int plat_ui_status(char *out, int max);         /* one line of network / build status for Settings */
 int plat_ui_console(char *out, int max);        /* the log tail for the console screen */
 void plat_ui_log(const char *s);                /* a line into the payload's log */
+void plat_ui_wifi_set(const char *ssid, const char *psk);   /* rewrite WIFI.TXT's ssid=/psk= and restart */
+int plat_ui_install_status(char *out, int max);  /* is the NOR boot script (SD BOOT.BIN at power-on) installed */
 
 #endif

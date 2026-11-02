@@ -3191,6 +3191,70 @@ void plat_ui_brightness(int percent) { ui_req_bright = percent; }
 void plat_ui_video_hide(void) { ui_req_hide = 1; }
 void plat_ui_log(const char *m) { log_s(m); }
 
+/* the NOR boot-script install (tools/flash_bootcmd.py): a U-Boot script image named "nor boot script" at flash
+ * 0xE00000 and "source 98e00000" in U-Boot's default environment block at 0x920000 (flash is mapped at 0x98000000) */
+int plat_ui_install_status(char *out, int max)
+{
+    const volatile u8 *sc = (const volatile u8 *)0x98e00000u, *env = (const volatile u8 *)0x98920000u;
+    int script = sc[0] == 0x27 && sc[1] == 0x05 && sc[2] == 0x19 && sc[3] == 0x56;
+    static const char nm[] = "nor boot script", want[] = "source 98e00000";
+    for (int i = 0; script && nm[i]; i++)
+        script = sc[0x20 + i] == (u8)nm[i];
+    int envok = 0;
+    for (u32 i = 0; i < 0x10000 - 16 && !envok; i++) {
+        int j = 0;
+        while (want[j] && env[i + j] == (u8)want[j])
+            j++;
+        envok = !want[j];
+    }
+    (void)max;
+    if (script && envok)
+        return vfmt_n(out, "Installed: the SD card's BOOT.BIN starts at power-on");
+    return vfmt_n(out, "Not installed (script %s, bootcmd %s): run tools/flash_bootcmd.py", script ? "ok" : "missing",
+                  envok ? "ok" : "stock");
+}
+static char ui_wifi_ssid[33], ui_wifi_psk[64];
+static volatile int ui_req_wifi;
+void plat_ui_wifi_set(const char *ssid, const char *psk)
+{
+    int i;
+    for (i = 0; i < 32 && ssid[i]; i++)
+        ui_wifi_ssid[i] = ssid[i];
+    ui_wifi_ssid[i] = 0;
+    for (i = 0; i < 63 && psk[i]; i++)
+        ui_wifi_psk[i] = psk[i];
+    ui_wifi_psk[i] = 0;
+    ui_req_wifi = 1;
+}
+
+/* WIFI.TXT with new ssid= / psk= lines; every other line (token=, ip=, ...) is kept as it was */
+static int wifi_txt_rewrite(void)
+{
+    static char in[4096], out[4200];
+    u32 n = 0;
+    if (fs_load("WIFI.TXT", in, sizeof in - 1, &n))
+        n = 0;
+    in[n] = 0;
+    int k = vfmt_n(out, "ssid=%s\npsk=%s\n", ui_wifi_ssid, ui_wifi_psk);
+    for (u32 i = 0; i < n;) {
+        u32 e = i;
+        while (e < n && in[e] != '\n')
+            e++;
+        int skip = (e - i >= 5 && in[i] == 's' && in[i + 1] == 's' && in[i + 2] == 'i' && in[i + 3] == 'd' && in[i + 4] == '=') ||
+                   (e - i >= 4 && in[i] == 'p' && in[i + 1] == 's' && in[i + 2] == 'k' && in[i + 3] == '=') || e == i;
+        if (!skip && k + (int)(e - i) + 2 < (int)sizeof out) {
+            for (u32 j = i; j < e; j++)
+                out[k++] = in[j];
+            out[k++] = '\n';
+        }
+        i = e + 1;
+    }
+    int r = fs_save("WIFI.TXT", out, (u32)k);
+    for (u32 j = 0; j < sizeof in; j++)   /* the old file held a password */
+        in[j] = 0;
+    return r;
+}
+
 /* touches for the phone: queued by the touch task (gt9_hook), sent by the net task (lwIP is single-threaded) */
 static struct { u8 action; u16 x, y; } aa_tq[32];
 static volatile u32 aa_tq_w, aa_tq_r;
@@ -3587,7 +3651,18 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             ui_button(p[1], 0);
             return vfmt_n(t, "ui: button %d held %d ms", p[1], 100 * hold);
         }
-        return vfmt_n(t, "ERR ui: 0 tap x y | 1 button n [hold/100ms]");
+        if (c == 2 && n >= 9) {   /* drag x1 y1 x2 y2 over ~400 ms */
+            int x1 = p[1] | p[2] << 8, y1 = p[3] | p[4] << 8, x2 = p[5] | p[6] << 8, y2 = p[7] | p[8] << 8;
+            ui_pointer(0, (unsigned)x1, (unsigned)y1);
+            for (int i = 1; i <= 10; i++) {
+                vTaskDelay(pdMS_TO_TICKS(40));
+                ui_pointer(2, (unsigned)(x1 + (x2 - x1) * i / 10), (unsigned)(y1 + (y2 - y1) * i / 10));
+            }
+            vTaskDelay(pdMS_TO_TICKS(60));
+            ui_pointer(1, (unsigned)x2, (unsigned)y2);
+            return vfmt_n(t, "ui: drag %d,%d -> %d,%d", x1, y1, x2, y2);
+        }
+        return vfmt_n(t, "ERR ui: 0 tap x y | 1 button n [hold/100ms] | 2 drag x1 y1 x2 y2");
     }
     case 25: {   /* OSDVID: 0 status, 1 show the last decoded picture [u8 seconds, 0 = stay], 2 on (AA video live), 3 off */
         int c = n ? p[0] : 0;
@@ -3855,6 +3930,15 @@ static void net_loop(void)
             if (ui_req_bright >= 0) {   /* not wired yet: the PWM duty showed no visible effect; MCU EE <level> to verify */
                 lprintf("ui: brightness %d%% (not wired to the backlight yet)\n", ui_req_bright);
                 ui_req_bright = -1;
+            }
+            if (ui_req_wifi) {
+                ui_req_wifi = 0;
+                int r = wifi_txt_rewrite();
+                lprintf("ui: WIFI.TXT rewritten for '%s' (%d), restarting\n", ui_wifi_ssid, r);
+                for (u32 j = 0; j < sizeof ui_wifi_psk; j++)
+                    ui_wifi_psk[j] = 0;
+                if (!r)
+                    ui_req_reboot = 1;
             }
             if (ui_req_stock) {   /* one-shot flag for the next boot: payload_entry hands it to U-Boot's bootsp */
                 ui_req_stock = 0;
