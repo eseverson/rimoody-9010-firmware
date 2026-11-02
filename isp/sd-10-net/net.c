@@ -3180,6 +3180,25 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
 }
 static void aa_log_cb(const char *m) { log_s(m); }
 
+/* AA audio (aa.c): media 48 kHz stereo, speech/guidance and system 16 kHz mono, all s16 little-endian, into the DSP
+ * mixer (audio.c). Payloads can sit at any byte offset: copied to an aligned buffer first. */
+static void aa_audio_cb(int stream, const unsigned char *p, int n)
+{
+    static short buf[2048];
+    if (!aud_ready())
+        return;
+    while (n >= 4) {
+        int k = n > (int)sizeof buf ? (int)sizeof buf : n & ~3;
+        for (int i = 0; i < k; i++)
+            ((unsigned char *)buf)[i] = p[i];
+        if (stream == 0)
+            aud_write(buf, k / 4);
+        else
+            aud_write_mono16k(stream, buf, k / 2);
+        p += k, n -= k;
+    }
+}
+
 /* ---- UI requests (ui.h): the UI task only sets these; the net task acts on them (MCU link, USB, AA are its) ---- */
 static volatile int ui_req_mute = -1, ui_req_reboot, ui_req_stock, ui_req_key, ui_req_hide, ui_req_bright = -1;
 static int ui_aa_enabled = 1;
@@ -3369,6 +3388,7 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         pf.video = aa_video_cb, pf.log = aa_log_cb, pf.now_us = clk_us;
         pf.cert = aa_cert, pf.cert_len = cl + 1, pf.key = aa_key, pf.key_len = kl + 1, pf.dpi = 160;
         pf.audio_mask = 0x87, pf.ver_minor = 7, pf.hd = 1;   /* what a Pixel on AA 17.9 accepted */
+        pf.audio = aa_audio_cb;
         if (c == 2 && n >= 9)   /* connect extras: protocol minor version, audio mask, [hd] */
             pf.ver_minor = p[7], pf.audio_mask = p[8];
         if (c == 2 && n >= 10)
