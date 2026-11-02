@@ -246,6 +246,8 @@ def main():
     p.add_argument('what', choices=['tap', 'button', 'drag', 'lights', 'shot']); p.add_argument('args', nargs='*')
     p = sub.add_parser('audio', help='audio DSP (audio.c): status | init | tone HZ (0 off) | volume 0..40 | mute 0|1')
     p.add_argument('what', choices=['status', 'init', 'tone', 'volume', 'mute']); p.add_argument('value', nargs='?', type=int, default=0)
+    p.add_argument('--peak', type=int, default=256, help='tone: peak level of 32767 (256 = -42 dBFS)')
+    p.add_argument('--ms', type=int, default=2000, help='tone: stops by itself after this many ms (max 10000)')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -401,7 +403,7 @@ def main():
             print('saved', a.args[0])
     elif a.op == 'audio':
         c = {'status': 0, 'init': 1, 'tone': 2, 'volume': 3, 'mute': 4}[a.what]
-        pl = bytes([c]) + (struct.pack('<H', a.value) if c == 2 else bytes([a.value]) if c in (3, 4) else b'')
+        pl = bytes([c]) + (struct.pack('<HHH', a.value, a.peak, a.ms) if c == 2 else bytes([a.value]) if c in (3, 4) else b'')
         print(u.call(OP_AUDIO, pl).decode(errors='replace'))
     elif a.op == 'op':
         print(u.call(a.num, bytes.fromhex(a.payload)).decode(errors='replace'))

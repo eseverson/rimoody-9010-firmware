@@ -3729,8 +3729,8 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             int k = vfmt_n(t, "init %d; ", r);
             return k + aud_status(t + k, vfmt_n);
         }
-        if (c == 2 && n >= 3)
-            aud_tone(p[1] | p[2] << 8);
+        if (c == 2 && n >= 3)   /* tone u16 Hz [u16 peak (default 256 = -42 dBFS) [u16 ms (default 2000)]] */
+            aud_tone_ex(p[1] | p[2] << 8, n >= 5 ? p[3] | p[4] << 8 : 256, n >= 7 ? p[5] | p[6] << 8 : 2000);
         else if (c == 3 && n >= 2)
             aud_set_volume(p[1]);
         else if (c == 4 && n >= 2)

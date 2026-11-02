@@ -41,7 +41,10 @@ static aud_logf logf;
 static u32 rpos, zpos, cur[NSRC], dropped[NSRC], taken[NSRC];
 static int ready, chip651, tone_hz;
 static u32 tone_phase;
-static u32 ring10, ring10_size = 0x16800;
+/* the PCM ring in use: stream 1 (the "main" media path, through the PCM decoder: master volume and EQ apply) or, as
+ * the fallback, ring 10 ("RISC sound": no decoder, big-endian, but the master volume does not reach it; owner by ear,
+ * 2026-11-02) */
+static u32 ring, ring_size = 0x16800, ring_w = 0x18c8, ring_r = 0x18cc, ring_be = 1, path;
 static u32 cmd_timeouts, msgs, hb_last, hb_stuck, hb_seen, last_evt = 0xffffffffu;
 
 static void dc_wb(u32 a, u32 n)
@@ -392,19 +395,65 @@ static void post_boot(void)   /* rest of AUDIF_Init: 48 kHz clocks, codec resets
     dsp_set(RISC, 0xb7, (u16)((b7 & ~0x3200u) | 0x1000u));
 }
 
-static void ring10_start(void)   /* "alter" track: AUD_Set_RiscSndFs 48 kHz, ring 10 cleared */
+static void ring_clear(void)
 {
-    u16 o = info(0x2e);
-    ring10 = o ? data + (u32)o * 128 : 0;
-    REG(0x18c8) = 0, REG(0x18cc) = 0, rpos = zpos = 0;
+    REG(ring_w) = 0, REG(ring_r) = 0, rpos = zpos = 0;
     for (int i = 0; i < NSRC; i++)
         cur[i] = 0;
-    if (ring10) {
-        for (u32 i = 0; i < ring10_size; i += 4)
-            *(volatile u32 *)(ring10 + i) = 0;
-        dc_wb(ring10, ring10_size);
+    if (ring) {
+        for (u32 i = 0; i < ring_size; i += 4)
+            *(volatile u32 *)(ring + i) = 0;
+        dc_wb(ring, ring_size);
     }
+}
+
+static int ring10_start(void)   /* "alter" track: AUD_Set_RiscSndFs 48 kHz, ring 10 cleared */
+{
+    u16 o = info(0x2e);
+    ring = o ? data + (u32)o * 128 : 0, ring_size = 0x16800, ring_w = 0x18c8, ring_r = 0x18cc, ring_be = 1, path = 10;
+    ring_clear();
     send_cmd(6, 8, 1, 0);
+    return ring ? 0 : -1;
+}
+
+/* the "main" track as Android Auto uses it in eCos (media_stream.c): stream 1 with the PCM decoder (codec 1 in bank 1),
+ * ring 1 (info +4, 0x4B000 bytes, W 0x1888 / R 0x188C), little-endian s16 stereo 48 kHz, routed to the main output */
+static int stream1_start(void)
+{
+    if (dsp_get(RISC, 7) == 1) {   /* AUDIF_Set(0xc, 1): stop media 1 */
+        dsp_set(APP, 0x6a, 0);
+        send_cmd(5, 4, 0, 0);
+    }
+    if (state(1) != 0 && state(1) != 2) {
+        send_cmd(0, 1, 2, 0);
+        wait_state(1, 2);
+    }
+    dsp_set(RISC, 0x5e, 0);
+    send_cmd(5, 2, 0, 0);
+    u16 o = info(4);
+    if (!o)
+        return -1;
+    ring = data + (u32)o * 128, ring_size = 0x4b000, ring_w = 0x1888, ring_r = 0x188c, ring_be = 0, path = 1;
+    ring_clear();
+    static const u16 desc[16] = { 1, 5, 2, 16, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x20 };   /* PCM, 2 ch, 16 bit, 48 kHz */
+    for (int i = 0; i < 16; i++)
+        dsp_set(RISC, 0x50 + i, desc[i]);   /* RISC byte 0xA0: the media-1 codec descriptor */
+    if (state(1) != 0 && state(1) != 2) {   /* DSP_CheckCodec(1): stop, load the PCM decoder, play */
+        send_cmd(0, 1, 2, 0);
+        wait_state(1, 2);
+    }
+    if (download_code(1, 1) || download_data(1, 1))
+        return -2;
+    send_cmd(0, 1, 3, 0);
+    if (wait_state(1, 3))
+        return -3;
+    dsp_set(RISC, 0x11, 0xcfcf);   /* AUDIF_Set(0x24, 1, 1): media 1 to the main output, input gain 0 dB */
+    dsp_set(RISC, 7, 1);
+    dsp_set(RISC, 0x3d, 0x11);
+    send_cmd(5, 2, 0, 0);
+    dsp_set(APP, 0x6a, 0x800);     /* AUDIF_Set(0xd, 1): start */
+    send_cmd(5, 4, 0, 0);
+    return 0;
 }
 
 int aud_init(aud_logf log)
@@ -426,14 +475,19 @@ int aud_init(aud_logf log)
     if (r)
         return r;
     post_boot();
-    ring10_start();
+    int sr = stream1_start();
+    if (sr) {
+        if (logf)
+            logf("audio: stream 1 (PCM decoder) failed (%d, state %08x): RISC sound ring 10 instead\n", sr, REG(0x18b0));
+        ring10_start();
+    }
     aud_set_mute(1);
     aud_set_volume(0);
     if (logf)
-        logf("audio: ready; ring 10 at %08x (info %x), state %08x, %u command timeouts\n", ring10, info(0x2e), REG(0x18b0),
+        logf("audio: ready; path %u, ring at %08x, state %08x, %u command timeouts\n", path, ring, REG(0x18b0),
              cmd_timeouts);
     ready = 1;
-    return ring10 ? 0 : -7;
+    return ring ? 0 : -7;
 }
 
 int aud_ready(void) { return ready; }
@@ -458,8 +512,8 @@ void aud_set_volume(int index)
 
 static void track_r(void)
 {
-    u32 r = REG(0x18cc) % ring10_size, ro = rpos % ring10_size;
-    rpos += (r + ring10_size - ro) % ring10_size;
+    u32 r = REG(ring_r) % ring_size, ro = rpos % ring_size;
+    rpos += (r + ring_size - ro) % ring_size;
     if ((int)(zpos - rpos) < 0)   /* underrun: the DSP went past everything written */
         zpos = rpos;
 }
@@ -467,33 +521,34 @@ static void track_r(void)
 static void zero_to(u32 end)   /* extend the valid region to end, zero-filled */
 {
     while ((int)(end - zpos) > 0) {
-        u32 o = zpos % ring10_size, k = ring10_size - o;
+        u32 o = zpos % ring_size, k = ring_size - o;
         if (k > end - zpos)
             k = end - zpos;
-        u32 *d = (u32 *)(ring10 + o);
+        u32 *d = (u32 *)(ring + o);
         for (u32 i = 0; i < k / 4; i++)
             d[i] = 0;
         zpos += k;
     }
 }
 
-static void add_be(u32 pos, short v)   /* saturating add of one sample at byte position pos (big-endian in the ring) */
+static void add_be(u32 pos, short v)   /* saturating add of one sample at byte position pos (ring byte order) */
 {
-    u8 *d = (u8 *)(ring10 + pos % ring10_size);
-    int s = (short)(d[0] << 8 | d[1]) + v;
+    u8 *d = (u8 *)(ring + pos % ring_size);
+    int hi = ring_be ? 0 : 1, lo = 1 - hi;
+    int s = (short)(d[hi] << 8 | d[lo]) + v;
     s = s > 32767 ? 32767 : s < -32768 ? -32768 : s;
-    d[0] = (u8)(s >> 8), d[1] = (u8)s;
+    d[hi] = (u8)(s >> 8), d[lo] = (u8)s;
 }
 
 /* frames of stereo s16 (little-endian, native) from source src into the ring; returns frames taken */
 static int mix(int src, const short *lr, int frames, int mono_x3)
 {
-    if (!ready || !ring10 || src < 0 || src >= NSRC)
+    if (!ready || !ring || src < 0 || src >= NSRC)
         return 0;
     track_r();
     if ((int)(cur[src] - (rpos + 128)) < 0)   /* idle or fell behind: start just ahead of the DSP */
         cur[src] = rpos + LEAD;
-    u32 limit = rpos + ring10_size - 128;   /* never write within 128 bytes behind R */
+    u32 limit = rpos + ring_size - 128;   /* never write within 128 bytes behind R */
     u32 room = (int)(limit - cur[src]) > 0 ? (limit - cur[src]) / 4 : 0;
     u32 out = mono_x3 ? (u32)frames * 3 : (u32)frames;   /* 16 kHz mono sources are repeated 3x into 48 kHz stereo */
     u32 n = out < room ? out : room;
@@ -509,17 +564,17 @@ static int mix(int src, const short *lr, int frames, int mono_x3)
         add_be(start + 4 * i + 2, r);
     }
     for (u32 done = 0; done < 4 * n;) {   /* write back what changed, by contiguous piece */
-        u32 o = (start + done) % ring10_size, k = ring10_size - o;
+        u32 o = (start + done) % ring_size, k = ring_size - o;
         if (k > 4 * n - done)
             k = 4 * n - done;
-        dc_wb(ring10 + o, k);
+        dc_wb(ring + o, k);
         done += k;
     }
     cur[src] = start + 4 * n;
     taken[src] += n;
     if (n < out)
         dropped[src] += out - n;
-    REG(0x18c8) = zpos % ring10_size;
+    REG(ring_w) = zpos % ring_size;
     return mono_x3 ? (int)(n / 3) : (int)n;
 }
 
@@ -530,18 +585,26 @@ static u32 ring_free(void)   /* for the tone: room ahead of its own cursor */
 {
     track_r();
     u32 c = (int)(cur[3] - rpos) > 0 ? cur[3] : rpos + LEAD;
-    u32 limit = rpos + ring10_size - 128;
+    u32 limit = rpos + ring_size - 128;
     return (int)(limit - c) > 0 ? limit - c : 0;
 }
 
-void aud_tone(int hz) { tone_hz = hz, tone_phase = 0; }
+static int tone_amp = 256;   /* peak, of 32767: 256 = -42 dBFS */
+static unsigned long long tone_end;
+void aud_tone(int hz) { aud_tone_ex(hz, 256, 2000); }
+void aud_tone_ex(int hz, int peak, int ms)   /* quiet by default and time-limited: a test tone must never blast */
+{
+    tone_hz = hz, tone_phase = 0;
+    tone_amp = peak < 1 ? 1 : peak > 8192 ? 8192 : peak;
+    tone_end = clk_us() + 1000ull * (unsigned)(ms < 100 ? 100 : ms > 10000 ? 10000 : ms);
+}
 
-static short sine(u32 ph)   /* ph: 0..65535 per period; parabolic approximation, about -12 dBFS */
+static short sine(u32 ph)   /* ph: 0..65535 per period; parabolic approximation, peak tone_amp */
 {
     int x = (int)(ph & 0xffff) - 32768;            /* -pi..pi */
     int y = x < 0 ? -x : x;
     int v = (int)(((long long)x * (32768 - y)) >> 15);   /* 4x(1-|x|) shape, peak 8192 */
-    return (short)v;
+    return (short)(v * tone_amp / 8192);
 }
 
 void aud_poll(void)
@@ -559,9 +622,11 @@ void aud_poll(void)
         last_evt = evt;
         send_cmd(1, 3, 0, evt);
     }
-    if (tone_hz && ring10) {
+    if (tone_hz && clk_us() >= tone_end)
+        tone_hz = 0;
+    if (tone_hz && ring) {
         static short buf[2 * 256];
-        while (ring_free() >= sizeof buf && ring_free() > ring10_size / 2) {   /* keep it about half full */
+        while (ring_free() >= sizeof buf && ring_free() > ring_size / 2) {   /* keep it about half full */
             for (int i = 0; i < 256; i++) {
                 short s = sine(tone_phase >> 16);
                 buf[2 * i] = s, buf[2 * i + 1] = s;
@@ -577,10 +642,10 @@ int aud_status(char *o, aud_fmt fmt)
     if (!data)
         return fmt(o, "audio: not initialized");
     return fmt(o, "audio: %s state %08x (sys %d front %d) heartbeat %x (%u changes) 1880 %08x 18a8 %08x msgs %u timeouts %u "
-                  "ring10 %08x W %x R %x played %u KB; taken/dropped media %u/%u guide %u/%u tone %u/%u; tone %d Hz vol %02x "
+                  "path %u ring %08x W %x R %x played %u KB; taken/dropped media %u/%u guide %u/%u tone %u/%u; tone %d Hz vol %02x "
                   "1e14 %08x banks %08x %08x %08x",
                ready ? "ready" : "NOT ready", REG(0x18b0), state(0), state(7), REG(0x18b4), hb_seen, REG(0x1880), REG(0x18a8),
-               msgs, cmd_timeouts, ring10, REG(0x18c8), REG(0x18cc), rpos >> 10, taken[0], dropped[0], taken[1] + taken[2],
+               msgs, cmd_timeouts, path, ring, REG(ring_w), REG(ring_r), rpos >> 10, taken[0], dropped[0], taken[1] + taken[2],
                dropped[1] + dropped[2], taken[3], dropped[3], tone_hz,
                dsp_get(APP, 0x3d) & 0xff, REG(0x1e14), REG(0x1744), REG(0x1750), REG(0x1758));
 }
