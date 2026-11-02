@@ -7,6 +7,8 @@ void gt9_tick(unsigned int now_ms);                      /* main loop: poll ever
 /* display touches (not the button strip) as they happen, from the touch task: action 0 down, 1 up, 2 move; panel
  * pixels (1024 x 600). The callee must only queue (it runs on the touch task). */
 extern void (*gt9_hook)(int action, unsigned x, unsigned y);
+/* front-panel buttons 1..5 (top to bottom), pressed 1 / released 0, from the touch task: the callee must only queue */
+extern void (*gt9_button_hook)(int button, int pressed);
 extern char gt9_last[48];
 extern volatile unsigned int gt9_down_ms;               /* ub_ms of the last touch down, 0 = none yet */                                /* last event, for the console */
 #endif

@@ -2,6 +2,7 @@
  * registers is undone by vpp_restore (the saved blocks written back), automatically after the requested seconds. */
 #include "vpp.h"
 #include "vdec.h"
+#include "ui.h"
 
 typedef unsigned int u32;
 #define R(a) (*(volatile u32 *)(a))
@@ -204,7 +205,9 @@ int vpp_show_frame(u32 luma, u32 chroma, u32 fw, u32 fh, u32 cx, u32 cy, u32 cw,
     R(0x9c0057dc) = 0x10011, R(0x9c0057e4) = 0x10;
     R(0x9c0057f0) = 0x80801020;   /* BIST off */
     R(0x9c005788) = 0xf8;
-    setbits(0x9c006c84, 0xf, 2u | 1u << 2);   /* VPP0 opaque, OSD0 (console) transparent */
+    /* VPP0 opaque; OSD0 blends over it when the UI runs (its transparent pixels show the video, overlays sit on top),
+     * else it is hidden (the text console would cover the video) */
+    setbits(0x9c006c84, 0xf, 2u | (ui_running() ? 0u : 1u) << 2);
     R(0x9c005a80) = 0x203;   /* b0 commit */
     shown_w = fw, shown_h = fh, shown_key = key, shown_size = size;
     return 0;

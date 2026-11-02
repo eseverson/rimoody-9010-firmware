@@ -2,7 +2,7 @@
  *   tramp(argc, argv) with argv[1] = image address, argv[2] = length (hex), and optionally argv[3..5] = stdio_dev
  *   address, original putc, original puts (to undo a console hook that lives in the image being replaced; the
  *   payload's own EXEC restores the hooks itself and passes only src and len).
- * It checks the image ("HUNE" header v1 at +0x40, 0x100 <= len <= 1 MB), returns 2 if it is not acceptable, else copies
+ * It checks the image ("HUNE" header v1 at +0x40, 0x100 <= len <= 1.5 MB), returns 2 if it is not acceptable, else copies
  * it to 0x01800000, writes back the D-cache and invalidates the I-cache for it, and calls it like `go 0x1800000 main`
  * with $r10 (U-Boot's gd) and $gp untouched. If that returns, it resets the unit through U-Boot's parse_string_outer
  * (found from $gp, checked against its first instruction word), so the card's BOOT.BIN comes back. */
@@ -38,7 +38,7 @@ int tramp(int argc, char *argv[])
         return 1;
     u32 src = hex(argv[1]), len = hex(argv[2]);
     const volatile u32 *s = (const volatile u32 *)src;
-    if ((src & 3) || len < 0x100 || len > 0x100000 || s[0x40 / 4] != 0x454e5548 || s[0x44 / 4] != 1)
+    if ((src & 3) || len < 0x100 || len > 0x180000 || s[0x40 / 4] != 0x454e5548 || s[0x44 / 4] != 1)
         return 2;
     if (argc >= 6) {
         u32 dev = hex(argv[3]);

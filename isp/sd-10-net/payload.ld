@@ -28,7 +28,7 @@ SECTIONS
     /* FreeRTOS heap (heap_4, configTOTAL_HEAP_SIZE = 2 MB): task stacks and kernel objects */
     .rtos_heap 0x02200000 (NOLOAD) : { KEEP(*(.rtos_heap)) }
     ASSERT(SIZEOF(.rtos_heap) <= 0x00800000, "rtos heap runs into the EXEC trampoline at 0x2f00000")
-    ASSERT(__bss_end <= 0x01900000, "payload overlaps 0x1900000")
+    ASSERT(__bss_end <= 0x01A00000, "payload + bss run into the log at 0x01A00000")
     ASSERT(SIZEOF(.hu_vectors) <= 0x200, "vector table bigger than its 0x200 slot")
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) *(.nds32_e_flags) }
 }

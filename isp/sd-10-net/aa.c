@@ -541,4 +541,24 @@ int aa_touch(int action, int x, int y)
     return send_pb(CH_INPUT, 0, 0x8001, &b, buf);
 }
 
+/* InputReport (0x8001) field 4 KeyEvent { repeated Key keys = 1 { keycode = 1, down = 2, metastate = 3, longpress = 4 } }:
+ * the keys declared in the service discovery (3 HOME, 4 BACK) */
+int aa_send_key(int keycode, int down)
+{
+    if (st.state != AA_RUNNING)
+        return -1;
+    static u8 buf[48];
+    struct pb b = { buf, buf + sizeof buf };
+    pb_u(&b, 1, pf->now_us ? pf->now_us() * 1000ull : 0);
+    u8 *ke = pb_open(&b, 4);
+    u8 *k = pb_open(&b, 1);
+    pb_u(&b, 1, (u64)keycode);
+    pb_u(&b, 2, down ? 1 : 0);
+    pb_u(&b, 3, 0);
+    pb_u(&b, 4, 0);
+    pb_close(&b, k);
+    pb_close(&b, ke);
+    return send_pb(CH_INPUT, 0, 0x8001, &b, buf);
+}
+
 const struct aa_status *aa_status(void) { return &st; }

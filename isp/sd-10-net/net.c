@@ -12,7 +12,7 @@
  *                        heartbeat, frame parser, the a4 time handshake, the 00 shutdown request.
  *   HU1 EXEC             replaces this payload in place with an image uploaded to RAM (tramp.c at 0x02f00000).
  *
- * Fixed RAM: 0x01500000 HELLO.TXT text, 0x01600000 MCU RX hex, 0x01800000 this payload + bss (< 0x1900000),
+ * Fixed RAM: 0x01500000 HELLO.TXT text, 0x01600000 MCU RX hex, 0x01800000 this payload + bss (< 0x1A00000),
  * 0x01a00000 log (960 KB ring), 0x01b00000 fatwrite bounce buffer for the log (256 KB), 0x02000000 HU1 reply buffer (64 KB + 256), 0x02100000 WIFI.TXT (4 KB, wiped after
  * parsing), 0x02f00000 EXEC trampoline (+0xf000 its argv), 0x03000000 where hu.py uploads images. HU1 WRITE refuses
  * the payload, the log and the reply buffer. The image header at +0x40 ("HUNE", 1, build id) comes from head.S.
@@ -41,6 +41,7 @@ typedef signed char s8;
 #include "aa.h"
 #include "aa_tcp.h"
 #include "vpp.h"
+#include "ui.h"
 #include "osdvid.h"
 #include "ip.h"
 #include "mcu.h"
@@ -3155,7 +3156,10 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
            (issue #5 makes it cheaper) */
         static unsigned long long next_show;   /* osd_interval_us: file scope, set by op 25 */
         unsigned long long now = clk_us();
-        if (aa_vpp && vdec_last_slot(&l, &c) >= 0) {   /* VPP0: hardware fetch + scaler, every picture */
+        ui_aa_session(1);
+        if (ui_running() && !ui_aa_visible()) {
+            /* decoded, not shown: the user is on another screen */
+        } else if (aa_vpp && vdec_last_slot(&l, &c) >= 0) {   /* VPP0: hardware fetch + scaler, every picture */
             unsigned int w, h;
             vdec_dims(&w, &h);
             if (vpp_show_video(l, c, w, h) == 0)
@@ -3175,10 +3179,31 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
 }
 static void aa_log_cb(const char *m) { log_s(m); }
 
+/* ---- UI requests (ui.h): the UI task only sets these; the net task acts on them (MCU link, USB, AA are its) ---- */
+static volatile int ui_req_mute = -1, ui_req_reboot, ui_req_stock, ui_req_key, ui_req_hide, ui_req_bright = -1;
+static int ui_aa_enabled = 1;
+void plat_ui_mute(int on) { ui_req_mute = on; }
+void plat_ui_reboot(void) { ui_req_reboot = 1; }
+void plat_ui_boot_stock(void) { ui_req_stock = 1; }
+void plat_ui_aa_key(int keycode) { ui_req_key = keycode; }
+void plat_ui_aa_enable(int on) { ui_aa_enabled = on; }
+void plat_ui_brightness(int percent) { ui_req_bright = percent; }
+void plat_ui_video_hide(void) { ui_req_hide = 1; }
+
 /* touches for the phone: queued by the touch task (gt9_hook), sent by the net task (lwIP is single-threaded) */
 static struct { u8 action; u16 x, y; } aa_tq[32];
 static volatile u32 aa_tq_w, aa_tq_r;
 static u32 aa_touch_sent, aa_touch_dropped;
+static void aa_touch_hook(int action, unsigned x, unsigned y);
+static int aa_touch_on;
+static void touch_route(int action, unsigned x, unsigned y)   /* gt9_hook, touch task: AA view -> the phone, else the UI */
+{
+    if (ui_aa_visible() || (!ui_running() && aa_touch_on))
+        aa_touch_hook(action, x, y);
+    else if (ui_running())
+        ui_pointer(action, x, y);
+}
+
 static void aa_touch_hook(int action, unsigned x, unsigned y)
 {
     u32 w = aa_tq_w;
@@ -3241,7 +3266,7 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         aa_touch_panel = c == 2 && n >= 11 && p[10];   /* declare the touchscreen as the panel, send raw coordinates */
         pf.touch_w = aa_touch_panel ? 1024 : 0, pf.touch_h = aa_touch_panel ? 600 : 0;
         aa_hd = pf.hd;
-        gt9_hook = aa_touch_hook;
+        aa_touch_on = 1;
         if (c == 2) {
             int r = aa_tcp_connect(&pf, ip, port);
             if (r)
@@ -3545,6 +3570,24 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             vpp_restore_now();
         return k;
     }
+    case 26: {   /* UI input injection (tests): 0 tap x u16, y u16; 1 button n [u8 hold in 100 ms units, default 1] */
+        int c = n ? p[0] : -1;
+        if (c == 0 && n >= 5) {
+            unsigned x = p[1] | p[2] << 8, y = p[3] | p[4] << 8;
+            ui_pointer(0, x, y);
+            vTaskDelay(pdMS_TO_TICKS(150));
+            ui_pointer(1, x, y);
+            return vfmt_n(t, "ui: tap %u,%u", x, y);
+        }
+        if (c == 1 && n >= 2) {
+            int hold = n >= 3 && p[2] ? p[2] : 1;
+            ui_button(p[1], 1);
+            vTaskDelay(pdMS_TO_TICKS(100 * hold));
+            ui_button(p[1], 0);
+            return vfmt_n(t, "ui: button %d held %d ms", p[1], 100 * hold);
+        }
+        return vfmt_n(t, "ERR ui: 0 tap x y | 1 button n [hold/100ms]");
+    }
     case 25: {   /* OSDVID: 0 status, 1 show the last decoded picture [u8 seconds, 0 = stay], 2 on (AA video live), 3 off */
         int c = n ? p[0] : 0;
         unsigned int l = 0, ch = 0;
@@ -3578,9 +3621,9 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
     case 10: {   /* EXEC src len: checked here, run from net_loop after this reply has gone out */
         u32 src = n >= 8 ? le32(p) : 0, len = n >= 8 ? le32(p + 4) : 0;
         const u32 *img = (const u32 *)src;
-        if (n < 8 || (src & 3) || src < 0x00100000 || len < 0x100 || len > 0x100000 || src + len > 0x04000000 ||
+        if (n < 8 || (src & 3) || src < 0x00100000 || len < 0x100 || len > 0x180000 || src + len > 0x04000000 ||
             (src < (u32)__bss_end && src + len > 0x01800000) || (src < TRAMP_ADDR + 0x10000 && src + len > TRAMP_ADDR))
-            return vfmt_n(t, "ERR exec: src 4-aligned, 0x100 <= len <= 0x100000, not over the payload/trampoline");
+            return vfmt_n(t, "ERR exec: src 4-aligned, 0x100 <= len <= 0x180000, not over the payload/trampoline");
         if (img[0x40 / 4] != 0x454e5548 || img[0x44 / 4] != 1)
             return vfmt_n(t, "ERR exec: no HUNE v1 header at src+0x40");
         char id[56];
@@ -3696,6 +3739,33 @@ static int wifi_init(void)
     return errs ? -1 : 0;
 }
 
+int plat_ui_status(char *out, int max)
+{
+    char ip[16], ss[34];
+    ip_fmt_addr(ip, ip_addr());
+    int n = cfg_ssid_len < 32 ? cfg_ssid_len : 32;
+    for (int i = 0; i < n; i++)
+        ss[i] = (char)cfg_ssid[i];
+    ss[n] = 0;
+    (void)max;
+    return vfmt_n(out, "%s  %s  %d dBm", ss, ip_addr() ? ip : "no address", rssi_now);
+}
+
+int plat_ui_console(char *out, int max)   /* the last lines of the log that fit */
+{
+    static u8 tail[2400];
+    int n = plat_log_tail(tail, (int)sizeof tail < max ? (int)sizeof tail : max - 1);
+    int start = 0;
+    for (int i = 0; i < n && n - i > max - 200; i++)
+        if (tail[i] == '\n')
+            start = i + 1;
+    int k = 0;
+    for (int i = start; i < n && k < max - 1; i++)
+        out[k++] = tail[i] >= 32 || tail[i] == '\n' ? (char)tail[i] : ' ';
+    out[k] = 0;
+    return k;
+}
+
 static void status_line(void)
 {
     char ip[16], m[20];
@@ -3761,6 +3831,46 @@ static void net_loop(void)
             mlme_tick();
         ip_poll();
         unsigned long long tp2 = clk_us();
+        {   /* UI requests (ui.h) and the end of an AA session */
+            static int aa_was;
+            int aac = aa_tcp_connected();
+            if (aa_was && !aac)
+                ui_aa_session(0);
+            aa_was = aac;
+            if (ui_req_mute >= 0) {   /* MCU system mute: 01 01 on, 01 00 off (notes/audio.md) */
+                u8 m[2] = { 0x01, (u8)ui_req_mute };
+                mcu_send(&mcu_st, m, 2, ub_ms(0));
+                ui_req_mute = -1;
+            }
+            if (ui_req_key) {
+                aa_send_key(ui_req_key, 1);
+                aa_send_key(ui_req_key, 0);
+                ui_req_key = 0;
+            }
+            if (ui_req_hide) {
+                ui_req_hide = 0;
+                vpp_hide();
+            }
+            if (ui_req_bright >= 0) {   /* not wired yet: the PWM duty showed no visible effect; MCU EE <level> to verify */
+                lprintf("ui: brightness %d%% (not wired to the backlight yet)\n", ui_req_bright);
+                ui_req_bright = -1;
+            }
+            if (ui_req_stock) {   /* one-shot flag for the next boot: payload_entry hands it to U-Boot's bootsp */
+                ui_req_stock = 0;
+                fs_save("ECOSSTOCK.FLG", "STOCK\n", 6);
+                ui_req_reboot = 1;
+            }
+            if (ui_req_reboot) {
+                ui_req_reboot = 0;
+                log_s("ui: reboot\n");
+                if (wdev && !errs) {   /* leave the dongle disabled for the next boot */
+                    ehci_rx_stop();
+                    power_off();
+                }
+                flush("reboot");
+                run("reset");
+            }
+        }
         if (aa_listening || aa_tcp_connected()) {
             aa_touch_poll();
             aa_tcp_poll();
@@ -3846,7 +3956,8 @@ static void console_task(void *arg)
 {
     for (;;) {
         con_lock_take();
-        console_poll();
+        if (!ui_running())   /* the UI owns the framebuffer once it runs */
+            console_poll();
         con_lock_give();
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -4030,6 +4141,16 @@ int payload_entry(int argc, char *const argv[])
     report_cpu();
     if (check_uboot())
         return 2;   /* log stays in RAM at 0x1a00000; calling U-Boot now is unsafe */
+    {   /* Settings > Boot stock: a one-shot flag; U-Boot's own bootsp starts the stock eCos */
+        static u8 f[8];
+        u32 n;
+        if (fs_load("ECOSSTOCK.FLG", f, sizeof f, &n) == 0) {
+            f_unlink("ECOSSTOCK.FLG");
+            log_s("boot: stock firmware requested (ECOSSTOCK.FLG): bootsp ecos nor\n");
+            hb_send();
+            run("bootsp ecos nor");
+        }
+    }
     lprintf("t=%u ms since boot\n", ub_ms(0));
     irq_init();   /* exceptions now land in irq.c (crash record + reset) */
     irq_set_heartbeat(hb_frame, sizeof(hb_frame));
@@ -4060,6 +4181,10 @@ int payload_entry(int argc, char *const argv[])
         irq_hw_watchdog(6);   /* returning to U-Boot ends the heartbeat: reset instead of losing power */
         return 4;
     }
+    gt9_hook = touch_route;   /* AA view -> the phone, else the UI */
+    gt9_button_hook = ui_button;
+    if (BOOT_FB)
+        ui_start(FB_ADDR);   /* LVGL on OSD0 (ui.c); the text console stops drawing once it runs */
     vTaskStartScheduler();   /* returns when net_task ends the scheduler */
     lprintf("rtos: scheduler ended\n");
     status_line();

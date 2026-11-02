@@ -32,7 +32,7 @@ import argparse, os, socket, struct, sys, time, zlib
 PORT_CMD, PORT_HELLO = 5151, 5152
 OP_PING, OP_CMD, OP_WRITE, OP_READ, OP_SYNC, OP_LOG = 1, 2, 3, 4, 5, 6
 OP_MCU_TX, OP_MCU_STATE, OP_SETTIME, OP_EXEC, OP_IRQ, OP_FB, OP_SAY, OP_TOUCH, OP_RTOS, OP_USB, OP_FS, OP_AP, OP_VDEC = 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
-OP_AA, OP_VPP, OP_OSDVID = 22, 24, 25
+OP_AA, OP_VPP, OP_OSDVID, OP_UI = 22, 24, 25, 26
 TRAMP_ADDR = 0x02f00000
 
 # Builds without OP_EXEC that `exec` can still replace: CRC32 of their first 4 KB at 0x1800000 -> addresses of their
@@ -242,6 +242,8 @@ def main():
     p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk', 'bisect', 'probe', 'bitscan', 'fetchtest', 'fresh', 'safe', 'replay', 'frame', 'hide', 'aavideo']); p.add_argument('args', nargs='*')
     p = sub.add_parser('osdvid', help='video through the OSD layer: status | show [SECS] | on | off | fast 0|1 | every MS/10')
     p.add_argument('what', choices=['status', 'show', 'on', 'off', 'fast', 'every']); p.add_argument('secs', nargs='?', type=int, default=0)
+    p = sub.add_parser('ui', help='UI tests: tap X Y | button N [HOLD_MS] | shot OUT.png (the OSD0 framebuffer)')
+    p.add_argument('what', choices=['tap', 'button', 'shot']); p.add_argument('args', nargs='*')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -380,6 +382,17 @@ def main():
     elif a.op == 'osdvid':
         c = {'status': 0, 'show': 1, 'on': 2, 'off': 3, 'fast': 4, 'every': 5}[a.what]
         print(u.call(OP_OSDVID, bytes([c, a.secs])).decode(errors='replace'))
+    elif a.op == 'ui':
+        if a.what == 'tap':
+            print(u.call(OP_UI, bytes([0]) + struct.pack('<HH', int(a.args[0]), int(a.args[1]))).decode(errors='replace'))
+        elif a.what == 'button':
+            hold = int(a.args[1]) // 100 if len(a.args) > 1 else 1
+            print(u.call(OP_UI, bytes([1, int(a.args[0]), max(1, min(255, hold))])).decode(errors='replace'))
+        else:   # shot: read the ARGB8888 framebuffer (0x03400000, 1024x600, little-endian words) into a PNG
+            from PIL import Image
+            raw = u.read(0x03400000, 1024 * 600 * 4)
+            Image.frombuffer('RGBA', (1024, 600), raw, 'raw', 'BGRA', 0, 1).convert('RGB').save(a.args[0])
+            print('saved', a.args[0])
     elif a.op == 'op':
         print(u.call(a.num, bytes.fromhex(a.payload)).decode(errors='replace'))
     elif a.op == 'rtos':

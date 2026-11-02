@@ -8,7 +8,7 @@ AR      := $(CROSS)ar
 # $r10 holds U-Boot's gd and must survive into every U-Boot call, so the compiler may not touch it.
 CFLAGS  := -march=v3 -mcpu=n9 -mcmodel=large -mno-ext-perf2 -mno-fp-as-gp -Os -ffreestanding -fno-builtin -nostdlib \
            -fno-pic -fno-common -fno-tree-loop-distribute-patterns -fno-asynchronous-unwind-tables -fno-unwind-tables \
-           '-ffixed-$$r10' -I. -Ifreertos/include -Ifreertos/port -Ilwip -Ilwip/arch -Ilwip/src/include -Imbedtls/include '-DMBEDTLS_CONFIG_FILE="aa_tls_config.h"' -Wall -Wextra -Wno-unused-parameter
+           '-ffixed-$$r10' -I. -Ifreertos/include -Ifreertos/port -Ilwip -Ilwip/arch -Ilwip/src/include -Imbedtls/include '-DMBEDTLS_CONFIG_FILE="aa_tls_config.h"' -DLV_CONF_INCLUDE_SIMPLE -Ilvgl -Wall -Wextra -Wno-unused-parameter
 LDFLAGS := -nostdlib -nostartfiles -Wl,--no-relax -Wl,--no-warn-rwx-segments
 LIBS    := -lgcc
 BUILD_ID := $(shell date +%Y%m%d-%H%M%S)
@@ -16,9 +16,13 @@ RTOS    := freertos/tasks.c freertos/list.c freertos/queue.c freertos/timers.c f
 MBEDTLS_SRC := $(wildcard mbedtls/library/*.c)
 # mbedtls is built at -O2 into its own archive: the payload decrypts the whole AA video stream in software
 MBEDTLS_OBJ := $(patsubst mbedtls/library/%.c,obj/mbedtls/%.o,$(MBEDTLS_SRC))
+# LVGL v9 (lvgl/README.vendor, lv_conf.h): its own archive at -O2, like mbedtls
+LVGL_SRC := $(shell find lvgl/src -name '*.c')
+LVGL_OBJ := $(patsubst lvgl/%.c,obj/lvgl/%.o,$(LVGL_SRC))
+LVGL_CFLAGS := -DLV_CONF_INCLUDE_SIMPLE -Ilvgl
 LWIP_SRC := $(wildcard lwip/src/core/*.c lwip/src/core/ipv4/*.c) lwip/src/netif/ethernet.c
-SRCS    := head.S net.c crypto.c wpa.c ip.c mcu.c irq.c irq.S clk.c ehci.c usbh.c sd.c diskio.c fatfs/ff.c wpa_ap.c ap80211.c lwnet.c vdec.c h264p.c aa.c aa_tls.c aa_tcp.c vpp.c osdvid.c $(LWIP_SRC) gt9.c console.c libc.c fw.S tramp_bin.S $(RTOS)
-HDRS    := FreeRTOSConfig.h freertos/port/portmacro.h freertos/port/port_nds32.h crypto.h wpa.h ip.h mcu.h irq.h clk.h ehci.h usbh.h wpa_ap.h ap80211.h lwnet.h vdec.h h264p.h aa.h aa_tls.h aa_tcp.h aa_tls_config.h vpp.h osdvid.h lwip/lwipopts.h sd.h fatfs/ff.h fatfs/ffconf.h fatfs/diskio.h usbdev.h gt9.h console.h font8x16.h ub_sig.h rtl8188f_tables.h rtl8xxxu_regs.h
+SRCS    := head.S net.c crypto.c wpa.c ip.c mcu.c irq.c irq.S clk.c ehci.c usbh.c sd.c diskio.c fatfs/ff.c wpa_ap.c ap80211.c lwnet.c vdec.c h264p.c aa.c aa_tls.c aa_tcp.c vpp.c osdvid.c ui.c ui_logo.c $(LWIP_SRC) gt9.c console.c libc.c fw.S tramp_bin.S $(RTOS)
+HDRS    := FreeRTOSConfig.h freertos/port/portmacro.h freertos/port/port_nds32.h crypto.h wpa.h ip.h mcu.h irq.h clk.h ehci.h usbh.h wpa_ap.h ap80211.h lwnet.h vdec.h h264p.h aa.h aa_tls.h aa_tcp.h aa_tls_config.h vpp.h osdvid.h ui.h lv_conf.h lwip/lwipopts.h sd.h fatfs/ff.h fatfs/ffconf.h fatfs/diskio.h usbdev.h gt9.h console.h font8x16.h ub_sig.h rtl8188f_tables.h rtl8xxxu_regs.h
 
 all: NET.BIN net.dis TRAMP.BIN tramp.dis
 
@@ -36,8 +40,15 @@ obj/mbedtls/%.o: mbedtls/library/%.c aa_tls_config.h
 mbedtls.a: $(MBEDTLS_OBJ)
 	rm -f $@ && $(AR) rcs $@ $^
 
-net.elf: $(SRCS) $(HDRS) rtl8188fufw.bin TRAMP.BIN payload.ld mbedtls.a
-	$(CC) $(CFLAGS) $(EXTRA) '-DBUILD_ID="$(BUILD_ID)"' $(LDFLAGS) -Wl,-T,payload.ld -Wl,-Map,net.map -o $@ $(SRCS) mbedtls.a $(LIBS)
+obj/lvgl/%.o: lvgl/%.c lv_conf.h
+	@mkdir -p $(dir $@)
+	@$(CC) $(subst -Os,-O2,$(CFLAGS)) $(LVGL_CFLAGS) -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers -c -o $@ $<
+
+lvgl.a: $(LVGL_OBJ)
+	rm -f $@ && $(AR) rcs $@ $^
+
+net.elf: $(SRCS) $(HDRS) rtl8188fufw.bin TRAMP.BIN payload.ld mbedtls.a lvgl.a
+	$(CC) $(CFLAGS) $(EXTRA) '-DBUILD_ID="$(BUILD_ID)"' $(LDFLAGS) -Wl,-T,payload.ld -Wl,-Map,net.map -o $@ $(SRCS) lvgl.a mbedtls.a $(LIBS)
 
 NET.BIN: net.elf
 	$(OBJCOPY) -O binary -R .bss $< $@
@@ -56,7 +67,7 @@ test/%_host: test/%_host.c h264p.c h264p.h aa_wl.c aa_wl.h wpa_ap.c wpa_ap.h ap8
 	$(HOSTCC) -O2 -Wall -Wextra -o $@ $<
 
 clean:
-	rm -rf obj mbedtls.a && rm -f net.elf NET.BIN net.dis net.map tramp.elf TRAMP.BIN tramp.dis tramp.map test/*_host
+	rm -rf obj mbedtls.a lvgl.a && rm -f net.elf NET.BIN net.dis net.map tramp.elf TRAMP.BIN tramp.dis tramp.map test/*_host
 
 test/lwiptcp_host: test/lwiptcp.c lwip/lwipopts.h $(LWIP_SRC)
 	$(HOSTCC) -O2 -w -Ilwip -Ilwip/arch -Ilwip/src/include -o $@ test/lwiptcp.c $(LWIP_SRC)
