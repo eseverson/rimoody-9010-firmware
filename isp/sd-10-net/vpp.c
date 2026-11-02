@@ -128,6 +128,24 @@ static int probe_sample(char *o, vpp_fmt fmt, const char *name)
                R(0x9c0057fc) & 3, R(0x9c005e58), R(0x9c006c9c));
 }
 
+/* one summary line per TGEN0 frame for `frames` frames: OR of the DDFCH error flags, last DDFCH / VSCL / DMIX checksums */
+static int trace_frames(char *o, vpp_fmt fmt, u32 frames)
+{
+    u32 pl = R(0x9c006ab4) & 0xfff, frame = 0, orf = 0, it = 0;
+    int k = 0;
+    while (frame < frames && ++it < 40000000u) {
+        u32 ln = R(0x9c006ab4) & 0xfff;
+        orf |= R(0x9c0057ec);
+        if (ln < pl) {
+            frame++;
+            k += fmt(o + k, " F%u or %x ck %x v %x d %x;", frame, orf, R(0x9c0057e8), R(0x9c005e58), R(0x9c006c9c));
+            orf = 0;
+        }
+        pl = ln;
+    }
+    return k;
+}
+
 int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u32 chroma_idx)
 {
     int c = n ? p[0] : 0;
@@ -244,7 +262,10 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             return fmt(o, "ERR fresh: DDFCH flags already %x, reset first (hu.py irq hwwdt)", R(0x9c0057ec));
         int full = fl & 32;
         u32 w = full ? 1024 : 800, h = full ? 600 : 480;
-        u32 Y = where == 2 ? 0x03700000u : 0x04600000u, C = where == 1 ? Y : where == 2 ? 0x03800000u : Y + 0x180000u;
+        /* where 3: below 64 MB in eCos's image area (unused by the payload). The unit has 64 MB of DRAM; addresses from
+         * 0x04000000 up alias the low 64 MB for the CPU (2026-11-01), so 0x04600000 is not real memory for an AXI master. */
+        u32 Y = where == 3 ? 0x00400000u : where == 2 ? 0x03700000u : 0x04600000u,
+            C = where == 3 ? 0x00500000u : where == 1 ? Y : where == 2 ? 0x03800000u : Y + 0x180000u;
         save();
         init_fetch(w, h, pitch ? pitch : 1920);
         if (fl & 2)
@@ -334,6 +355,31 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
         setbits(0x9c006c84, 3, 1);
         R(0x9c005a80) |= 1;
         return fmt(o, "vpp safe: 788 %x 7f0 %x c84 %x flags %x", R(0x9c005788), R(0x9c0057f0), R(0x9c006c84), R(0x9c0057ec));
+    } else if (c == 14 && n >= 7) {   /* replay (one per full reset): p[1..4] address of a list written beforehand with
+                                        * hu.py write, p[5..6] entry count; each entry { addr, value } is written in order,
+                                        * then a 12-frame summary trace. tools/ecos_snap.py builds the list from a register
+                                        * snapshot taken under the stock eCos. No restore. */
+        u32 la = p[1] | (u32)p[2] << 8 | (u32)p[3] << 16 | (u32)p[4] << 24, cnt = p[5] | (u32)p[6] << 8;
+        if (R(0x9c0057ec))
+            return fmt(o, "ERR replay: DDFCH flags already %x, reset first (hu.py irq hwwdt)", R(0x9c0057ec));
+        if ((la & 3) || la < 0x00300000u || la + 8 * cnt > 0x00700000u || cnt > 2048)
+            return fmt(o, "ERR replay: list must lie in 0x00300000..0x00700000, <= 2048 entries");
+        save();
+        const volatile u32 *l = (const volatile u32 *)la;
+        u32 bad = 0;
+        for (u32 i = 0; i < cnt; i++) {
+            u32 a = l[2 * i], v = l[2 * i + 1];
+            if ((a & 3) || a < 0x9c000000u || a >= 0x9c010000u) {
+                bad++;
+                continue;
+            }
+            R(a) = v;
+        }
+        int k = fmt(o, "replay %u writes (%u refused): 784 %x 788 %x 7dc %x 7f0 %x a80 %x d84 %x c84 %x, flags %x;", cnt, bad,
+                    R(0x9c005784), R(0x9c005788), R(0x9c0057dc), R(0x9c0057f0), R(0x9c005a80), R(0x9c005d84), R(0x9c006c84),
+                    R(0x9c0057ec));
+        R(0x9c005a80) |= 1;
+        return k + trace_frames(o + k, fmt, 12);
     } else if (c == 10 && n >= 7) {   /* bit scan: p[1..4] register (LE), p[5] first bit, p[6] count. After the probe's step 1
                                         * (eCos init, DDFCH color bar, fetch on, VPP0 opaque), flip each bit alone for ~3 frames
                                         * and report every bit after which a stage shows data. `vpp restore` afterwards. */

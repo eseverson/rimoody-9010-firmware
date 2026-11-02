@@ -8,17 +8,19 @@ snapshot"; code in isp/ecos-snap/).
   ecos_snap.py collect OUT.BIN   after the unit is back on our payload: read the snapshot area, save it, print a summary.
   ecos_snap.py show OUT.BIN      print the summary of a saved snapshot.
 """
-import os, struct, subprocess, sys, zlib
+import os, struct, subprocess, sys, time, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SNAPDIR = os.path.join(HERE, '..', 'isp', 'ecos-snap')
 ECOS_BASE = 0x00301040
-HOOK_ADDR, PARAM, SNAP, SNAP_END = 0x06F00000, 0x06F07F00, 0x06F08000, 0x06F40000
+HOOK_ADDR, PARAM, SNAP, SNAP_END = 0x02F40000, 0x02F47F00, 0x02F48000, 0x02F88000
 NHIST = 2048
 # (eCos address, original bytes, patched bytes); instruction bytes are big-endian
 PATCHES = [
-    (0x5114ec, bytes.fromhex('46f0050f'), bytes.fromhex('46f00301')),   # sethi $r15, 0x50f -> 0x301
-    (0x5114f0, bytes.fromhex('58f78284'), bytes.fromhex('58f78000')),   # ori $r15, $r15, 0x284 -> 0: entry.S at 0x301000
+    (0x64b436, bytes.fromhex('46f00607'), bytes.fromhex('46f00301')),   # clock ISR's call of hal_clock_reset 0x607fe2 ...
+    (0x64b43a, bytes.fromhex('58f78fe2'), bytes.fromhex('58f78000')),   # ... -> entry.S + 0 (fixed-rate hook)
+    (0x511628, bytes.fromhex('46f0050f'), bytes.fromhex('46f00301')),   # f_005115e8's call of f_0050f7c0 ...
+    (0x51162c, bytes.fromhex('58f787c0'), bytes.fromhex('58f78004')),   # ... -> entry.S + 4
 ]
 ENTRY_ADDR = 0x00301000   # entry.S in the unused uImage header slot (inside eCos's 64 MB MPU segment)
 
@@ -52,14 +54,19 @@ def run(path):
     if open(tmp + '.rb', 'rb').read() != bytes(img):
         sys.exit('read-back of the uploaded image differs (%s); not starting eCos' % back)
     print('read-back ok; EXEC launcher')
+    print(hu('say', 'eCos snapshot run %s: screen goes to stock eCos, unit resets ITSELF within ~45 s. Hands off.'
+             % time.strftime('%H:%M')))
     print(hu('exec', os.path.join(SNAPDIR, 'LAUNCH.BIN'), '--wait', '3'))
     print('eCos should be booting now; the hook resets the unit ~26 s after its display starts (or the watchdog ~13 s after a hang), then run `collect`.')
 
 
 def collect(out):
     prm = out + '.param'
-    hu('read', hex(PARAM), '16', '--out', prm)
-    p = struct.unpack('<4I', open(prm, 'rb').read())
+    hu('read', hex(PARAM), '20', '--out', prm)
+    p = struct.unpack('<5I', open(prm, 'rb').read())
+    print('hook crumb %x (1..ff: entered the hook that many times; 100/101: around the first timer read; '
+          '200/300/400 + 1: snapshot k started / finished; 500: reset)' % p[4])
+    p = p[:4]
     print('launcher param: magic %08x len %x crc %08x marker %08x (%s)' % (p + ('launcher reached eCos entry'
           if p[3] == 0x48434E4C else 'launcher did not get to the jump',)))
     data = b''
@@ -89,20 +96,23 @@ def blocks(data, off):
 
 def show(path):
     data = open(path, 'rb').read()
-    h = struct.unpack_from('<16I', data, 0)
+    h = struct.unpack_from('<20I', data, 0)
     if h[0] != 0x50414E53:
         print('no snapshot header (magic %08x): the hook never ran, or the area was overwritten' % h[0])
         return
     names = ['magic', 'ver', 'calls', 'done', 'first_err_call', 'first_err_flags', 'first_ck_call', 'first_ck',
-             'snap0', 'snap1', 'snap2', 'snap3', 'or_flags', 'ck_changes', 'last_flags', 'last_ck']
+             'snap0', 'snap1', 'snap2', 'snap3', 'or_flags', 'ck_changes', 'last_flags', 'last_ck', 'ticks', 'calls_disp1', 't0', 't_last']
     print(' '.join('%s=%x' % (n, v) for n, v in zip(names, h)))
-    hist = [struct.unpack_from('<4I', data, 0x100 + 16 * i) for i in range(min(h[2], NHIST))]
-    prev = None
-    for i, e in enumerate(hist):   # print the history where it changes
-        if e != prev:
-            print('  call %4d: 7ec %08x 7e8 %04x 788 %02x vscl %04x dmix %04x' % (i, e[0], e[1], e[2], e[3] >> 16,
-                                                                                  e[3] & 0xFFFF))
-            prev = e
+    print('hook ran for %.2f s of wall clock, %d calls' % (((h[19] - h[18]) & 0xFFFFFFFF) / 1e6, h[2]))
+    for name, off, n, step in (('tick', 0x100, min((h[2] + 7) // 8, NHIST), 8),
+                               ('disp1 call', 0x100 + 16 * NHIST, min(h[17], 256), 1)):
+        prev = None
+        for i in range(n):   # print the history where it changes
+            e = struct.unpack_from('<4I', data, off + 16 * i)
+            if e != prev:
+                print('  %s %5d: 7ec %08x 7e8 %04x 788 %02x vscl %04x dmix %04x' % (name, i * step, e[0], e[1], e[2],
+                                                                                    e[3] >> 16, e[3] & 0xFFFF))
+                prev = e
     for k in range(3):
         regs = blocks(data, 0x10000 * (k + 1))
         if not regs:
