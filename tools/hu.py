@@ -240,7 +240,7 @@ def main():
     p.add_argument('what', choices=['status', 'init', 'bitread', 'decode', 'spmp', 'prepare']); p.add_argument('file', nargs='?')
     p.add_argument('--pics', type=int, default=1, help='decode: pictures to decode (0: all)'); p.add_argument('--skip', type=lambda x: int(x, 0), default=0)
     p = sub.add_parser('aa', help='wireless Android Auto: status | start [PORT] | stop | connect PHONE_IP[:PORT] (cert/key from AACERT.PEM / AAKEY.PEM on the card)')
-    p.add_argument('what', choices=['status', 'start', 'connect', 'stop', 'tap']); p.add_argument('target', nargs='?', default='5288'); p.add_argument('extra', nargs='*')
+    p.add_argument('what', choices=['status', 'start', 'connect', 'stop', 'tap', 'hold', 'stats', 'vlog']); p.add_argument('target', nargs='?', default='5288'); p.add_argument('extra', nargs='*')
     p = sub.add_parser('vpp', help='VPP0 video layer tests: status | bars [SECS [SLOT]] | show [SECS [SLOT]] | restore | poke ADDR VAL | probe MASK [PATH] (notes/vpp0_display.md round 2; restore afterwards)')
     p.add_argument('what', choices=['status', 'bars', 'show', 'restore', 'poke', 'clock', 'linear', 'gclk', 'bisect', 'probe', 'bitscan', 'fetchtest', 'fresh', 'safe', 'replay', 'frame', 'hide', 'aavideo']); p.add_argument('args', nargs='*')
     p = sub.add_parser('osdvid', help='video through the OSD layer: status | show [SECS] | on | off | fast 0|1 | every MS/10')
@@ -367,6 +367,12 @@ def main():
                 payload += bytes(int(x, 0) for x in a.extra[:4])   # 4th: 1 = touchscreen declared as the 1024x600 panel
         elif a.what == 'stop':
             payload = bytes([3])
+        elif a.what == 'hold':   # aa hold SECONDS
+            payload = bytes([5, int(a.target) if a.target != '5288' else 60])
+        elif a.what == 'stats':
+            payload = bytes([6])
+        elif a.what == 'vlog':
+            payload = bytes([7])
         elif a.what == 'tap':   # aa tap X Y [HOLD_MS], panel coordinates (1024x600)
             v = [int(a.target)] + [int(e) for e in a.extra]
             payload = bytes([4]) + struct.pack('<HH', v[0], v[1]) + (struct.pack('<H', v[2]) if len(v) > 2 else b'') + bytes(v[3:4])   # [HOLD_MS [MOVES]]

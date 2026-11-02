@@ -28,7 +28,8 @@ enum { F_FIRST = 1, F_LAST = 2, F_WHOLE = 3, F_CONTROL = 4, F_ENC = 8 };
 static const struct aa_platform *pf;
 static struct aa_status st;
 #ifndef AA_MAX_UNACKED
-#define AA_MAX_UNACKED 4   /* video/audio frames the phone may send before our ack (1 made it stop-and-wait: 37 ms per frame over Wi-Fi) */
+#define AA_MAX_UNACKED 16  /* video/audio frames the phone may send before our ack (1 made it stop-and-wait: 37 ms per frame over Wi-Fi;
+                              * 4 starved audio over Wi-Fi, 45k of 48k samples/s, 2026-11-02) */
 #endif
 #ifdef __nds32__
 #define AA_BIG __attribute__((section(".bigbss")))   /* payload: outside the 1 MB image window (payload.ld) */
@@ -214,8 +215,31 @@ static int send_service_discovery(void)
 static int ch_open[CH_COUNT];
 static u32 session[CH_COUNT];
 
+static u64 m_last_rx[4], m_last_ack[4];
+static int media_idx(int ch) { return ch == CH_VIDEO ? 0 : ch == CH_MEDIA_AUDIO ? 1 : ch == CH_SPEECH_AUDIO ? 2 : 3; }
+static void media_rx_stat(int ch)
+{
+    if (!pf->now_us)
+        return;
+    int i = media_idx(ch);
+    u64 now = pf->now_us();
+    st.m_frames[i]++;
+    if (m_last_rx[i] && now - m_last_rx[i] > st.m_gap_max_us[i])
+        st.m_gap_max_us[i] = (u32)(now - m_last_rx[i]);
+    if (m_last_ack[i]) {
+        u64 r = now - m_last_ack[i];
+        st.m_rtt_sum_us[i] += r;
+        if (r > st.m_rtt_max_us[i])
+            st.m_rtt_max_us[i] = (u32)r;
+        m_last_ack[i] = 0;
+    }
+    m_last_rx[i] = now;
+}
+
 static void ack_media(int ch, u32 session)
 {
+    if (pf->now_us)
+        m_last_ack[media_idx(ch)] = pf->now_us();
     u8 buf[16];
     struct pb b = { buf, buf + sizeof buf };
     pb_u(&b, 1, session);
@@ -324,6 +348,7 @@ static void on_channel(int ch, int ctrl, const u8 *m, int n)
             pb_u(&b, 2, 0);
             send_pb(ch, 0, 0x8008, &b, buf);
         } else if (id == 0x0000 || id == 0x0001) {   /* media data (with / without timestamp) */
+            media_rx_stat(ch);
             u64 ts = 0;
             int off = 0;
             if (id == 0 && bn >= 8) {
@@ -338,8 +363,12 @@ static void on_channel(int ch, int ctrl, const u8 *m, int n)
                 if (pf->video) {
                     u64 t0 = pf->now_us ? pf->now_us() : 0;
                     pf->video(body + off, bn - off, ts);
-                    if (pf->now_us)
-                        st.video_us += pf->now_us() - t0;
+                    if (pf->now_us) {
+                        u64 t1 = pf->now_us();
+                        st.video_us += t1 - t0;
+                        unsigned k = st.vlog_n++ % 64;
+                        st.vlog_t[k] = (u32)(t0 / 1000), st.vlog_b[k] = (u32)(bn - off), st.vlog_dec[k] = (u32)(t1 - t0);
+                    }
                 }
             } else {
                 st.audio_frames++;

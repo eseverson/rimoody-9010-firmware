@@ -25,6 +25,12 @@ struct aa_status {
     unsigned int version_major, version_minor, rx_frames, tx_frames, rx_msgs, channels_open, video_frames, video_bytes,
         audio_frames, unknown, errors;
     unsigned long long decrypt_us, video_us;   /* time spent decrypting records and in the video callback */
+    /* per media channel (0 video, 1 media audio, 2 speech, 3 system): frames, the largest gap between two frames and
+     * the summed / largest time from our ack to the phone's next frame (about one round trip when it was waiting) */
+    unsigned int m_frames[4], m_gap_max_us[4], m_rtt_max_us[4];
+    unsigned long long m_rtt_sum_us[4];
+    /* the last 64 video frames: arrival (ms since boot), bytes, time in the video callback (us) */
+    unsigned int vlog_n, vlog_t[64], vlog_b[64], vlog_dec[64];
 };
 
 int aa_start(const struct aa_platform *p);   /* sends the version request */

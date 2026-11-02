@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+int plat_aa_accept_ok(void) { return 1; }
 
 static unsigned int now_ms;
 u32_t sys_now(void) { return now_ms; }

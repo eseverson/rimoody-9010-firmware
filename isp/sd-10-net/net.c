@@ -1929,7 +1929,15 @@ static u8 my_mac[6];
 static struct wpa wpa;
 static u8 tk[16], gtk[4][16];
 static int tk_ok, gtk_ok[4], keys_ok;
-static cu64 tx_pn, rx_pn_tk, rx_pn_gtk[4];
+static cu64 tx_pn, rx_pn_tk[17], rx_pn_gtk[4];   /* pairwise: one replay counter per TID (0-15) + non-QoS (16) */
+/* 802.11 keeps a CCMP replay counter per TID: the sender's QoS queues interleave their frames, so one shared counter
+ * dropped every frame that came out after a higher-numbered one from another queue (AA audio vs video: TCP
+ * retransmission stalls of 200-450 ms, choppy transitions and sound, 2026-11-02) */
+static int rx_tid(const u8 *f, int hl)   /* QoS control sits after the address fields, before any HT control */
+{
+    (void)hl;
+    return (f[0] & 0x80) ? (f[(f[1] & 3) == 3 ? 30 : 24] & 0x0f) : 16;
+}
 static u32 rx_frames, rx_data, dec_fail, replays, beacons;
 static const u8 our_rsn[] = { 0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
                               0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00 };   /* RSN v1, CCMP/CCMP, PSK, no PMF */
@@ -2217,7 +2225,9 @@ static void eapol_in(const u8 *p, int n)
         tx_data(bss.addr, 0x888e, wpa.tx, wpa.tx_len, wpa.tx_protect);
     if (act & WPA_PTK) {
         cpy(tk, wpa.ptk + 32, 16);
-        tk_ok = 1, tx_pn = 0, rx_pn_tk = 0;
+        tk_ok = 1, tx_pn = 0;
+        for (int i = 0; i < 17; i++)
+            rx_pn_tk[i] = 0;
         hwsec_apply(bss.addr);
     }
     if (act & WPA_GTK) {
@@ -2252,11 +2262,12 @@ static void data_frame(u8 *f, int len)
     if (prot && rx_hwdec) {   /* decrypted by the chip: CCMP header and MIC still there */
         const u8 *h = f + hl;
         cu64 pn = h[0] | (cu64)h[1] << 8 | (cu64)h[4] << 16 | (cu64)h[5] << 24 | (cu64)h[6] << 32 | (cu64)h[7] << 40;
-        if (len < hl + 16 || pn <= rx_pn_tk) {
+        cu64 *last = &rx_pn_tk[rx_tid(f, hl)];
+        if (len < hl + 16 || pn <= *last) {
             replays += len >= hl + 16;
             return;
         }
-        rx_pn_tk = pn;
+        *last = pn;
         body = f + hl + 8, n = len - hl - 16;
         hw_rx++;
     } else if (prot) {
@@ -2270,7 +2281,7 @@ static void data_frame(u8 *f, int len)
                 lprintf("rx: CCMP MIC failure (%s key %d, %d bytes)\n", mc ? "group" : "pairwise", keyid, len);
             return;
         }
-        cu64 *last = mc ? &rx_pn_gtk[keyid] : &rx_pn_tk;
+        cu64 *last = mc ? &rx_pn_gtk[keyid] : &rx_pn_tk[rx_tid(f, hl)];
         if (pn <= *last) {
             replays++;
             return;
@@ -2521,7 +2532,7 @@ static int ap_ie_len, sta_st, ap_eapol_tries, ap_ch;   /* sta_st: 0 none, 1 auth
 static struct wpa_ap wap;
 static u32 ap_t0, sta_t, ap_cmds0;
 static int ap_from_hu1;   /* started by HU1 op 18 (a test): the deadline applies */
-static cu64 ap_gtk_pn, sta_rx_pn;
+static cu64 ap_gtk_pn, sta_rx_pn[17];   /* per TID + non-QoS, as rx_pn_tk */
 static u32 ap_probes, ap_beacon_ok;
 int ap_start_pending, ap_start_ch;
 static char ap_req_ssid[33], ap_req_psk[64];
@@ -2693,9 +2704,12 @@ static void ap_data_frame(u8 *f, int len)
     if ((f[1] & 0x40) && rx_hwdec) {
         const u8 *h = f + hl;
         cu64 pn = h[0] | (cu64)h[1] << 8 | (cu64)h[4] << 16 | (cu64)h[5] << 24 | (cu64)h[6] << 32 | (cu64)h[7] << 40;
-        if (sta_st < 3 || len < hl + 16 || pn <= sta_rx_pn)
+        cu64 *last = &sta_rx_pn[rx_tid(f, hl)];
+        if (sta_st < 3 || len < hl + 16 || pn <= *last) {
+            replays += sta_st >= 3 && len >= hl + 16;
             return;
-        sta_rx_pn = pn;
+        }
+        *last = pn;
         body = f + hl + 8, n = len - hl - 16;
         hw_rx++;
     } else if (f[1] & 0x40) {
@@ -2708,11 +2722,12 @@ static void ap_data_frame(u8 *f, int len)
                 lprintf("ap: CCMP MIC failure from the station (%d bytes)\n", len);
             return;
         }
-        if (pn <= sta_rx_pn) {
+        cu64 *last = &sta_rx_pn[rx_tid(f, hl)];
+        if (pn <= *last) {
             replays++;
             return;
         }
-        sta_rx_pn = pn;
+        *last = pn;
         body = f + hl + 8;
     } else {
         body = f + hl, n = len - hl;
@@ -2733,7 +2748,9 @@ static void ap_data_frame(u8 *f, int len)
         }
         if (a & WPA_AP_DONE) {
             cpy(tk, wap.ptk + 32, 16);
-            tk_ok = keys_ok = 1, tx_pn = 0, sta_rx_pn = 0;
+            tk_ok = keys_ok = 1, tx_pn = 0;
+            for (int i = 0; i < 17; i++)
+                sta_rx_pn[i] = 0;
             hwsec_apply(sta);
             sta_st = 3;
             lprintf("ap: 4-way done, station keyed t=%u\n", ub_ms(0));
@@ -3294,6 +3311,8 @@ static void bt_name_tick(void)
  * most 50 data bytes, `ac 2b` for the last chunk, 50 ms apart. The phone is told our network: the AP when it is up,
  * else the station's network (bench: the phone joins the home Wi-Fi and reaches us at our DHCP address). */
 static int bt_handle = -1;
+static u32 bt_hold_until;   /* aa hold: ignore AA channel opens and TCP sessions until then */
+int plat_aa_accept_ok(void) { return (int)(ub_ms(0) - bt_hold_until) >= 0; }
 static char bt_ip[16], bt_bssid[18];
 static struct aa_wl_ap bt_ap;
 static int bt_rfcomm_send(const unsigned char *p, int n)
@@ -3374,6 +3393,8 @@ void plat_mcu_bt(const cu8 *p, int n, cu32 now)
             if (h == bt_handle)
                 bt_handle = -1;
             lprintf("bt: channel %d closed\n", h);
+        } else if (aa && (int)(ub_ms(0) - bt_hold_until) < 0) {
+            lprintf("bt: AA channel %d open ignored (hold)\n", h);
         } else if (aa) {
             bt_aa_open(h, now);
         } else {
@@ -3604,6 +3625,26 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         aa_touch_hook(1, x, y);
         aa_touch_poll();
         return vfmt_n(t, "aa: tap %u,%u held %u ms (touches sent %u, dropped %u)", x, y, hold, aa_touch_sent, aa_touch_dropped);
+    }
+    if (c == 5) {   /* hold seconds u8: ignore the phone's AA Bluetooth channel that long (reload a build without it reconnecting) */
+        bt_hold_until = ub_ms(0) + 1000u * (n >= 2 ? p[1] : 60);
+        return vfmt_n(t, "aa: Bluetooth AA requests ignored for %u s", n >= 2 ? p[1] : 60);
+    }
+    if (c == 6) {   /* media stats: frames, max gap, ack->next frame avg/max per channel */
+        static const char *const nm[4] = { "video", "media", "speech", "system" };
+        int k = 0;
+        for (int i = 0; i < 4; i++)
+            k += vfmt_n(t + k, "%s %u frames, gap max %u ms, ack->next avg %u max %u ms; ", nm[i], a->m_frames[i],
+                        a->m_gap_max_us[i] / 1000, a->m_frames[i] ? (u32)(a->m_rtt_sum_us[i] / a->m_frames[i] / 1000) : 0,
+                        a->m_rtt_max_us[i] / 1000);
+        return k;
+    }
+    if (c == 7) {   /* the last 64 video frames: "t_ms bytes dec_us" each, oldest first */
+        int k = 0;
+        unsigned n0 = a->vlog_n > 64 ? a->vlog_n - 64 : 0;
+        for (unsigned i = n0; i < a->vlog_n; i++)
+            k += vfmt_n(t + k, "%u %u %u\n", a->vlog_t[i % 64], a->vlog_b[i % 64], a->vlog_dec[i % 64]);
+        return k;
     }
     if (c == 3) {   /* stop: close the session (the listener stays) */
         int was = aa_tcp_connected();

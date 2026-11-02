@@ -104,7 +104,7 @@ static void on_err(void *arg, err_t err)
 static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err)
 {
     (void)arg;
-    if (err != ERR_OK || conn) {   /* one session at a time */
+    if (err != ERR_OK || conn || !plat_aa_accept_ok()) {   /* one session at a time; none during an `aa hold` */
         tcp_abort(pcb);
         return ERR_ABRT;
     }
