@@ -792,8 +792,8 @@ static int power_on(void)
     u16 cr = rr16(REG_CR);
     cr |= BIT(0) | BIT(1) | BIT(2) | BIT(3) | BIT(4) | BIT(5) | BIT(9) | BIT(10);
     rw16(REG_CR, cr);
-    lprintf("power on ok: APS_FSMCO=%p CR=%04x\n", rr32(REG_APS_FSMCO), rr16(REG_CR));
-    return 0;
+    lprintf("power on %s: APS_FSMCO=%p CR=%04x\n", errs ? "FAILED (usb errors)" : "ok", rr32(REG_APS_FSMCO), rr16(REG_CR));
+    return errs ? -1 : 0;   /* a USB error here (e.g. REG_CR = 0 on a chip left running) must take the retry path */
 }
 
 /* rtl8188fu_power_off without the FIFO flush / LPS steps: brings a chip that a SoC reset left running (the dongle keeps
@@ -1729,6 +1729,10 @@ static void fail_or_stay(unsigned int vec, const char *why)
         wait_s = 1800;
     fail_count_set(n + 1);
     lprintf("FAILURE: %s (failure %u in a row), resetting%s%u s\n", why, n + 1, wait_s ? " in " : " now ", wait_s);
+    if (wdev && !errs) {   /* leave the dongle disabled, not running, for the next boot */
+        ehci_rx_stop();
+        power_off();
+    }
     save_own_log('F');
     for (u32 t = 0; t < wait_s; t++) {
         irq_pet();
@@ -1910,7 +1914,9 @@ static int n_cands;
 enum { J_SCAN, J_WAIT, J_AUTH, J_ASSOC, J_4WAY, J_UP, J_ABORT, J_AP };
 static const char *const jnames[] = { "scan", "wait", "auth", "assoc", "4-way", "up", "abort", "ap" };
 static int jstate, scanning, cur_ch, aid, j_tries, j_fail, h2c_mbox;
-static u32 j_t, last_beacon, retry_at;
+static u32 j_t, last_beacon, retry_at, up_at;
+static u8 bad_bss[6];   /* a BSS that completed the handshake but gave no DHCP lease (e.g. a mesh node without backhaul) */
+static u32 bad_until;
 static s8 rssi_now;
 static u8 my_mac[6];
 static struct wpa wpa;
@@ -2219,6 +2225,7 @@ static void eapol_in(const u8 *p, int n)
     if (act & WPA_DONE) {
         keys_ok = 1;
         j_fail = 0;
+        up_at = ub_ms(0);
         set_state(J_UP);
         flush("keys installed");
         ip_link_up();
@@ -2454,10 +2461,20 @@ static int scan_and_choose(void)
     lprintf("scan: %d BSS for the SSID in %u ms\n", n_cands, ub_ms(t0));
     if (!n_cands)
         return -1;
-    int best = 0;
-    for (int i = 1; i < n_cands; i++)
-        if (cands[i].rssi > cands[best].rssi)
+    int best = -1;
+    for (int i = 0; i < n_cands; i++) {
+        int bad = (int)(ub_ms(0) - bad_until) < 0;
+        for (int k = 0; k < 6 && bad; k++)
+            bad = cands[i].addr[k] == bad_bss[k];
+        if (!bad && (best < 0 || cands[i].rssi > cands[best].rssi))
             best = i;
+    }
+    if (best < 0) {   /* only the avoided BSS is around: use it anyway */
+        best = 0;
+        for (int i = 1; i < n_cands; i++)
+            if (cands[i].rssi > cands[best].rssi)
+                best = i;
+    }
     cpy(&bss, &cands[best], sizeof(bss));
     char m[20];
     fmt_mac(m, bss.addr);
@@ -3648,6 +3665,18 @@ static int wifi_init(void)
         return -1;
     cpy(my_mac, efuse + 0xd7, 6);
     rng_mix(efuse, 512);
+    {   /* a SoC reset leaves the dongle powered, its MAC on and its 8051 firmware running; power_on's REG_CR = 0 then
+         * kills the chip's USB side for good (2026-11-01: every vendor request failed until an ignition cycle) */
+        u16 cr = rr16(REG_CR);
+        u8 fw = rr8(REG_MCU_FW_DL);
+        if (errs || (cr & 0xff) || (fw & MCU_FW_RAM_SEL)) {   /* a failed read means the same: not a cold chip */
+            lprintf("chip left running (CR=%04x FW_DL=%02x usb errors %u): powering it off before power on\n", cr, fw, errs);
+            errs = 0;
+            power_off();
+            errs = 0;
+            ub_udelay(20000);
+        }
+    }
     if (power_on()) {
         log_s("power on failed: powering the chip off and trying once more\n");
         errs = 0;
@@ -3705,6 +3734,16 @@ static void net_loop(void)
                 retry_at = ub_ms(0) + 3000, set_state(J_WAIT);
             continue;
         }
+        if (jstate == J_UP && !ip_addr() && ub_ms(0) - up_at > 30000) {
+            char m[20];
+            fmt_mac(m, bss.addr);
+            lprintf("dhcp: no lease from %s in 30 s: avoiding it for 10 min and scanning (issue #8)\n", m);
+            cpy(bad_bss, bss.addr, 6);
+            bad_until = ub_ms(0) + 600000;
+            join_fail("no DHCP lease");
+            set_state(J_SCAN);
+            continue;
+        }
         if (jstate == J_WAIT && (int)(ub_ms(0) - retry_at) >= 0) {
             if (n_cands)
                 join_start();
@@ -3750,6 +3789,13 @@ static void net_loop(void)
                 ap_req_psk[i] = 0;
         }
         irq_check();
+        static int hwwdt_quiesced;
+        if (hwwdt_test_at && !hwwdt_quiesced && ub_ms(0) - hwwdt_test_at > 1000 && wdev && !errs) {
+            /* the reply has gone out: leave the dongle disabled for the boot after the watchdog reset */
+            hwwdt_quiesced = 1;
+            ehci_rx_stop();
+            power_off();
+        }
         if (hwwdt_test_at && ub_ms(0) - hwwdt_test_at > 15000) {
             hwwdt_test_at = 0;
             if (irq_hw_wdt_test_failed())
@@ -3856,7 +3902,24 @@ static void net_task(void *arg)
     flush("usb start");
     own_usb = 1;   /* from here on every Wi-Fi transfer goes through ehci.c; U-Boot only enumerated (hu.py usb uboot reverts) */
 
-    if (wifi_init() == 0) {
+    int wr = wifi_init();
+    for (int tries = 0; wr && tries < 2; tries++) {   /* the dongle is still wedged: port reset + re-enumerate, again */
+        lprintf("wifi: bring-up failed (usb errors %u): USB port reset and retry %d\n", errs, tries + 1);
+        flush("wifi retry");
+        ehci_rx_stop();
+        errs = 0;
+        void *d = usbh_start();
+        if (d)
+            wdev = d;
+        mdelay(200);
+        errs = 0;
+        if (wdev)
+            power_off();
+        errs = 0;
+        mdelay(50);
+        wr = wifi_init();
+    }
+    if (wr == 0) {
         lw_init(my_mac);
         ip_init(my_mac, cfg_token, cfg_ip, RBUF);
         net_loop();
