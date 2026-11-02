@@ -3531,16 +3531,19 @@ static void aa_touch_poll(void)   /* net task: panel 1024 x 600 -> video coordin
         u32 r = aa_tq_r;
         int act = aa_tq[r % 32].action;
         u32 x = aa_tq[r % 32].x, y = aa_tq[r % 32].y;
-        if (aa_touch_panel)
+        if (aa_touch_panel || aa_hd)   /* hd: the phone reads touches in its UI's own 1024 x 600 coordinates, not the
+                                        * 1280 x 720 frame's: adding the margins made every tap land 128,60 off (taps
+                                        * on small buttons did nothing, drags still worked; camera test 2026-11-02) */
             x = x > 1023 ? 1023 : x;
-        else if (aa_hd)
-            x += (1280 - 1024) / 2, y += (720 - 600) / 2;
         else
             x = x * 800u / 1024u, y = y * 480u / 600u;
         __asm__ volatile("" ::: "memory");
         aa_tq_r = r + 1;
-        if (aa_touch(act, (int)x, (int)y) > 0)
+        int sr = aa_touch(act, (int)x, (int)y);
+        if (sr > 0)
             aa_touch_sent++;
+        if (act != 2)
+            lprintf("aa: touch %s %u,%u -> %d\n", act ? "up" : "down", x, y, sr);
     }
 }
 
@@ -3586,6 +3589,21 @@ static int aa_op(int c, const u8 *p, int n, char *t)
             return vfmt_n(t, "ERR aa: listen on %d failed (%d)", port, r);
         aa_listening = port;
         return vfmt_n(t, "aa: listening on TCP %d (cert %u B, key %u B, %d dpi); %s", port, cl, kl, pf.dpi, vm);
+    }
+    if (c == 4 && n >= 5) {   /* tap x u16, y u16 [hold u16 ms] [moves u8] in panel coordinates */
+        unsigned x = p[1] | p[2] << 8, y = p[3] | p[4] << 8, hold = n >= 7 ? (unsigned)(p[5] | p[6] << 8) : 80;
+        int moves = n >= 8 ? p[7] : 0;
+        aa_touch_hook(0, x, y);
+        aa_touch_poll();
+        for (int i = 0; i < moves; i++) {
+            vTaskDelay(pdMS_TO_TICKS(hold / (moves + 1)));
+            aa_touch_hook(2, x + (i & 1), y);
+            aa_touch_poll();
+        }
+        vTaskDelay(pdMS_TO_TICKS(moves ? hold / (moves + 1) : hold));
+        aa_touch_hook(1, x, y);
+        aa_touch_poll();
+        return vfmt_n(t, "aa: tap %u,%u held %u ms (touches sent %u, dropped %u)", x, y, hold, aa_touch_sent, aa_touch_dropped);
     }
     if (c == 3) {   /* stop: close the session (the listener stays) */
         int was = aa_tcp_connected();

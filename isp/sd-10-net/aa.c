@@ -181,6 +181,7 @@ static int send_service_discovery(void)
     y = pb_open(&b, 2);
     pb_u(&b, 1, pf->touch_w ? (u64)pf->touch_w : pf->hd ? 1280 : 800);   /* touch coordinate space */
     pb_u(&b, 2, pf->touch_h ? (u64)pf->touch_h : pf->hd ? 720 : 480);
+    pb_u(&b, 3, 1);    /* type: capacitive */
     pb_close(&b, y);
     pb_close(&b, x);
     pb_close(&b, c);
@@ -558,14 +559,14 @@ int aa_touch(int action, int x, int y)
         return -1;
     static u8 buf[64];
     struct pb b = { buf, buf + sizeof buf };
-    pb_u(&b, 1, pf->now_us ? pf->now_us() * 1000ull : 0);   /* timestamp, ns */
+    pb_u(&b, 1, pf->now_us ? pf->now_us() : 0);   /* timestamp, microseconds (openauto: microseconds too) */
     u8 *te = pb_open(&b, 3);   /* touch event */
     u8 *pt = pb_open(&b, 1);   /* pointer */
     pb_u(&b, 1, (u64)x);
     pb_u(&b, 2, (u64)y);
     pb_u(&b, 3, 0);            /* pointer id */
     pb_close(&b, pt);
-    pb_u(&b, 2, 0);            /* action index */
+    /* no action_index (field 2): openauto and gartnera/headunit leave it out */
     pb_u(&b, 3, (u64)action);  /* 0 down, 1 up, 2 move */
     pb_close(&b, te);
     return send_pb(CH_INPUT, 0, 0x8001, &b, buf);
@@ -579,7 +580,7 @@ int aa_send_key(int keycode, int down)
         return -1;
     static u8 buf[48];
     struct pb b = { buf, buf + sizeof buf };
-    pb_u(&b, 1, pf->now_us ? pf->now_us() * 1000ull : 0);
+    pb_u(&b, 1, pf->now_us ? pf->now_us() : 0);   /* microseconds */
     u8 *ke = pb_open(&b, 4);
     u8 *k = pb_open(&b, 1);
     pb_u(&b, 1, (u64)keycode);
