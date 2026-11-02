@@ -204,6 +204,32 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             k0++;
         return k0 + fmt(o + k0, "vpp linear: checksum %x -> %x, error flags %x -> %x, 7f4 %x 7f8 %x 7fc %x, 7bc %x 7c0 %x", c0,
                    R(0x9c0057e8), e0, R(0x9c0057ec), R(0x9c0057f4), R(0x9c0057f8), R(0x9c0057fc), R(0x9c0057bc), R(0x9c0057c0));
+    } else if (c == 11) {   /* fetch test (after a full reboot: a DDFCH AXI error is sticky): eCos init, then valid physical
+                              * addresses in all three slots BEFORE fetch enable, then fetch on, commit, and samples at
+                              * ~50 ms, ~0.5 s and ~2 s. p[1] bit 0: BIST off (real data); p[2]: 0 decoder slot 0 (luma
+                              * 0x04600000, CbCr +0x180000), 1 the same with CbCr = luma (one master port's region only).
+                              * No restore: `vpp restore` afterwards. */
+        int real = n >= 2 && (p[1] & 1), where = n >= 3 ? p[2] : 0;
+        u32 Y = where == 2 ? 0x03700000u : 0x04600000u, C = where == 1 ? Y : where == 2 ? 0x03800000u : Y + 0x180000u;
+        int full = n >= 4 && p[3];   /* p[3]: 1 = 1024 x 600, no scaling */
+        save();
+        init_fetch(full ? 1024 : 800, full ? 600 : 480, 1920);
+        setbits(0x9c005784, 1u << 28 | 1u << 20, 0);   /* physical addresses */
+        R(0x9c005798) = R(0x9c00579c) = R(0x9c0057a0) = Y >> 10;
+        R(0x9c0057a4) = R(0x9c0057a8) = R(0x9c0057ac) = C >> 10;
+        R(0x9c0057f0) = real ? 0x80801002 : 0x80801011;
+        setbits(0x9c006c84, 0xfu, 2u | 1u << 2);   /* VPP0 opaque, OSD0 transparent */
+        int k = fmt(o, "fetch test (%s, CbCr %x): before enable flags %x;", real ? "slot 0 data" : "BIST bars", C, R(0x9c0057ec));
+        setbits(0x9c005788, 0x1c, 0x10);
+        R(0x9c005a80) |= 1;
+        static const int waits[] = { 1000000, 9000000, 30000000 };
+        for (int i = 0; i < 3; i++) {
+            for (volatile int j = 0; j < waits[i]; j++)
+                ;
+            k += fmt(o + k, " [t%d ddfch %x/%x axi %x hs %x vscl %x dmix %x]", i, R(0x9c0057e8), R(0x9c0057ec), R(0x9c0057f4),
+                     R(0x9c0057fc) & 3, R(0x9c005e58), R(0x9c006c9c));
+        }
+        return k;
     } else if (c == 10 && n >= 7) {   /* bit scan: p[1..4] register (LE), p[5] first bit, p[6] count. After the probe's step 1
                                         * (eCos init, DDFCH color bar, fetch on, VPP0 opaque), flip each bit alone for ~3 frames
                                         * and report every bit after which a stage shows data. `vpp restore` afterwards. */
