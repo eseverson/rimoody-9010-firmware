@@ -7,7 +7,9 @@ Conventions used below: `R(x)` / `W(x, v)` are 32-bit MMIO accesses at `0x9C0000
 ## Payload implementation (status)
 
 - `isp/sd-10-net/audio.c` follows sections 3..6 and 9 ("alter" ring 10): DSP window at 0x02400000 (0x4C4800 bytes, between the FreeRTOS heap and the LVGL heap), microcode checksummed and copied from the flash mapping, every DSP-memory access through the cache with explicit write-back/invalidate. A small mixer adds Android Auto media (48 kHz stereo), guidance/speech and system sounds (16 kHz mono, repeated 3x) into ring 10 at per-source cursors. HU1 op 27 / `hu.py audio status|init|tone HZ|volume N|mute 0|1`. UI volume and mute follow once it is up; the volume is saved in UI.TXT.
-- **Not yet run on the unit** (2026-11-02, commits 59d9080, ef3d56f). Without speakers the checks are: sys state run, front play, heartbeat 0x18B4 moving, ring-10 read pointer 0x18CC advancing while the tone runs. Not started at boot until those pass.
+- **Runs on the unit (2026-11-02, build 20261102-025238, persisted):** from a cold boot the DSP comes up first try (state 0x21011113 = sys run, front play, the same as stock; banks 3/5 loaded; 0x1E14 = 0xC79BFF40 as in eCos; ring 10 address published by the DSP), with 0 mailbox timeouts. With the test tone the read pointer 0x18CC advances 192 KB/s = 48 kHz stereo s16, no drops. A warm re-init (exec over a running DSP) works too.
+- Boot order (net.c `audio_boot`, as eCos power_on): MCU `01 01`, 200 ms, GPIO13 high (was low and not GPIO-owned under U-Boot; probably the 7388's ST-BY), 100 ms, DSP, MCU `01 00` unless the UI is muted.
+- **Not verified:** sound at the speakers (none attached on the bench), and Android Auto audio end to end (needs the phone).
 
 ## Summary
 

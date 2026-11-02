@@ -3207,6 +3207,27 @@ void plat_ui_mute(int on) { ui_req_mute = on; }
 static volatile int ui_vol_want = -1, ui_mute_want;
 static int aud_vol_sent = -1, aud_mute_sent = -1;
 void plat_ui_volume(int index) { ui_vol_want = index; }
+
+/* Audio at boot, as stock eCos power_on 0x47af0a does it around the DSP: MCU system mute (01 01), 200 ms, GPIO13 high
+ * (sysio 0x69: probably the 7388 amplifier's ST-BY; low under U-Boot), 100 ms, then the DSP (audio.c), then the MCU
+ * unmute (01 00) unless the UI is muted. Volume and the DSP mute follow from the UI sync in the net loop. */
+static void audio_boot(void)
+{
+    u8 m[2] = { 0x01, 0x01 };
+    mcu_send(&mcu_st, m, 2, ub_ms(0));
+    clk_udelay(200000);
+    IOREG(0x9c0032e4) |= 1u << 13;              /* GPIO_FIRST: the pin is a GPIO */
+    IOREG(0x9c000320) = 0x20002000u;            /* OE (masked write, bit 13) */
+    IOREG(0x9c000340) = 0x20002000u;            /* OUT high */
+    clk_udelay(100000);
+    int r = aud_init(lprintf);
+    aud_vol_sent = aud_mute_sent = -1;
+    if (!r && !ui_mute_want) {
+        m[1] = 0x00;
+        mcu_send(&mcu_st, m, 2, ub_ms(0));
+    }
+    lprintf("audio: boot %s (%d)\n", r ? "FAILED" : "ok", r);
+}
 void plat_ui_reboot(void) { ui_req_reboot = 1; }
 void plat_ui_boot_stock(void) { ui_req_stock = 1; }
 void plat_ui_aa_key(int keycode) { ui_req_key = keycode; }
@@ -4199,6 +4220,7 @@ static void net_task(void *arg)
     }
     if (load_config())
         fail_or_stay(103, "no config (WIFI.TXT)");
+    audio_boot();
 
     log_s("\n# USB (usbh.c)\n");
     u32 t0 = ub_ms(0);
