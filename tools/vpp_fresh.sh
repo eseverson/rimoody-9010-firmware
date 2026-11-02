@@ -14,6 +14,7 @@ wait_up() {   # wait until the unit answers a ping (up to 120 s)
 for v in "$@"; do
     IFS='|' read -r label args pre <<<"$v"
     echo "=== $label: fresh $args ${pre:+(pre: $pre)} $(date +%T)" | tee -a "$LOG"
+    hu --timeout 1 vpp safe >/dev/null 2>&1   # leave nothing fetching across the reset
     hu irq hwwdt >/dev/null 2>&1; sleep 10
     wait_up || { echo "unit did not come back" | tee -a "$LOG"; exit 1; }
     hu exec "$IMG" 2>&1 | tail -1 | tee -a "$LOG"

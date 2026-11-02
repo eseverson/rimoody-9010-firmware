@@ -209,3 +209,19 @@ New op `hu.py vpp fresh FLAGS WHERE PITCH [ADDR:MASK:VAL ...]` (vpp.c c == 12) r
 
 - One-bit/one-register pokes before the fetch enable, each after a full reset, physical mode, BIST bars: 0x784 b13/b14 off (IRBG), b15/b16 off, 0xF000 pattern; 0x788 b6/b7 (urgent) off; 0x78C = 0; 0x790 = 0xFFFFFFFF: all unchanged (0x20200 at frame 1, sticky 0x20220, no output after frame 1).
 - **0x790 = 0** (its reset value under U-Boot; eCos writes 0x3DEF): no AXI error at all, and the BIST bars keep coming every frame (DDFCH 0x989F, VSCL 0xA475, DMIX 0x5249 steady through frame 12, flags 0x20 only), in physical and in index mode. But with the BIST off (real data, physical or index, and `vpp show` of a decoded bars.h264 picture) the DDFCH and VSCL checksums stay 0 with flags 0x20: so 0x790 = 0 does not fix the fetch, it stops DDFCH issuing reads at all (the BIST then runs without data). 0x3DEF = three 5-bit fields of 15 (15 | 15 << 5 | 15 << 10): plausibly per-queue command / outstanding-request thresholds. Next: bisect the field values with real data (1/2/4/8 each, one field at a time) looking for reads that complete without an AXI error.
+
+### Restart attempts, 0x790 per field, uMCTL2 (2026-11-01 18:0x, build 20261101-180033, fresh7..8.log)
+
+`vpp fresh` WHERE byte now carries actions at the start of frame 3: 0x10 clear 0x7EC with 0x00011720 (Sunplus doc: b5/b8/b9/b10 W1C, the response fields clear with 1), 0x20 eCos's stop/start (VSCL, 0x9C007000 b0, 0x9C006F80 off, commit, on, commit), 0x40 fetch off for a frame, clear, on; 0x80 reads uMCTL2 POISONSTAT/PSTAT/POISONCFG around the run. New `vpp safe` (c == 13: fetch off, BIST off, VPP0 transparent, commit); `vpp_fresh.sh` runs it before every reset (one unit hang after a reset from a fetching state, 17:50).
+
+- Restart: all three actions fail. After the clear the flags come back within the next frame (0x20200), so every fetch attempt fails, not only the first; no frame after frame 1 carries data.
+- uMCTL2: POISONSTAT 0 before and after a failing run, POISONCFG 0x110000, PSTAT 0: the DRAM controller rejects nothing, so the SLVERR comes from the interconnect between DDFCH and the controller.
+- 0x790 read as SP7021's luma [3:0] / chroma [7:4] command-queue thresholds, real data, physical mode:
+  - 0x3DEF (eCos, 15/14): MA0 burst count + MA1 SLVERR (0x20220).
+  - 0x3DE1 (luma 1): 0x20120 (MA0 burst error gone, b8 luma line buffer empty, MA1 SLVERR).
+  - 0x3D1F (chroma 1): 0x10220 (MA0 burst error, MA1 response 1 instead of SLVERR).
+  - 0x421 / 0x11 (1/1): 0x20120 / **0x10120: no burst error, no SLVERR**, but b8 and MA1 response 1, and still no data (DDFCH checksum 0); the BIST also stops after frame 1 with 0x11. IRBG off makes no difference.
+  - 0x1084 (4/8), 0x22 (2/2): both errors back.
+  So each queue's error depends on more than one outstanding command, but one outstanding command per queue still delivers nothing.
+- The CPU's register polling stalls at the first fetch: the frame-1 wrap is seen at line 14..61 instead of line 1 (the loop runs ~23 polls per line otherwise), so DDFCH's first reads hold the bus for up to ~1 ms. The unit hung (Wi-Fi up, no DHCP) right after the 0x790 = 0x12 test was started (18:07), needing a power cycle.
+- Open question raised by all of this: eCos never reads or clears 0x7EC, and nothing shows that the stock firmware ever displays video through VPP0 on this unit. If DDFCH's AXI path is unusable on this board, the OSD path (osdvid.c, working) is the way to show video.

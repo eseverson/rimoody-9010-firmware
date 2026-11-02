@@ -239,7 +239,7 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
                                         * (addr, mask, value, LE), applied before the fetch enable. After the commit, a trace of
                                         * TGEN0 line / frame against every change of the DDFCH flags and checksum, VSCL and DMIX
                                         * checksums, 0x7F4 and 0x7FC, for 6 frames. No restore. */
-        u32 fl = p[1], where = p[2], pitch = p[3] | (u32)p[4] << 8;
+        u32 fl = p[1], where = p[2] & 3, act = p[2] & 0xf0, pitch = p[3] | (u32)p[4] << 8;
         if (R(0x9c0057ec))
             return fmt(o, "ERR fresh: DDFCH flags already %x, reset first (hu.py irq hwwdt)", R(0x9c0057ec));
         int full = fl & 32;
@@ -271,8 +271,8 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             u32 a = p[i] | (u32)p[i + 1] << 8 | (u32)p[i + 2] << 16 | (u32)p[i + 3] << 24;
             u32 m = p[i + 4] | (u32)p[i + 5] << 8 | (u32)p[i + 6] << 16 | (u32)p[i + 7] << 24;
             u32 v = p[i + 8] | (u32)p[i + 9] << 8 | (u32)p[i + 10] << 16 | (u32)p[i + 11] << 24;
-            if ((a & 3) || a < 0x9c000000u || a >= 0x9c010000u)
-                return fmt(o, "ERR fresh: poke %x outside 0x9C000000..0x9C00FFFF", a);
+            if ((a & 3) || !((a >= 0x9c000000u && a < 0x9c010000u) || (a >= 0x9c107000u && a < 0x9c107400u)))
+                return fmt(o, "ERR fresh: poke %x outside 0x9C000000..0x9C00FFFF / uMCTL2 0x9C107000..0x9C1073FF", a);
             setbits(a, m, v);
         }
         int k = fmt(o, "fresh fl %x Y %x C %x %ux%u pitch %u pokes %d: 784 %x 788 %x 7dc %x 7f0 %x, before flags %x;", fl, Y, C, w,
@@ -283,6 +283,10 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
         /* trace: an event whenever a watched value changes or TGEN0's line counter wraps (new frame) */
         u32 prev[6] = { ~0u, ~0u, ~0u, ~0u, ~0u, ~0u }, pl = R(0x9c006ab4) & 0xfff, frame = 0, it = 0;
         int ev = 0;
+        int um = act & 0x80;   /* uMCTL2 POISONSTAT (b16: a read was answered with an error), PSTAT, POISONCFG (opt-in) */
+        u32 ps0 = um ? R(0x9c107370) : 0;
+        if (um)
+            k += fmt(o + k, " umctl poisonstat %x pstat %x poisoncfg %x;", ps0, R(0x9c1073fc), R(0x9c10736c));
         k += fmt(o + k, " start line %u;", pl);
         u32 orf = 0, nchg = 0, nfr = (fl & 128) ? 12 : 6;   /* b7: summary, one line per frame (OR of flags, changes seen) */
         while (frame < nfr && ++it < 40000000u && ev < 48) {
@@ -290,8 +294,24 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             u32 cur[6] = { R(0x9c0057ec), R(0x9c0057e8), R(0x9c005e58), R(0x9c006c9c), R(0x9c0057f4), R(0x9c0057fc) & 3 };
             int wrap = ln < pl, chg = 0;
             pl = ln;
-            if (wrap)
-                frame++;
+            if (wrap && ++frame == 3 && (act & 0x70)) {   /* frame 3 starts: try to restart after the first-fetch error */
+                if (act & 0x10)
+                    R(0x9c0057ec) = 0x00011720;   /* W1C b5 b8 b9 b10; response fields [13:12]/[17:16] clear with 1 */
+                if (act & 0x20) {   /* eCos's stop/start (0x52774c / 0x5276d8): VSCL and the 6F80/7000 block off, commit, on */
+                    R(0x9c005d80) = 0, setbits(0x9c007000, 1, 0), R(0x9c006f80) = 0, R(0x9c005a80) |= 1;
+                    for (volatile int j = 0; j < 20000; j++)
+                        ;
+                    R(0x9c005d80) = 1, setbits(0x9c007000, 1, 1), R(0x9c006f80) = 1, R(0x9c005a80) |= 1;
+                }
+                if (act & 0x40) {   /* fetch enable off for a frame's worth of polling, clear, back on */
+                    setbits(0x9c005788, 0x10, 0), R(0x9c005a80) |= 1;
+                    for (u32 l0 = R(0x9c006ab4) & 0xfff, j = 0; j < 5000000 && (R(0x9c006ab4) & 0xfff) >= l0; j++)
+                        ;
+                    R(0x9c0057ec) = 0x00011720;
+                    setbits(0x9c005788, 0x10, 0x10), R(0x9c005a80) |= 1;
+                }
+                k += fmt(o + k, " [act %x at F3: flags now %x]", act, R(0x9c0057ec));
+            }
             for (int i = 0; i < 6; i++)
                 chg |= cur[i] != prev[i], prev[i] = cur[i];
             orf |= cur[0], nchg += chg;
@@ -304,7 +324,16 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
                 ev++;
             }
         }
-        return k + fmt(o + k, " end it %u frames %u", it, frame);
+        k += fmt(o + k, " end it %u frames %u", it, frame);
+        if (um)
+            k += fmt(o + k, "; umctl poisonstat %x -> %x pstat %x", ps0, R(0x9c107370), R(0x9c1073fc));
+        return k;
+    } else if (c == 13) {   /* safe: fetch off, BIST off, VPP0 transparent in DMIX, commit (run before a reset) */
+        setbits(0x9c005788, 0x1c, 0);
+        R(0x9c0057f0) &= ~1u;
+        setbits(0x9c006c84, 3, 1);
+        R(0x9c005a80) |= 1;
+        return fmt(o, "vpp safe: 788 %x 7f0 %x c84 %x flags %x", R(0x9c005788), R(0x9c0057f0), R(0x9c006c84), R(0x9c0057ec));
     } else if (c == 10 && n >= 7) {   /* bit scan: p[1..4] register (LE), p[5] first bit, p[6] count. After the probe's step 1
                                         * (eCos init, DDFCH color bar, fetch on, VPP0 opaque), flip each bit alone for ~3 frames
                                         * and report every bit after which a stage shows data. `vpp restore` afterwards. */
