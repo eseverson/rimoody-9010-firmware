@@ -4,6 +4,11 @@ Status 2026-11-02. Static analysis of `ecos.bin` (load 0x301040) and the flash d
 
 Conventions used below: `R(x)` / `W(x, v)` are 32-bit MMIO accesses at `0x9C000000 + x`. `delay_ticks(n)` is eCos `0x3bb16c` (thread sleep once the scheduler runs, busy wait on the eCos tick counter before that; audio init runs before the scheduler). The 1000-tick timeouts are logged as 1 s timeouts, so a tick is about 1 ms (inference). `bswap16` is NDS32 `wsbh`. The DSP sees its shared-memory halfwords big-endian, so eCos byte-swaps every parameter halfword it writes.
 
+## Payload implementation (status)
+
+- `isp/sd-10-net/audio.c` follows sections 3..6 and 9 ("alter" ring 10): DSP window at 0x02400000 (0x4C4800 bytes, between the FreeRTOS heap and the LVGL heap), microcode checksummed and copied from the flash mapping, every DSP-memory access through the cache with explicit write-back/invalidate. A small mixer adds Android Auto media (48 kHz stereo), guidance/speech and system sounds (16 kHz mono, repeated 3x) into ring 10 at per-source cursors. HU1 op 27 / `hu.py audio status|init|tone HZ|volume N|mute 0|1`. UI volume and mute follow once it is up; the volume is saved in UI.TXT.
+- **Not yet run on the unit** (2026-11-02, commits 59d9080, ef3d56f). Without speakers the checks are: sys state run, front play, heartbeat 0x18B4 moving, ring-10 read pointer 0x18CC advancing while the tone runs. Not started at boot until those pass.
+
 ## Summary
 
 - **Microcode is plain data in flash.** A codec table (`0x3bf8a4`) points at 15 blobs with 0x40-byte big-endian `if` headers; code and data are copied with `memcpy`, no compression. Header checksums (`rotl1(c ^ byte)`) verify for every blob. Boot loads codec 0x00 (system, bank 0), 0x1d (bank 3) and 0x1c (bank 5). Extraction recipe in section 1.
