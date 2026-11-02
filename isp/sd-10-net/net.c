@@ -3124,6 +3124,8 @@ static u8 aa_cert[8192], aa_key[8192];
 static int aa_listening;
 static char aa_vmsg[160];
 static unsigned int osd_interval_us = 100000;
+static int aa_vpp = 1;   /* AA video through VPP0 (vpp_show_video); HU1 op 24 sub 17 turns it off for the OSD path */
+static u32 aa_vpp_frames;
 static u32 aa_verr_logged;
 
 static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
@@ -3136,7 +3138,12 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
            (issue #5 makes it cheaper) */
         static unsigned long long next_show;   /* osd_interval_us: file scope, set by op 25 */
         unsigned long long now = clk_us();
-        if (osdvid_on_now() && now >= next_show && vdec_last_slot(&l, &c) >= 0) {
+        if (aa_vpp && vdec_last_slot(&l, &c) >= 0) {   /* VPP0: hardware fetch + scaler, every picture */
+            unsigned int w, h;
+            vdec_dims(&w, &h);
+            if (vpp_show_video(l, c, w, h) == 0)
+                aa_vpp_frames++;
+        } else if (osdvid_on_now() && now >= next_show && vdec_last_slot(&l, &c) >= 0) {
             unsigned int w, h;
             vdec_dims(&w, &h);
             osdvid_frame(l, c, w, h);
@@ -3509,6 +3516,12 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
                 fb_disable(), vpp_osd_was_on = 1;
             con_lock_give();
             vpp_restore_at = ub_ms(0) + 1000u * (n >= 2 && p[1] ? p[1] : 20);
+        }
+        if (c == 17) {   /* AA video path: p[1] 1 = VPP0 (default), 0 = OSD (osdvid) */
+            aa_vpp = n >= 2 ? p[1] : 1;
+            if (!aa_vpp)
+                vpp_hide();
+            return vfmt_n(t, "aa video via %s, %u pictures shown through VPP0", aa_vpp ? "VPP0" : "OSD", aa_vpp_frames);
         }
         int k = vpp_op(p, n, t, vfmt_n, (u32)slot, 0x14u + (u32)slot);
         if (c == 3)

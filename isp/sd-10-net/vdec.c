@@ -99,7 +99,9 @@ static void bg2d_init(void)   /* 0x52ec48, display init's "2dbg" */
  * (DDFCH) reads through this unit even with physical addresses and locks up on the first fetch without it. */
 void vdec_bg2d_ensure(void)
 {
-    if (M(0xa400) != 0x07000000 || M(0xa404) != 0x07000000)
+    /* judged by the control registers bg2d_init writes, not by the entries: after a decode the frame entries are in
+     * use, and re-running the init would wipe them (and the display's) */
+    if (M(0xa384) != 0x83828100 || M(0xa3b8) != 0x0a000a00 || !(M(0xa39c) & 0x2000))
         bg2d_init();
 }
 

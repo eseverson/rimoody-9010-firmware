@@ -7,4 +7,9 @@ typedef int (*vpp_fmt)(char *, const char *, ...);
 int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, unsigned int luma_idx, unsigned int chroma_idx);
 void vpp_restore(void);
 int vpp_active(void);
+/* show a decoded picture (physical luma / chroma of a frame in the decoder's eCos layout, w x h) through VPP0 */
+int vpp_show_frame(unsigned int luma, unsigned int chroma, unsigned int fw, unsigned int fh, unsigned int cx, unsigned int cy,
+                   unsigned int cw, unsigned int ch);
+int vpp_show_video(unsigned int luma, unsigned int chroma, unsigned int w, unsigned int h);
+void vpp_hide(void);
 #endif

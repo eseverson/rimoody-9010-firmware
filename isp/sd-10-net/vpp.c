@@ -148,6 +148,85 @@ static int trace_frames(char *o, vpp_fmt fmt, u32 frames)
     return k;
 }
 
+/* Show a decoded picture through VPP0 the way eCos does (notes/vpp0_display.md, "Decoded H.264 on the panel"):
+ * DDFCH index mode through two BG2D display entries (0x48 luma, 0x49 chroma; gp 2 = pitch slot 2, eCos's frame layout
+ * bits 0x07000000, which the decoder also writes with vdec_scan_type 1), fetch ALIGN128(w) x h, the scaler crops w x h
+ * and scales it to the panel. luma/chroma are physical addresses (below 64 MB). First call sets everything up; later
+ * calls only repoint the entries and commit (eCos commits from its field ISR; here it lands at the next frame). */
+#define DISP_LUMA 0x48
+#define DISP_CHROMA 0x49
+static u32 shown_w, shown_h, shown_key, shown_size;
+static void bg2d_entry(u32 idx, u32 phys) { R(0x9c00a400 + 4 * idx) = (phys >> 10) | 2u << 19 | 0x07000000u; }
+
+int vpp_show_frame(u32 luma, u32 chroma, u32 fw, u32 fh, u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    /* the frame is fw x fh in the decoder's buffer; DDFCH fetches the cw x ch window at (cx, cy) (its own crop: 0x7D8
+     * origin, 0x7D4 size; a fetch wider than 1024 does not work), the scaler shows it on the 1024 x 600 panel: 1:1 at
+     * exactly 1024 x 600, upscaled when smaller. Downscaling is not set up (the factor field truncates). */
+    if (!fw || !fh || fw > 1920 || fh > 1088 || (luma | chroma) >= 0x04000000u || !cw || !ch || cw > 1024 || ch > 600 ||
+        cx + cw > fw || cy + ch > fh)
+        return -1;
+    vdec_bg2d_ensure();
+    bg2d_entry(DISP_LUMA, luma);
+    bg2d_entry(DISP_CHROMA, chroma);
+    u32 key = cx << 16 | cy, size = cw << 16 | ch;
+    if (fw == shown_w && fh == shown_h && key == shown_key && size == shown_size) {
+        R(0x9c005a80) |= 1;
+        return 0;
+    }
+    u32 wa = (fw + 127) & ~127u, ca = (cw + 127) & ~127u;
+    if (cx || ca > fw)
+        ca = cw;   /* a cropped window is fetched at its own width (eCos fetches ALIGN128 of the full width) */
+    *(volatile unsigned char *)0x9c00a382 = 1920 / 16;   /* pitch slot 2 = the decoder's frame pitch (vdec.c FB_PITCH) */
+    init_post();
+    R(0x9c005d80) = 1;
+    /* scaler: input ca x ch, crop cw x ch at 0,0, out 1024 x 600 (eCos: dc8 32, e00 22, dbc 8080, dc0 10) */
+    u32 hf = ((cw - 1) << 22) / (1024 - 1), vf = ((ch - 1) << 22) / (600 - 1);
+    R(0x9c005d8c) = ca, R(0x9c005d90) = ch;
+    R(0x9c005d94) = 0, R(0x9c005d98) = 0, R(0x9c005d9c) = cw, R(0x9c005da0) = ch;
+    R(0x9c005da4) = 1024, R(0x9c005da8) = 600, R(0x9c005dac) = 0, R(0x9c005db0) = 0, R(0x9c005db4) = 1024, R(0x9c005db8) = 600;
+    R(0x9c005dbc) = 0x8080, R(0x9c005dc0) = 0x10;
+    R(0x9c005dcc) = hf & 0xffff, R(0x9c005dd0) = (hf >> 16) & 0x1ff;
+    R(0x9c005e04) = vf & 0xffff, R(0x9c005e08) = (vf >> 16) & 0x1ff;
+    R(0x9c005dc8) = 0x32, R(0x9c005e00) = 0x22;
+    setbits(0x9c005d84, 0x2ff, 1u << 0 | 1u << 1 | (cw != 1024) << 2 | (ch != 600) << 3 | (ch != 600) << 4 | 1u << 6);
+    R(0x9c005acc) = ca, R(0x9c005af0) = ch;   /* G181 sizes */
+    /* DDFCH, eCos's index-mode values */
+    R(0x9c005780) = 1;
+    R(0x9c005784) = 0x15e000;
+    R(0x9c00578c) = 0xd6d6d6;
+    R(0x9c005790) = 0xef;
+    R(0x9c005798) = R(0x9c00579c) = R(0x9c0057a0) = DISP_LUMA;
+    R(0x9c0057a4) = R(0x9c0057a8) = R(0x9c0057ac) = DISP_CHROMA;
+    R(0x9c0057b0) |= 0x10001, R(0x9c0057b4) |= 0x10001, R(0x9c0057b8) |= 0x10001;
+    R(0x9c0057bc) = 0x14;
+    R(0x9c0057d0) = wa, R(0x9c0057d4) = ch << 16 | ca, R(0x9c0057d8) = cy << 16 | cx;
+    R(0x9c0057dc) = 0x10011, R(0x9c0057e4) = 0x10;
+    R(0x9c0057f0) = 0x80801020;   /* BIST off */
+    R(0x9c005788) = 0xf8;
+    setbits(0x9c006c84, 0xf, 2u | 1u << 2);   /* VPP0 opaque, OSD0 (console) transparent */
+    R(0x9c005a80) = 0x203;   /* b0 commit */
+    shown_w = fw, shown_h = fh, shown_key = key, shown_size = size;
+    return 0;
+}
+
+int vpp_show_video(u32 luma, u32 chroma, u32 w, u32 h)   /* the centre 1024 x 600 of a bigger frame 1:1, else all of it */
+{
+    if (w > 1024 || h > 600) {
+        u32 cw = w < 1024 ? w : 1024, ch = h < 600 ? h : 600;
+        return vpp_show_frame(luma, chroma, w, h, ((w - cw) / 2) & ~63u, (h - ch) / 2, cw, ch);
+    }
+    return vpp_show_frame(luma, chroma, w, h, 0, 0, w, h);
+}
+
+void vpp_hide(void)   /* back to the console: VPP0 transparent, fetch off */
+{
+    setbits(0x9c006c84, 0xf, 1u | 0u << 2);
+    setbits(0x9c005788, 0x1c, 0);
+    R(0x9c005a80) |= 1;
+    shown_w = shown_h = shown_key = shown_size = 0;
+}
+
 int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u32 chroma_idx)
 {
     int c = n ? p[0] : 0;
@@ -366,6 +445,20 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
         setbits(0x9c006c84, 3, 1);
         R(0x9c005a80) |= 1;
         return fmt(o, "vpp safe: 788 %x 7f0 %x c84 %x flags %x", R(0x9c005788), R(0x9c0057f0), R(0x9c006c84), R(0x9c0057ec));
+    } else if (c == 15) {   /* frame: show the last decoded picture through vpp_show_frame (p[1..2] w, p[3..4] h; 0 = 800x480);
+                              * c == 16: hide */
+        u32 w = n >= 3 ? (p[1] | (u32)p[2] << 8) : 0, h = n >= 5 ? (p[3] | (u32)p[4] << 8) : 0;
+        if (!w)
+            w = 800, h = 480;
+        u32 la = (R(0x9c00a400 + 4 * luma_idx) & 0x7ffff) << 10, ca = (R(0x9c00a400 + 4 * chroma_idx) & 0x7ffff) << 10;
+        int r = vpp_show_video(la, ca, w, h);
+        for (volatile int i = 0; i < 3000000; i++)
+            ;
+        return fmt(o, "vpp frame %ux%u luma %x chroma %x: %d; ddfch ck %x flags %x vscl %x dmix %x", w, h, la, ca, r, R(0x9c0057e8),
+                   R(0x9c0057ec), R(0x9c005e58), R(0x9c006c9c));
+    } else if (c == 16) {
+        vpp_hide();
+        return fmt(o, "vpp hidden");
     } else if (c == 14 && n >= 7) {   /* replay (one per full reset): p[1..4] address of a list written beforehand with
                                         * hu.py write, p[5..6] entry count; each entry { addr, value } is written in order,
                                         * then a 12-frame summary trace. tools/ecos_snap.py builds the list from a register
