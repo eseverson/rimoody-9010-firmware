@@ -9,17 +9,70 @@ static struct tcp_pcb *listener, *conn;
 static struct aa_platform plat;
 static unsigned int tx_drops;
 
+/* Bytes lwIP had no room for, in order. A dropped frame is fatal: a lost media ack stalls the phone (it sends at most
+ * 4 unacked frames), and every later TLS record would fail its sequence number. */
+#ifdef __nds32__
+#define BIG __attribute__((section(".bigbss")))
+#else
+#define BIG
+#endif
+static unsigned char pend[0x20000] BIG;
+static unsigned int pend_r, pend_w, pend_max;
+
+static void flush_pending(void)
+{
+    if (!conn)
+        return;
+    int wrote = 0;
+    while (pend_r != pend_w) {
+        unsigned int n = pend_w - pend_r, room = tcp_sndbuf(conn);
+        if (n > room)
+            n = room;
+        if (n > 0x4000)
+            n = 0x4000;
+        if (!n || tcp_write(conn, pend + pend_r, (u16_t)n, TCP_WRITE_FLAG_COPY) != ERR_OK)
+            break;
+        pend_r += n, wrote = 1;
+    }
+    if (pend_r == pend_w)
+        pend_r = pend_w = 0;
+    if (wrote)
+        tcp_output(conn);
+}
+
 static int tcp_send_cb(const unsigned char *p, int n)
 {
     if (!conn)
         return -1;
-    if (tcp_sndbuf(conn) < (unsigned)n || tcp_write(conn, p, (u16_t)n, TCP_WRITE_FLAG_COPY) != ERR_OK) {
-        tx_drops++;
-        return -1;
+    flush_pending();
+    if (pend_r == pend_w && tcp_sndbuf(conn) >= (unsigned)n && tcp_write(conn, p, (u16_t)n, TCP_WRITE_FLAG_COPY) == ERR_OK) {
+        tcp_output(conn);
+        return n;
     }
-    tcp_output(conn);
+    if (pend_w + (unsigned)n > sizeof pend) {   /* compact, then give up if it still does not fit */
+        memmove(pend, pend + pend_r, pend_w - pend_r);
+        pend_w -= pend_r, pend_r = 0;
+        if (pend_w + (unsigned)n > sizeof pend) {
+            tx_drops++;
+            return -1;
+        }
+    }
+    memcpy(pend + pend_w, p, (size_t)n);
+    pend_w += n;
+    if (pend_w - pend_r > pend_max)
+        pend_max = pend_w - pend_r;
     return n;
 }
+
+static err_t on_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
+{
+    (void)arg, (void)pcb, (void)len;
+    flush_pending();
+    return ERR_OK;
+}
+
+void aa_tcp_poll(void) { flush_pending(); }
+unsigned int aa_tcp_pending_max(void) { return pend_max; }
 
 static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 {
@@ -56,8 +109,10 @@ static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err)
         return ERR_ABRT;
     }
     conn = pcb;
+    pend_r = pend_w = 0;
     tcp_nagle_disable(pcb);
     tcp_recv(pcb, on_recv);
+    tcp_sent(pcb, on_sent);
     tcp_err(pcb, on_err);
     aa_start(&plat);   /* version request goes out right away */
     return ERR_OK;
@@ -85,8 +140,10 @@ static err_t on_connected(void *arg, struct tcp_pcb *pcb, err_t err)
     if (err != ERR_OK)
         return err;
     conn = pcb;
+    pend_r = pend_w = 0;
     tcp_nagle_disable(pcb);
     tcp_recv(pcb, on_recv);
+    tcp_sent(pcb, on_sent);
     aa_start(&plat);
     return ERR_OK;
 }

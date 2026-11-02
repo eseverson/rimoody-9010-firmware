@@ -8,4 +8,6 @@ int aa_tcp_listen(const struct aa_platform *p, const void *netif_or_null, int po
 int aa_tcp_connect(const struct aa_platform *p, unsigned int ip_be, int port);
 int aa_tcp_connected(void);
 unsigned int aa_tcp_tx_drops(void);
+void aa_tcp_poll(void);                 /* net loop: push bytes lwIP had no room for earlier */
+unsigned int aa_tcp_pending_max(void);  /* most bytes ever waiting */
 #endif

@@ -3131,8 +3131,14 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
     static char m[1024];   /* vfmt_n is unbounded: room for a few pictures of text */
     if (!vdec_feed(p, (u32)n, m, vfmt_n)) {
         unsigned int l, c;
-        if (osdvid_on_now() && vdec_last_slot(&l, &c) >= 0)
+        /* the conversion takes ~37 ms of this task: show at most one picture per 100 ms so the network keeps up
+           (issue #5 makes it cheaper) */
+        static unsigned long long next_show;
+        unsigned long long now = clk_us();
+        if (osdvid_on_now() && now >= next_show && vdec_last_slot(&l, &c) >= 0) {
             osdvid_frame(l, c);
+            next_show = now + 100000;
+        }
     } else {
         for (u32 i = 0; i < sizeof aa_vmsg - 1; i++)
             aa_vmsg[i] = m[i];
@@ -3167,7 +3173,7 @@ static void aa_touch_poll(void)   /* net task: panel 1024 x 600 -> video 800 x 4
         u32 x = aa_tq[r % 32].x * 800u / 1024u, y = aa_tq[r % 32].y * 480u / 600u;
         __asm__ volatile("" ::: "memory");
         aa_tq_r = r + 1;
-        if (aa_touch(act, (int)x, (int)y) == 0)
+        if (aa_touch(act, (int)x, (int)y) > 0)
             aa_touch_sent++;
     }
 }
@@ -3214,11 +3220,11 @@ static int aa_op(int c, const u8 *p, int n, char *t)
     int slot = vdec_last_slot(&luma, &chroma);
     return vfmt_n(t, "aa: %s, listening %d, connected %d; version %u.%u, rx frames %u msgs %u, tx frames %u (drops %u), "
                      "channels %u, video %u frames %u B, audio %u, unknown %u, errors %u; vdec decodes %u errors %u reinits %u (done before the start bit %u) last %u us, "
-                     "slot %d luma %x chroma %x; time in decrypt %u ms, video %u ms; touches sent %u dropped %u%s%s",
+                     "slot %d luma %x chroma %x; time in decrypt %u ms, video %u ms; touches sent %u dropped %u; tx backlog max %u B%s%s",
                   names[a->state], aa_listening, aa_tcp_connected(), a->version_major, a->version_minor, a->rx_frames,
                   a->rx_msgs, a->tx_frames, aa_tcp_tx_drops(), a->channels_open, a->video_frames, a->video_bytes,
                   a->audio_frames, a->unknown, a->errors, vdec_stats.decodes, vdec_stats.errors, vdec_stats.reinits, vdec_stats.ack_missed, vdec_stats.last_us, slot,
-                  luma, chroma, (u32)(a->decrypt_us / 1000), (u32)(a->video_us / 1000), aa_touch_sent, aa_touch_dropped,
+                  luma, chroma, (u32)(a->decrypt_us / 1000), (u32)(a->video_us / 1000), aa_touch_sent, aa_touch_dropped, aa_tcp_pending_max(),
                   aa_vmsg[0] ? "; last video error: " : "", aa_vmsg);
 }
 
@@ -3672,8 +3678,10 @@ static void net_loop(void)
             mlme_tick();
         ip_poll();
         unsigned long long tp2 = clk_us();
-        if (aa_listening)
+        if (aa_listening || aa_tcp_connected()) {
             aa_touch_poll();
+            aa_tcp_poll();
+        }
         if (vpp_restore_at && (int)(ub_ms(0) - vpp_restore_at) >= 0)
             vpp_restore_now();
         if (osdvid_until && (int)(ub_ms(0) - osdvid_until) >= 0)
