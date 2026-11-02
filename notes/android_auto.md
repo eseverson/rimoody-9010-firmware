@@ -188,3 +188,7 @@ Static analysis only (eCos disassembly, `dump1.bin`, the logic-analyzer decodes 
 
 ## Android Auto interface size (2026-11-02, build 20261102-115224)
 - The phone scales its whole UI (Maps controls, buttons, text) by the screen density the head unit declares in service discovery (VideoConfiguration field 5). Settings › Android Auto › Interface size sets it, 100..240 dpi in steps of 10 (`aadpi=` in UI.TXT, default 160; lower = smaller elements, more map). The phone only reads it when it connects, so a change applies from the next connection. `hu.py aa start|connect` replies with the value in use. Video stays 1280x720 with 256-pixel margins, so the UI is laid out for the panel's own 1024x600.
+
+## Bluetooth page test from the PC (2026-11-02)
+- Under our payload (build 20261102-115224, running for a while after live EXECs): an L2CAP connect to 78:89:64:CB:8B:CA PSM 1 (SDP) from the PC's adapter failed twice with EHOSTDOWN after 7.7 s (page timeout). The chip was not page-scanning.
+- Under stock eCos, no SD card, right after an accidental plug power cycle: the same connect **succeeded on the first try in 0.1 s**. The AC6965A's Bluetooth controller and antenna work, and the chip is connectable under stock. That rules out H1 (latched off) and H2 (damage). What differs under our payload: nothing answers the power-up BT_INIT (`ac 0a`), so the chip probably keeps page scan off until the host replies (eCos sends the name, `ac 19`). Next: a cold boot into our payload, then the page test before and after sending `AC 19 0b "CAR-BT-5639"`.
