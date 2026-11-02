@@ -17,6 +17,10 @@ struct h264_slice {
         direct_spatial_mv_pred, num_ref_idx_override, num_ref_idx_l0, num_ref_idx_l1, ref_list_mod, long_term_ref,
         cabac_init_idc, disable_deblocking, weighted, adaptive_marking;
     int delta_poc_bottom, qp, alpha_offset, beta_offset;
+    /* list 0 modification ops (idc, abs_diff_pic_num_minus1 or long_term_pic_num) and adaptive marking ops (mmco, first
+     * argument), in stream order; rplm_n / mmco_n = H264_MAXOPS + 1 means more than fit */
+#define H264_MAXOPS 8
+    unsigned int rplm_n, rplm_idc[H264_MAXOPS], rplm_val[H264_MAXOPS], mmco_n, mmco_op[H264_MAXOPS], mmco_val[H264_MAXOPS];
     unsigned int data_bit_rbsp, data_bit_raw;   /* first slice-data bit, from the NAL header byte, without / with EPBs */
 };
 /* nal points at the NAL header byte (after the start code), n = NAL length. 0 ok, <0 error / unsupported. */

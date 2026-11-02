@@ -533,8 +533,17 @@ static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, 
                 return k + fmt(o + k, " ERR picture %u starts at macroblock %u", pics, h2.first_mb);
             if (h2.slice_type != 0 && h2.slice_type != 2)
                 return k + fmt(o + k, " ERR picture %u: slice type %u (only I and P)", pics, h2.slice_type);
-            if (h2.ref_list_mod || h2.adaptive_marking || h2.long_term_ref)
-                return k + fmt(o + k, " ERR picture %u: list modification / adaptive or long-term marking (not yet)", pics);
+            if (h2.long_term_ref || h2.rplm_n > H264_MAXOPS || h2.mmco_n > H264_MAXOPS)
+                return k + fmt(o + k, " ERR picture %u: long-term marking or too many ref ops (not yet)", pics);
+            for (u32 i = 0; i < h2.rplm_n; i++)
+                if (h2.rplm_idc[i] > 1)
+                    return k + fmt(o + k, " ERR picture %u: long-term list modification (not yet)", pics);
+            for (u32 i = 0; i < h2.mmco_n; i++)
+                if (h2.mmco_op[i] != 1)
+                    return k + fmt(o + k, " ERR picture %u: marking op %u (only 1 so far)", pics, h2.mmco_op[i]);
+            if (ns && (h2.rplm_n != sl[0].sh.rplm_n || memcmp(h2.rplm_idc, sl[0].sh.rplm_idc, sizeof h2.rplm_idc) ||
+                       memcmp(h2.rplm_val, sl[0].sh.rplm_val, sizeof h2.rplm_val)))
+                return k + fmt(o + k, " ERR picture %u: slices with different list modifications (not yet)", pics);
             if (ns == MAX_SLICES || (evb_need += nl2 + 68) > EVB_KB * 1024)
                 return k + fmt(o + k, " ERR picture %u: too many slices or bytes", pics);
             sl[ns].nal = s + st2, sl[ns].len = nl2, sl[ns].sh = h2;
@@ -560,6 +569,35 @@ static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, 
                     l0[j] = l0[j - 1];
                 l0[j] = i;
             }
+        if (sh.rplm_n) {   /* 8.2.4.3.1, short-term only: each op puts the frame it names at the next index */
+            int n = (int)sh.num_ref_idx_l0 < NSLOT ? (int)sh.num_ref_idx_l0 : NSLOT, lst[NSLOT + 1], ri = 0;
+            for (int i = 0; i <= n; i++)
+                lst[i] = i < n0 ? l0[i] : -1;
+            int pred = (int)sh.frame_num;
+            for (u32 i = 0; i < sh.rplm_n; i++) {
+                int d = (int)sh.rplm_val[i] + 1, nw = sh.rplm_idc[i] == 0 ? pred - d : pred + d;
+                if (nw < 0)
+                    nw += (int)max_fn;
+                else if (nw >= (int)max_fn)
+                    nw -= (int)max_fn;
+                pred = nw;
+                int pn = nw > (int)sh.frame_num ? nw - (int)max_fn : nw, f = -1;
+                for (int j = 0; j < NSLOT; j++)
+                    if (dpb[j].used && frame_num_wrap(dpb[j].frame_num, sh.frame_num, max_fn) == pn)
+                        f = j;
+                if (f < 0 || ri >= n)
+                    return k + fmt(o + k, " ERR picture %u: list modification names a missing frame (%d)", pics, pn);
+                for (int c = n; c > ri; c--)
+                    lst[c] = lst[c - 1];
+                lst[ri++] = f;
+                int ni = ri;
+                for (int c = ri; c <= n; c++)
+                    if (lst[c] != f)
+                        lst[ni++] = lst[c];
+            }
+            for (n0 = 0; n0 < n && lst[n0] >= 0; n0++)
+                l0[n0] = lst[n0];
+        }
         if (is_p && !n0)
             return k + fmt(o + k, " ERR picture %u: P without a reference", pics);
         int cur = 0;
@@ -591,7 +629,15 @@ static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, 
         fo->t_sum += pr.t_us;
         if (pr.t_us > fo->t_max)
             fo->t_max = pr.t_us;
-        if (sh.nal_ref_idc) {   /* sliding window */
+        if (sh.nal_ref_idc && sh.adaptive_marking) {   /* 8.2.5.4, op 1 only: unmark the short-term frame named */
+            for (u32 i = 0; i < sh.mmco_n; i++) {
+                int pn = (int)sh.frame_num - (int)(sh.mmco_val[i] + 1);
+                for (int j = 0; j < NSLOT; j++)
+                    if (dpb[j].used && frame_num_wrap(dpb[j].frame_num, sh.frame_num, max_fn) == pn)
+                        dpb[j].used = 0;
+            }
+            dpb[cur].used = 1, dpb[cur].frame_num = sh.frame_num;
+        } else if (sh.nal_ref_idc) {   /* sliding window */
             u32 nmax = sps.num_ref_frames ? sps.num_ref_frames : 1, nused = 0;
             for (int i = 0; i < NSLOT; i++)
                 nused += dpb[i].used;

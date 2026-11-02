@@ -79,7 +79,7 @@ int main(int argc, char **argv)
     p.ver_minor = 7, p.audio_mask = 0x87;
     p.cert = slurp(argv[2], &p.cert_len);
     p.key = slurp(argv[3], &p.key_len);
-    if (aa_start(&p)) return 1;
+    if (aa_start(&p) < 0) return 1;   /* returns the bytes sent */
     unsigned long long end = now_us() + (unsigned long long)secs * 1000000;
     enum aa_state last = AA_IDLE;
     static const char *const names[] = { "idle", "version", "tls", "authed", "discovery", "running", "closed", "error" };

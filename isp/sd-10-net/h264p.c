@@ -214,13 +214,22 @@ int h264_parse_slice(const u8 *nal, u32 n, const struct h264_sps *s, const struc
         }
     }
     h->ref_list_mod = 0;
-    if (h->slice_type != 2) {   /* ref_pic_list_modification: record presence; AA streams use none */
+    h->rplm_n = 0;
+    if (h->slice_type != 2) {   /* ref_pic_list_modification: list 0 ops kept (phones use them: AA on a Pixel sends
+                                   "previous frame first" on every P slice), list 1 skipped */
         for (int l = 0; l < (h->slice_type == 1 ? 2 : 1); l++) {
             if (u1(&b)) {
                 h->ref_list_mod = 1;
                 u32 op;
-                while ((op = ue(&b)) != 3 && !b.err)
-                    ue(&b);
+                while ((op = ue(&b)) != 3 && !b.err) {
+                    u32 v = ue(&b);
+                    if (l == 0) {
+                        if (h->rplm_n < H264_MAXOPS)
+                            h->rplm_idc[h->rplm_n] = op, h->rplm_val[h->rplm_n] = v;
+                        if (h->rplm_n <= H264_MAXOPS)
+                            h->rplm_n++;
+                    }
+                }
             }
         }
     }
@@ -243,6 +252,7 @@ int h264_parse_slice(const u8 *nal, u32 n, const struct h264_sps *s, const struc
     }
     h->long_term_ref = 0;
     h->adaptive_marking = 0;
+    h->mmco_n = 0;
     if (h->nal_ref_idc) {   /* dec_ref_pic_marking */
         if (h->nal_type == 5) {
             u1(&b);   /* no_output_of_prior_pics */
@@ -251,14 +261,19 @@ int h264_parse_slice(const u8 *nal, u32 n, const struct h264_sps *s, const struc
             h->adaptive_marking = 1;
             u32 op;
             while ((op = ue(&b)) != 0 && !b.err) {
+                u32 v = 0;
                 if (op == 1 || op == 3)
-                    ue(&b);
+                    v = ue(&b);
                 if (op == 2)
-                    ue(&b);
+                    v = ue(&b);
                 if (op == 3 || op == 6)
                     ue(&b);
                 if (op == 4)
-                    ue(&b);
+                    v = ue(&b);
+                if (h->mmco_n < H264_MAXOPS)
+                    h->mmco_op[h->mmco_n] = op, h->mmco_val[h->mmco_n] = v;
+                if (h->mmco_n <= H264_MAXOPS)
+                    h->mmco_n++;
             }
         }
     }
