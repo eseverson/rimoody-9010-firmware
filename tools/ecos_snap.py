@@ -9,6 +9,9 @@ snapshot"; code in isp/ecos-snap/).
   ecos_snap.py arm -              write /ECOSRUN.FLG: the next cold boot runs eCos with the hook (net.c ecos_boot_check)
   ecos_snap.py collect OUT.BIN   after the unit is back on our payload: read the snapshot area, save it, print a summary.
   ecos_snap.py show OUT.BIN      print the summary of a saved snapshot.
+  ecos_snap.py card-audio ECOS.BIN   like card, for the audio run: HOOKA.BIN (snapshots of the audio block at 25 / 26 s,
+                                 the register sweep at 27 s) and the call loggers of stubs.S patched into the image
+  ecos_snap.py show-audio OUT.BIN    decode an audio run: the DSP / AUDIF call log, eCos's audio debug prints, registers
 """
 import os, struct, subprocess, sys, time, zlib
 
@@ -62,7 +65,32 @@ def run(path):
     print('eCos should be booting now; the hook resets the unit ~26 s after its display starts (or the watchdog ~13 s after a hang), then run `collect`.')
 
 
-def card(path):
+AUDIO_SITES = {1: 0x3bbf74, 2: 0x3bafe0, 3: 0x3baf48, 4: 0x3aa8a0, 5: 0x3bb996, 6: 0x3aa50a, 7: 0x3aa184,
+               8: 0x3a3f8e, 9: 0x3a4636, 16: 0x5fd67a}
+AUDIO_NAMES = {1: 'DSP_SendCmd', 2: 'DownloadCode', 3: 'Download2', 4: 'AUDIF_Set', 5: 'DSP_InitSystem',
+               6: 'AUDIF_ResetDsp', 7: 'SetVolume', 8: 'Track_Create', 9: 'Track_Start', 16: 'print'}
+STUBS_ADDR = 0x317cb6
+
+
+def audio_patch(img):
+    """stubs.S over the dead `pwm` handler, and `j stub_N; nop16` over each site's 6-byte prologue"""
+    stubs = open(os.path.join(SNAPDIR, 'STUBS.BIN'), 'rb').read()
+    sym = {l.split()[2]: int(l.split()[0], 16) for l in open(os.path.join(SNAPDIR, 'stubs.sym'))}
+    o = STUBS_ADDR - ECOS_BASE
+    if img[o:o + 2] != bytes.fromhex('fc48') or len(stubs) > 0x508:
+        sys.exit('pwm handler bytes at %#x are %s (want fc48), stubs %d bytes (max 0x508)' % (STUBS_ADDR, img[o:o + 2].hex(), len(stubs)))
+    img[o:o + len(stubs)] = stubs
+    for i, site in AUDIO_SITES.items():
+        so = site - ECOS_BASE
+        first = img[so:so + 6]
+        ok = (first[0] == 0xfc and first[2:4] == bytes.fromhex('51cf')) or first[:2] == bytes.fromhex('3a1f')
+        if not ok:
+            sys.exit('site %d %#x starts %s, not a push25/addi or smw prologue' % (i, site, first.hex()))
+        d = (sym['stub_%d' % i] - site) >> 1
+        img[so:so + 6] = struct.pack('>I', 0x48000000 | (d & 0xFFFFFF)) + bytes.fromhex('9200')
+
+
+def card(path, audio=False):
     """Write the patched eCos, entry.S and the hook to the SD card for the payload's power-on path (net.c
     ecos_boot_check); `arm` then writes the one-shot flag, and the next cold boot (ACC cycle) runs eCos."""
     img = bytearray(open(path, 'rb').read())
@@ -71,10 +99,12 @@ def card(path):
         if img[o:o + 4] != old:
             sys.exit('eCos bytes at %#x are %s, expected %s' % (a, img[o:o + 4].hex(), old.hex()))
         img[o:o + 4] = new
+    if audio:
+        audio_patch(img)
     tmp = os.path.join(SNAPDIR, 'ecos_patched.bin')
     open(tmp, 'wb').write(img)
     for name, src in (('ECOSP.BIN', tmp), ('ENTRY.BIN', os.path.join(SNAPDIR, 'ENTRY.BIN')),
-                      ('HOOK.BIN', os.path.join(SNAPDIR, 'HOOK.BIN'))):
+                      ('HOOK.BIN', os.path.join(SNAPDIR, 'HOOKA.BIN' if audio else 'HOOK.BIN'))):
         data = open(src, 'rb').read()
         print(hu('write', '0x600000', src))
         print(hu('--timeout', '60', 'fs', 'write', name, '0x600000', str(len(data))))
@@ -159,7 +189,91 @@ def show(path):
         print('snap%d (call %d): %d registers -> %s\n  DDFCH %s' % (k, h[8 + k], len(regs), out, dd))
 
 
+def cstr(a, ecos, flash):
+    if 0x98000000 <= a < 0x99000000:
+        b, o = flash, a - 0x98000000
+    elif ECOS_BASE <= a < ECOS_BASE + len(ecos):
+        b, o = ecos, a - ECOS_BASE
+    else:
+        return None
+    e = b.find(b'\0', o, o + 300)
+    return b[o:e if e >= 0 else o + 300].decode('latin1')
+
+
+def fmt_print(fmt, args, ecos, flash):
+    out, ai, i = '', 0, 0
+    while i < len(fmt):
+        c = fmt[i]
+        if c != '%':
+            out += c
+            i += 1
+            continue
+        j = i + 1
+        while j < len(fmt) and fmt[j] in '-+ #0123456789.lhz':
+            j += 1
+        if j >= len(fmt):
+            break
+        t = fmt[j]
+        if t == '%':
+            out += '%'
+        else:
+            v = args[ai] if ai < len(args) else None
+            ai += 1
+            if v is None:
+                out += '?'
+            elif t == 's':
+                out += cstr(v, ecos, flash) or '<%x>' % v
+            elif t in 'xXp':
+                out += '%x' % v
+            elif t == 'c':
+                out += chr(v & 0xff)
+            elif t in 'du i':
+                out += str(v - (1 << 32) if v & 0x80000000 else v)
+            else:
+                out += str(v)
+        i = j + 1
+    return out
+
+
+def show_audio(path):
+    data = open(path, 'rb').read()
+    ecos = open(os.path.join(HERE, '..', 'isp', 'ecos-snap', 'ecos_patched.bin'), 'rb').read()
+    flash = open(os.path.join(HERE, '..', 'dump1.bin'), 'rb').read()
+    h = struct.unpack_from('<21I', data, 0)
+    print('hook: magic %x calls %d done %d snaps %s' % (h[0], h[2], h[3], [hex(x) for x in h[8:11]]))
+    lines = []
+    for name, off in (('A', 0x20000), ('B', 0x30000)):
+        n = struct.unpack_from('<I', data, off)[0]
+        print('ring %s: %d calls logged (%d kept)' % (name, n, min(n, 2047)))
+        for k in range(min(n, 2047)):
+            e = struct.unpack_from('<8I', data, off + 32 + 32 * k)
+            lines.append((e[6], name, k, e))
+    lines.sort(key=lambda x: (x[0], x[1] == 'B', x[2]))
+    out = []
+    for tick, ring, k, e in lines:
+        i, r0, r1, r2, r3, lp, _, r4 = e
+        if i == 16:
+            f = cstr(r0, ecos, flash)
+            txt = fmt_print(f, [r1, r2, r3, r4], ecos, flash) if f else '<fmt %x>' % r0
+            out.append('%7d  print  %s   (from %x)' % (tick, txt.rstrip(), lp - 4))
+        else:
+            out.append('%7d  %-14s %8x %8x %8x %8x   (from %x)' % (tick, AUDIO_NAMES.get(i, str(i)), r0, r1, r2, r3, lp - 4))
+    txt = path + '.calls.txt'
+    open(txt, 'w').write('\n'.join(out) + '\n')
+    print('%d log lines -> %s' % (len(out), txt))
+    for k, off in ((0, 0x10000), (1, 0x14000), (2, 0x18000)):
+        regs = blocks(data, off)
+        if regs:
+            f = path + '.audio%d.txt' % k
+            with open(f, 'w') as o:
+                for a in sorted(regs):
+                    o.write('%08x %08x\n' % (a, regs[a]))
+            print('snapshot %d: %d registers -> %s' % (k, len(regs), f))
+
+
 if __name__ == '__main__':
-    if len(sys.argv) != 3 or sys.argv[1] not in ('run', 'card', 'arm', 'collect', 'show'):
+    cmds = {'run': run, 'card': card, 'card-audio': lambda p: card(p, True), 'arm': arm, 'collect': collect,
+            'show': show, 'show-audio': show_audio}
+    if len(sys.argv) != 3 or sys.argv[1] not in cmds:
         sys.exit(__doc__)
-    {'run': run, 'card': card, 'arm': arm, 'collect': collect, 'show': show}[sys.argv[1]](sys.argv[2])
+    cmds[sys.argv[1]](sys.argv[2])

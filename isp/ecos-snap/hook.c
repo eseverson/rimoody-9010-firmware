@@ -84,6 +84,53 @@ static void snapshot(int k, int sweep)
     o[w] = 0, o[w + 1] = 0;
 }
 
+#ifdef AUDIO
+/* audio snapshot k at SNAP + 0x10000 + 0x4000 k: the audio/DSP block in 128-word pieces */
+/* Audio snapshot k at SNAP + 0x10000 + 0x4000 k, 8 registers per clock tick (a long stay in eCos's tick ISR seems to
+ * get the unit reset: runs 1 and 2 died part way through at different registers). Progress word at SNAP + 0xF0;
+ * crumb = 0x1000000 | address before each read of snapshot 0. Returns 1 when the snapshot is complete. */
+#define AUD_START 0x9c001700u
+#define AUD_WORDS 768u
+static const u32 aud_skip_grp[] = { 0x9c001b00u, 0x9c001b80u, 0x9c001c00u, 0x9c001c80u, 0x9c001d00u, 0x9c001d80u };
+static int audio_snapshot_step(int k)
+{
+    struct hdr *h = (struct hdr *)SNAP;
+    u32 *o = (u32 *)(SNAP + 0x10000u + 0x4000u * k);
+    u32 p = R(SNAP + 0xF0);
+    for (u32 n = 0; n < 8 && p < AUD_WORDS; n++, p++) {
+        u32 blk = p / 32, i = p % 32, r = AUD_START + 4 * p;
+        if (!i)
+            o[34 * blk] = AUD_START + 128 * blk, o[34 * blk + 1] = 32;
+        if (!k)
+            crumb(0x1000000u | (r & 0xffffu));
+        int skip = 0;   /* groups whose read kills the running system (crumb runs 3+): 0x9C001B00 (group 54) */
+        for (u32 j = 0; j < sizeof aud_skip_grp / sizeof aud_skip_grp[0]; j++)
+            skip |= (r & ~0x7fu) == aud_skip_grp[j];
+        o[34 * blk + 2 + i] = skip ? 0xdeadbeefu : R(r);
+    }
+    R(SNAP + 0xF0) = p;
+    if (p < AUD_WORDS)
+        return 0;
+    o[34 * (AUD_WORDS / 32)] = 0, o[34 * (AUD_WORDS / 32) + 1] = 0;
+    h->snap_call[k] = h->calls ? h->calls : 1;
+    R(SNAP + 0xF0) = 0;
+    return 1;
+}
+
+__attribute__((unused)) static void sweep_to(u32 *o)   /* every RGST group 0x9C000000..0x9C00637F that reads without a bus error */
+{
+    u32 w = 0;
+    for (u32 g = 0x9c000000u; g < 0x9c006380u; g += 0x80) {
+        int bad = 0;
+        for (u32 i = 0; i < sizeof sweep_skip / sizeof sweep_skip[0]; i++)
+            bad |= g == sweep_skip[i];
+        if (!bad)
+            w += put_block(o + w, g, 32);
+    }
+    o[w] = 0, o[w + 1] = 0;
+}
+#endif
+
 static void dcache_wb_all(void)
 {
     __asm__ volatile("cctl l1d_wball, alevel\n\tmsync all\n\tisb" ::: "memory");
@@ -147,6 +194,21 @@ __attribute__((section(".text.entry"))) void snap_hook(u32 which)
     }
     h->t_last = t;
     u32 dt = t - h->t0;   /* wall clock, with call-count fallbacks (the dispatchers do not run every frame) */
+#ifdef AUDIO
+    /* Audio run (stubs.S logs the DSP / AUDIF calls meanwhile): the audio block 0x9C001700..0x9C0022FF at 25 s and
+     * 26 s (moving pointers show up as differences), the full RGST sweep at 27 s, then reset. */
+    if (!h->snap_call[0] && dt >= 25000000u) {
+        audio_snapshot_step(0);
+    } else if (h->snap_call[0] && !h->snap_call[1] && dt >= 27000000u) {
+        if (audio_snapshot_step(1))
+            crumb(0x2000000u);
+    } else if (h->snap_call[1]) {
+        h->done = 1;
+        crumb(0x500);
+        reset_now();
+    }
+    goto pet;
+#endif
     /* Trigger: eCos switches DDFCH to index mode (0x784 b20) when it shows a decoded picture (video playback). Snapshot
      * 0 at 1 s and 1 at 3 s after the trigger, then reset. No trigger within 240 s: snapshot 0 and reset. */
     if (!h->trig_call && (R(0x9c005784) & (1u << 20)))
@@ -165,6 +227,9 @@ __attribute__((section(".text.entry"))) void snap_hook(u32 which)
         crumb(0x500);
         reset_now();
     }
+#ifdef AUDIO
+pet:
+#endif
     if (c < 8 || !(c & 15))
         dcache_wb_all();
     R(0x9c000630) = 0xab00;   /* pet the watchdog (launch.c armed it, ~13 s) */
