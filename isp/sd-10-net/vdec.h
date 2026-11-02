@@ -15,4 +15,5 @@ int vdec_decode(unsigned int src, unsigned int len, char *o, vdec_fmt fmt, int k
 void vdec_stream_reset(void);
 int vdec_feed(const unsigned char *p, unsigned int n, char *o, vdec_fmt fmt);   /* one access unit, state kept */
 int vdec_last_slot(unsigned int *luma, unsigned int *chroma);
+void vdec_dims(unsigned int *w, unsigned int *h);   /* the stream's cropped size (0 before an SPS) */
 #endif

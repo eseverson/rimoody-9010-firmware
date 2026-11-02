@@ -3136,7 +3136,9 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
         static unsigned long long next_show;
         unsigned long long now = clk_us();
         if (osdvid_on_now() && now >= next_show && vdec_last_slot(&l, &c) >= 0) {
-            osdvid_frame(l, c);
+            unsigned int w, h;
+            vdec_dims(&w, &h);
+            osdvid_frame(l, c, w, h);
             next_show = now + 100000;
         }
     } else {
@@ -3165,12 +3167,17 @@ static void aa_touch_hook(int action, unsigned x, unsigned y)
     __asm__ volatile("" ::: "memory");
     aa_tq_w = w + 1;
 }
-static void aa_touch_poll(void)   /* net task: panel 1024 x 600 -> video 800 x 480 (the scaler fills the panel) */
+static int aa_hd = 1;   /* 1280 x 720 with margins: the panel shows the center 1:1 */
+static void aa_touch_poll(void)   /* net task: panel 1024 x 600 -> video coordinates */
 {
     while (aa_tq_r != aa_tq_w) {
         u32 r = aa_tq_r;
         int act = aa_tq[r % 32].action;
-        u32 x = aa_tq[r % 32].x * 800u / 1024u, y = aa_tq[r % 32].y * 480u / 600u;
+        u32 x = aa_tq[r % 32].x, y = aa_tq[r % 32].y;
+        if (aa_hd)
+            x += (1280 - 1024) / 2, y += (720 - 600) / 2;
+        else
+            x = x * 800u / 1024u, y = y * 480u / 600u;
         __asm__ volatile("" ::: "memory");
         aa_tq_r = r + 1;
         if (aa_touch(act, (int)x, (int)y) > 0)
@@ -3198,9 +3205,12 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         static struct aa_platform pf;
         pf.video = aa_video_cb, pf.log = aa_log_cb, pf.now_us = clk_us;
         pf.cert = aa_cert, pf.cert_len = cl + 1, pf.key = aa_key, pf.key_len = kl + 1, pf.dpi = 160;
-        pf.audio_mask = 7, pf.ver_minor = 1;
-        if (c == 2 && n >= 9)   /* connect extras: protocol minor version, audio mask */
+        pf.audio_mask = 0x87, pf.ver_minor = 7, pf.hd = 1;   /* what a Pixel on AA 17.9 accepted */
+        if (c == 2 && n >= 9)   /* connect extras: protocol minor version, audio mask, [hd] */
             pf.ver_minor = p[7], pf.audio_mask = p[8];
+        if (c == 2 && n >= 10)
+            pf.hd = p[9];
+        aa_hd = pf.hd;
         gt9_hook = aa_touch_hook;
         if (c == 2) {
             int r = aa_tcp_connect(&pf, ip, port);
@@ -3501,7 +3511,11 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         if (c == 1 || c == 2) {
             osdvid_on();
             if (c == 1 && vdec_last_slot(&l, &ch) >= 0)
-                osdvid_frame(l, ch);
+            {
+                unsigned int w, h;
+                vdec_dims(&w, &h);
+                osdvid_frame(l, ch, w, h);
+            }
             osdvid_until = c == 1 && n >= 2 && p[1] ? ub_ms(0) + 1000u * p[1] : 0;
         } else if (c == 3) {
             osdvid_off();

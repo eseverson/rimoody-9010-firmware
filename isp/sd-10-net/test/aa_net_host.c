@@ -76,7 +76,7 @@ int main(int argc, char **argv)
         vf = fopen(argv[5], "wb");
     struct aa_platform p = { 0 };
     p.send = send_cb, p.video = video_cb, p.audio = audio_cb, p.log = log_cb, p.now_us = now_us, p.dpi = 160;
-    p.ver_minor = 7, p.audio_mask = 0x87;
+    p.ver_minor = 7, p.audio_mask = 0x87, p.hd = getenv("AA_SD") ? 0 : 1;
     p.cert = slurp(argv[2], &p.cert_len);
     p.key = slurp(argv[3], &p.key_len);
     if (aa_start(&p) < 0) return 1;   /* returns the bytes sent */

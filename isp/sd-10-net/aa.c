@@ -145,10 +145,10 @@ static int send_service_discovery(void)
     pb_u(&b, 1, 3);   /* stream type: video */
     pb_u(&b, 5, 1);   /* available while in call */
     y = pb_open(&b, 4);
-    pb_u(&b, 1, 1);   /* 800x480 */
-    pb_u(&b, 2, 2);   /* 30 fps */
-    pb_u(&b, 3, 0);
-    pb_u(&b, 4, 0);
+    pb_u(&b, 1, pf->hd ? 2 : 1);   /* 1280x720 / 800x480 */
+    pb_u(&b, 2, 2);                /* 30 fps */
+    pb_u(&b, 3, pf->hd ? 256 : 0); /* margins: the phone lays its UI out in the center 1024 x 600 */
+    pb_u(&b, 4, pf->hd ? 120 : 0);
     pb_u(&b, 5, pf->dpi ? pf->dpi : 140);
     pb_close(&b, y);
     pb_close(&b, x);
@@ -179,8 +179,8 @@ static int send_service_discovery(void)
     pb_u(&b, 1, 3);    /* keycodes: HOME */
     pb_u(&b, 1, 4);    /* BACK */
     y = pb_open(&b, 2);
-    pb_u(&b, 1, 800);
-    pb_u(&b, 2, 480);
+    pb_u(&b, 1, pf->hd ? 1280 : 800);   /* touch in video coordinates */
+    pb_u(&b, 2, pf->hd ? 720 : 480);
     pb_close(&b, y);
     pb_close(&b, x);
     pb_close(&b, c);

@@ -353,8 +353,8 @@ def main():
         elif a.what == 'connect':   # phone running Android Auto's "head unit server" (developer settings), port 5277
             host, _, port = a.target.partition(':')
             payload = bytes([2]) + bytes(int(x) for x in host.split('.')) + struct.pack('<H', int(port or 5277))
-            if a.extra:   # VER_MINOR AUDIO_MASK (bit 0 media, 1 speech, 2 system, 0x80 microphone)
-                payload += bytes([int(a.extra[0], 0), int(a.extra[1], 0)])
+            if a.extra:   # VER_MINOR AUDIO_MASK [HD] (audio bit 0 media, 1 speech, 2 system, 0x80 microphone; HD 1 = 1280x720 with margins)
+                payload += bytes(int(x, 0) for x in a.extra[:3])
         else:
             payload = bytes([0])
         print(u.call(OP_AA, payload).decode(errors='replace'))

@@ -244,15 +244,17 @@ int vdec_bitread(u32 src, u32 len, char *o, vdec_fmt fmt)
  * +0x100000, co-located motion vectors ("MVC", 0x1A000 for 800x480) at +0x180000. BG2D indices per slot k: luma k,
  * chroma 0x14 + k, MVC 0x2A + k, as eCos's tables. */
 #define FB_PITCH    1920u
-#define FB_LUMA_N   0xF0000u
-#define FB_CHROMA_N 0x78000u
+#define FB_LUMA_N   0x168000u      /* 1920 x 768: up to 1280 x 720 (12 stripes of 64 rows) */
+#define FB_CHROMA_N 0xB4000u
 #define WORK_3B     0x047A0000u   /* "unique" working buffers BG2D 0x3B / 0x3C (sizes open: 128 KB each), after slot 0's MVC */
 #define WORK_3C     0x047C0000u
 #define NSLOT       4
-static const u32 slot_base[NSLOT] = { 0x04600000u, 0x04800000u, 0x04A00000u, 0x04C00000u };
+/* 1280 x 720 (Android Auto with margins on the 1024 x 600 panel): 0x280000 per slot in the free DRAM from 0x07000000
+ * (notes/h264_decoder.md), luma 0x168000, CbCr 0xB4000 at +0x180000, MVC 0x3C000 at +0x240000 */
+static const u32 slot_base[NSLOT] = { 0x07000000u, 0x07280000u, 0x07500000u, 0x07780000u };
 #define SLOT_LUMA(k)   (slot_base[k])
-#define SLOT_CHROMA(k) (slot_base[k] + 0x100000u)
-#define SLOT_MVC(k)    (slot_base[k] + 0x180000u)
+#define SLOT_CHROMA(k) (slot_base[k] + 0x180000u)
+#define SLOT_MVC(k)    (slot_base[k] + 0x240000u)
 #define IDX_LUMA(k)    (k)
 #define IDX_CHROMA(k)  (0x14 + (k))
 #define IDX_MVC(k)     (0x2a + (k))
@@ -554,7 +556,7 @@ static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, 
                 break;
         }
         const struct h264_slice sh = sl[0].sh;
-        if (sps.width > 960 || sps.height > 512)
+        if (sps.width > FB_PITCH || sps.height > 768)
             return k + fmt(o + k, " ERR %ux%u is larger than the slots", sps.width, sps.height);
         if (t == 5)
             for (int i = 0; i < NSLOT; i++)
@@ -710,6 +712,8 @@ int vdec_feed(const unsigned char *p, unsigned int n, char *o, vdec_fmt fmt)
     }
     return 0;
 }
+
+void vdec_dims(unsigned int *w, unsigned int *h) { *w = sps.width, *h = sps.height; }
 
 int vdec_last_slot(unsigned int *luma, unsigned int *chroma)
 {
