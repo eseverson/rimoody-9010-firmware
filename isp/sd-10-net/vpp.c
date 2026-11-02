@@ -116,13 +116,16 @@ static void init_fetch(u32 w, u32 h, u32 pitch)
     FL(4);
 }
 
-/* probe (c == 9): wait ~0.2 s, then the checksums of the three stages: DDFCH 0x7E8 (and its error flags 0x7EC), VSCL
- * 0x9C005E58 (i143 G188.22 vscl0_checksum_result), DMIX 0x9C006C9C (SP7021 G217.07). Nonzero past a stage = data there. */
+/* probe (c == 9): wait ~0.2 s, then the checksums of the three stages: DDFCH 0x7E8 (and its error flags 0x7EC: b5 incomplete
+ * frame, b8 luma line buffer empty, b9/b10 burst count error MA0/MA1, [13:12]/[17:16] AXI read response MA0/MA1, 2 = SLVERR,
+ * 3 = DECERR, per the Sunplus SP7021 display chapter), the DDFCH AXI debug info 0x7F4, the DDFCH<->downstream handshake
+ * 0x7FC (b0 downstream request, b1 DDFCH valid), VSCL 0x9C005E58 (i143 G188.22), DMIX 0x9C006C9C (SP7021 G217.07). */
 static int probe_sample(char *o, vpp_fmt fmt, const char *name)
 {
     for (volatile int i = 0; i < 4000000; i++)
         ;
-    return fmt(o, " [%s ddfch %x/%x vscl %x dmix %x]", name, R(0x9c0057e8), R(0x9c0057ec), R(0x9c005e58), R(0x9c006c9c));
+    return fmt(o, " [%s ddfch %x/%x axi %x hs %x vscl %x dmix %x]", name, R(0x9c0057e8), R(0x9c0057ec), R(0x9c0057f4),
+               R(0x9c0057fc) & 3, R(0x9c005e58), R(0x9c006c9c));
 }
 
 int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u32 chroma_idx)
@@ -142,8 +145,9 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
                 R(a2) = (R(a2) & ~(3u << 19)) | 2u << 19;
             }
             setbits(0x9c005784, 1u << 28 | 1u << 20 | 1u << 21 | 1u << 8, 1u << 20 | 1u << 8);
-            setbits(0x9c005d84, 1u << 9, 1u << 9);
-            setbits(0x9c0057dc, 3u << 16 | 1u, 1u << 16 | 1u);
+            setbits(0x9c005d84, 1u << 9, 0);   /* mode 0xB case 0x52a744: r5 = 0 -> D84 b9 = 0 (round 3 correction) */
+            /* config_0: b4 "il c" 0 = frame, b5 "fid c" 0 = top (Sunplus doc); the 0xB case clears both, hal_vpp_init had set b4 */
+            setbits(0x9c0057dc, 3u << 16 | 1u << 5 | 1u << 4 | 1u, 1u << 16 | 1u);
             setbits(0x9c005a80, 1u << 8 | 1u << 9 | 1u << 12, 1u << 8);
             setbits(0x9c005788, 0x1c, 0x10);
             R(0x9c005798) = luma_idx, R(0x9c00579c) = luma_idx, R(0x9c0057a0) = luma_idx;
@@ -218,6 +222,11 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
                                       * 512 physical fetch, BIST off, from the decoder's slot 0 at 0x04600000 (tiled, pitch 1920)
                                       * 1024 mode_option 0x784 = 0xF000 (the value found under U-Boot) then 0x5F000
                                       * 2048 TGEN0 adjust1 0x9C006ADC = 0x100D (i143 DRV_TGEN_Init: [5:0] = 0xD added to U-Boot's 0x10)
+                                      * 4096 both DDFCH AXI masters on MA0: 0x784 = 0x1E000 (SP7021 reset value; eCos 0x5E000 = chroma on MA1)
+                                      * 8192 both on MA1: 0x784 = 0x7E000
+                                      * 16384 DDFCH internal clocks free-running: 0x7C0 = 0x79 (doc: 0 = gated for power saving)
+                                      * 32768 frame mode as eCos's progressive handoff: 0x7DC b4 (il c: field) and b5 (fid c) cleared,
+                                      *     0x788 b3 = 0 b4 = 1, D84 b9 = 0, BIST 0x80801013 (bit 1: one frame, as SP7021's color bar)
                                       * No auto-restore (the reply must beat hu.py's 2 s timeout): `hu.py vpp restore` afterwards. */
         u32 m = p[1] | (n >= 3 ? (u32)p[2] << 8 : 0), path = n >= 4 ? p[3] & 3 : 2;   /* mask is 16 bits (LE) */
         save();
@@ -302,6 +311,29 @@ int vpp_op(const unsigned char *p, int n, char *o, vpp_fmt fmt, u32 luma_idx, u3
             R(0x9c006adc) = 0x100d;
             R(0x9c005a80) |= 1;
             SAMPLE("adj");
+        }
+        if (m & 4096) {
+            R(0x9c005784) = 0x1e000;
+            R(0x9c005a80) |= 1;
+            SAMPLE("ma0");
+        }
+        if (m & 8192) {
+            R(0x9c005784) = 0x7e000;
+            R(0x9c005a80) |= 1;
+            SAMPLE("ma1");
+        }
+        if (m & 16384) {
+            R(0x9c0057c0) = 0x79;
+            R(0x9c005a80) |= 1;
+            SAMPLE("freerun");
+        }
+        if (m & 32768) {
+            setbits(0x9c0057dc, 1u << 5 | 1u << 4, 0);
+            setbits(0x9c005788, 0x18, 0x10);
+            setbits(0x9c005d84, 1u << 9, 0);
+            R(0x9c0057f0) = 0x80801013;
+            R(0x9c005a80) |= 1;
+            SAMPLE("frame");
         }
 #undef SAMPLE
         active = 1;
