@@ -24,6 +24,7 @@ void plat_ui_reboot(void);
 void plat_ui_boot_stock(void);
 void plat_ui_aa_key(int keycode);               /* 4 BACK */
 void plat_ui_aa_enable(int on);
+void plat_ui_aa_dpi(int dpi);                   /* Android Auto screen density, sent at the next connection */
 void plat_ui_brightness(int percent);           /* backlight 0..100 (MCU ee frame) */
 int plat_ui_lights(void);                       /* the headlight input right now (1 = lights on); the UI debounces it */
 void plat_ui_night(int on);                     /* debounced headlights changed: Android Auto night mode */

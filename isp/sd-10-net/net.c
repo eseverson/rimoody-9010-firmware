@@ -3251,6 +3251,8 @@ void plat_ui_reboot(void) { ui_req_reboot = 1; }
 void plat_ui_boot_stock(void) { ui_req_stock = 1; }
 void plat_ui_aa_key(int keycode) { ui_req_key = keycode; }
 void plat_ui_aa_enable(int on) { ui_aa_enabled = on; }
+static int ui_aa_dpi = 160;
+void plat_ui_aa_dpi(int dpi) { ui_aa_dpi = dpi; }
 void plat_ui_brightness(int percent) { ui_req_bright = percent < 0 ? 0 : percent > 100 ? 100 : percent; }
 
 /* Backlight: MCU frame `ee <level>`, an inverted duty: 00 brightest, e1 dim but lit, f0 and up off (camera sweep
@@ -3426,7 +3428,7 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         vdec_stream_reset();
         static struct aa_platform pf;
         pf.video = aa_video_cb, pf.log = aa_log_cb, pf.now_us = clk_us;
-        pf.cert = aa_cert, pf.cert_len = cl + 1, pf.key = aa_key, pf.key_len = kl + 1, pf.dpi = 160;
+        pf.cert = aa_cert, pf.cert_len = cl + 1, pf.key = aa_key, pf.key_len = kl + 1, pf.dpi = ui_aa_dpi;
         pf.audio_mask = 0x87, pf.ver_minor = 7, pf.hd = 1;   /* what a Pixel on AA 17.9 accepted */
         pf.audio = aa_audio_cb;
         if (c == 2 && n >= 9)   /* connect extras: protocol minor version, audio mask, [hd] */
@@ -3441,14 +3443,14 @@ static int aa_op(int c, const u8 *p, int n, char *t)
             int r = aa_tcp_connect(&pf, ip, port);
             if (r)
                 return vfmt_n(t, "ERR aa: connect failed (%d)", r);
-            return vfmt_n(t, "aa: connecting to %u.%u.%u.%u:%d (cert %u B, key %u B); %s", ip >> 24, ip >> 16 & 0xff,
-                          ip >> 8 & 0xff, ip & 0xff, port, cl, kl, vm);
+            return vfmt_n(t, "aa: connecting to %u.%u.%u.%u:%d (cert %u B, key %u B, %d dpi); %s", ip >> 24,
+                          ip >> 16 & 0xff, ip >> 8 & 0xff, ip & 0xff, port, cl, kl, pf.dpi, vm);
         }
         int r = aa_tcp_listen(&pf, 0, port);
         if (r)
             return vfmt_n(t, "ERR aa: listen on %d failed (%d)", port, r);
         aa_listening = port;
-        return vfmt_n(t, "aa: listening on TCP %d (cert %u B, key %u B); %s", port, cl, kl, vm);
+        return vfmt_n(t, "aa: listening on TCP %d (cert %u B, key %u B, %d dpi); %s", port, cl, kl, pf.dpi, vm);
     }
     static const char *const names[] = { "idle", "version", "tls", "authed", "discovery", "running", "closed", "error" };
     unsigned int luma = 0, chroma = 0;

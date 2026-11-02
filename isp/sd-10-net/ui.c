@@ -27,6 +27,9 @@ static QueueHandle_t btn_q;
 static volatile int aa_session, aa_session_seen;
 static volatile int aa_view;
 static int aa_enabled = 1;
+static int aa_dpi = 160;   /* screen density Android Auto lays its UI out for: lower = smaller elements, more map */
+#define AA_DPI_MIN 100
+#define AA_DPI_MAX 240
 static int volume = 20, muted, dark = 1;
 /* display settings (UI.TXT): backlight in percent by day and with the headlights on; theme 0 light, 1 dark, 2 auto
  * (dark while the headlights are on) */
@@ -238,6 +241,19 @@ static void aa_switch_cb(lv_event_t *e)
     settings_save();
 }
 
+/* the phone reads the density when it connects, so a change applies from the next connection */
+static void aa_dpi_cb(lv_event_t *e)
+{
+    lv_obj_t *label = lv_event_get_user_data(e);
+    int v = lv_slider_get_value(lv_event_get_target(e)) * 10;
+    lv_label_set_text_fmt(label, "%d dpi", v);
+    if (lv_event_get_code(e) == LV_EVENT_RELEASED && v != aa_dpi) {
+        aa_dpi = v;
+        plat_ui_aa_dpi(aa_dpi);
+        settings_save();
+    }
+}
+
 /* ---- settings file and display policy ---- */
 
 static int kv_int(const char *t, const char *key, int dflt, int lo, int hi)   /* "key=123" at a line start */
@@ -294,17 +310,19 @@ static void settings_load(void)
     bright_night = kv_int(settings_text, "night", bright_night, 0, 100);
     theme_mode = kv_int(settings_text, "theme", theme_mode, 0, 2);
     aa_enabled = kv_int(settings_text, "aa", aa_enabled, 0, 1);
+    aa_dpi = kv_int(settings_text, "aadpi", aa_dpi, AA_DPI_MIN, AA_DPI_MAX) / 10 * 10;
     volume = kv_int(settings_text, "vol", volume, 0, VOL_MAX);
     boot_console = kv_int(settings_text, "boot", boot_console, 0, 1);
     kv_list(settings_text, "eq", eq_db, EQ_N, -12, 12);
     plat_ui_aa_enable(aa_enabled);
+    plat_ui_aa_dpi(aa_dpi);
 }
 
 static void settings_save(void)
 {
     char t[200];
-    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\nvol=%d\nboot=%d\neq=", bright_day, bright_night,
-                        theme_mode, aa_enabled, volume, boot_console);
+    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nvol=%d\nboot=%d\neq=", bright_day,
+                        bright_night, theme_mode, aa_enabled, aa_dpi, volume, boot_console);
     for (int i = 0; i < EQ_N; i++)
         k += lv_snprintf(t + k, sizeof t - (unsigned)k, "%d%s", eq_db[i], i < EQ_N - 1 ? "," : "\n");
     plat_ui_settings_save(t);
@@ -725,6 +743,19 @@ static void build_settings(void)
     if (aa_enabled)
         lv_obj_add_state(sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(sw, aa_switch_cb, LV_EVENT_VALUE_CHANGED, 0);
+    r = row(p, "Interface size");
+    lv_obj_t *dl = lv_label_create(r);
+    lv_obj_t *ds = lv_slider_create(r);
+    lv_obj_move_to_index(dl, -1);   /* slider, then its value */
+    lv_obj_set_width(ds, 280);
+    lv_obj_set_style_margin_right(ds, 16, 0);
+    lv_obj_set_ext_click_area(ds, 20);
+    lv_slider_set_range(ds, AA_DPI_MIN / 10, AA_DPI_MAX / 10);
+    lv_slider_set_value(ds, aa_dpi / 10, LV_ANIM_OFF);
+    lv_label_set_text_fmt(dl, "%d dpi", aa_dpi);
+    lv_obj_set_width(dl, 90);
+    lv_obj_add_event_cb(ds, aa_dpi_cb, LV_EVENT_VALUE_CHANGED, dl);
+    lv_obj_add_event_cb(ds, aa_dpi_cb, LV_EVENT_RELEASED, dl);
 
     p = page(scr_settings, 2, "Display", nav);
     static const char *const bright_names[] = { "Brightness", "With headlights on" };
