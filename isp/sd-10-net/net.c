@@ -3217,11 +3217,41 @@ static void aa_log_cb(const char *m) { log_s(m); }
 
 /* AA audio (aa.c): media 48 kHz stereo, speech/guidance and system 16 kHz mono, all s16 little-endian, into the DSP
  * mixer (audio.c). Payloads can sit at any byte offset: copied to an aligned buffer first. */
+/* content checks on AA media (stutters with clean delivery, 2026-11-02): a near-silent frame between loud ones, and
+ * frame boundaries where the left channel jumps much more than it does inside frames (spliced or missing audio) */
+static u32 am_frames, am_silent, am_splice, am_logged;
+static void aa_audio_check(const unsigned char *p, int n)
+{
+    static int last_l, have_last, last_loud;
+    if (n < 8)
+        return;
+    int peak = 0, maxd = 0, prev = (short)(p[0] | p[1] << 8);
+    for (int i = 0; i + 3 < n; i += 4) {
+        int l = (short)(p[i] | p[i + 1] << 8), a = l < 0 ? -l : l, d = l - prev;
+        d = d < 0 ? -d : d;
+        if (a > peak)
+            peak = a;
+        if (i && d > maxd)
+            maxd = d;
+        prev = l;
+    }
+    int first = (short)(p[0] | p[1] << 8), jd = first - last_l;
+    jd = jd < 0 ? -jd : jd;
+    am_frames++;
+    if (peak < 64 && last_loud && (am_silent++, am_logged++ < 40))
+        lprintf("aa audio: near-silent frame (%d bytes) after loud audio at t=%u ms\n", n, ub_ms(0));
+    if (have_last && jd > 3 * maxd + 2000 && jd > 6000 && (am_splice++, am_logged++ < 40))
+        lprintf("aa audio: boundary jump %d (inside the frame at most %d) at t=%u ms\n", jd, maxd, ub_ms(0));
+    last_l = (short)(p[n - 4] | p[n - 3] << 8), have_last = 1, last_loud = peak > 1000;
+}
+
 static void aa_audio_cb(int stream, const unsigned char *p, int n)
 {
     static short buf[2048];
     if (!aud_ready())
         return;
+    if (stream == 0)
+        aa_audio_check(p, n & ~3);
     while (n >= 4) {
         int k = n > (int)sizeof buf ? (int)sizeof buf : n & ~3;
         for (int i = 0; i < k; i++)
@@ -3635,8 +3665,9 @@ static int aa_op(int c, const u8 *p, int n, char *t)
     }
     if (c == 6) {   /* media stats: frames, max gap, ack->next frame avg/max per channel */
         static const char *const nm[4] = { "video", "media", "speech", "system" };
-        int k = vfmt_n(t, "media ts: first %u %u %u (low 32 bits), jumps %u (max %u us, last %d us); ", (u32)a->a_ts_first[0],
-                       (u32)a->a_ts_first[1], (u32)a->a_ts_first[2], a->a_jumps, a->a_jump_max_us, a->a_jump_last_us);
+        int k = vfmt_n(t, "media ts: first %u %u %u (low 32 bits), jumps %u (max %u us, last %d us); content: frames %u silent %u "
+                          "splices %u; ", (u32)a->a_ts_first[0], (u32)a->a_ts_first[1], (u32)a->a_ts_first[2], a->a_jumps,
+                       a->a_jump_max_us, a->a_jump_last_us, am_frames, am_silent, am_splice);
         for (int i = 0; i < 4; i++)
             k += vfmt_n(t + k, "%s %u frames, gap max %u ms, ack->next avg %u max %u ms; ", nm[i], a->m_frames[i],
                         a->m_gap_max_us[i] / 1000, a->m_frames[i] ? (u32)(a->m_rtt_sum_us[i] / a->m_frames[i] / 1000) : 0,
@@ -4271,8 +4302,8 @@ static void car_stats_tick(void)
         lprintf("car: t=%u aa %s\n", now, t);
         aud_status(t, vfmt_n);
         lprintf("car: audio %s\n", t);
-        lprintf("car: wifi station %d replay=%u/%u rxovf=%u decfail=%u rx=%u\n", sta_st, replays, replays_new, rxff_ovf,
-                dec_fail, rx_frames);
+        lprintf("car: wifi station %d replay=%u/%u rxovf=%u decfail=%u rx=%u; aa audio frames %u silent %u splices %u\n", sta_st,
+                replays, replays_new, rxff_ovf, dec_fail, rx_frames, am_frames, am_silent, am_splice);
     }
     if (now - save_at >= 60000) {
         save_at = now;
