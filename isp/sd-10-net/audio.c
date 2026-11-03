@@ -42,7 +42,11 @@ static void eq_apply_all(void);
 #define LEAD (48 * 4 * 30)   /* 30 ms: test tone / system sounds */
 /* where a source restarts after running dry, ahead of the DSP: a jitter buffer for audio that arrives over Wi-Fi in
  * bursts (30 ms for AA media made every network hiccup an audible gap, 2026-11-02) */
-static const u32 src_lead[4] = { 48 * 4 * 600, 48 * 4 * 120, 48 * 4 * 60, LEAD };   /* media 600 ms: Wi-Fi gaps of 0.6-1 s measured on the bench path */
+static const u32 src_lead[4] = { 48 * 4 * 400, 48 * 4 * 120, 48 * 4 * 60, LEAD };   /* media 400 ms (Wi-Fi gaps of 0.6-1 s on the bench path) */
+/* never more than this ahead of the DSP: with the ring ~1.5 s full the DSP's read pointer jumped ahead by the whole
+ * queue (a 1.5 s skip, then a short silence while the buffer refilled; owner heard "short silence/skip", 2026-11-02).
+ * Audio beyond the cap is dropped (counted), at worst a ~40 ms skip after a catch-up burst. */
+#define AHEAD_MAX (48 * 4 * 1000)
 static u32 rpos, zpos, cur[NSRC], dropped[NSRC], taken[NSRC], underruns, underrun_bytes;
 static int ready, chip651, tone_hz;
 static u32 tone_phase;
@@ -599,7 +603,7 @@ static int mix(int src, const short *lr, int frames, int mono_x3)
      * every Wi-Fi hiccup (29 times in 3 min, 2026-11-02); now it re-primes once and has src_lead in hand again. */
     if ((int)(cur[src] - rpos) < (int)(src_lead[src] / 6))
         cur[src] = rpos + src_lead[src];
-    u32 limit = rpos + ring_size - 128;   /* never write within 128 bytes behind R */
+    u32 limit = rpos + (ring_size < AHEAD_MAX ? ring_size - 128 : AHEAD_MAX);   /* well short of a full ring */
     u32 room = (int)(limit - cur[src]) > 0 ? (limit - cur[src]) / 4 : 0;
     u32 out = mono_x3 ? (u32)frames * 3 : (u32)frames;   /* 16 kHz mono sources are repeated 3x into 48 kHz stereo */
     u32 n = out < room ? out : room;
@@ -661,16 +665,21 @@ static short sine(u32 ph)   /* ph: 0..65535 per period; parabolic approximation,
 /* playback monitor (stutters with no underrun counted, 2026-11-02): while media plays, log when the data written
  * ahead of the DSP drops under 20 ms (starving), when the DSP read pointer stops moving for 30 ms with data queued
  * (DSP / bus stall), and when the ring is within 100 ms of full */
-static u32 mon_low, mon_stall, mon_full, mon_logged;
+static u32 mon_low, mon_stall, mon_full, mon_jump, mon_logged;
 static void play_monitor(void)
 {
     static unsigned long long last_t, r_moved_t;
-    static u32 last_taken, last_r, low_on, stall_on, full_on;
+    static u32 last_taken, last_r, low_on, stall_on, full_on, last_rpos;
     unsigned long long now = clk_us();
     if (now - last_t < 2000)
         return;
+    u32 dt_us = (u32)(now - last_t);
     last_t = now;
     track_r();
+    u32 adv = rpos - last_rpos;   /* bytes the DSP read since the last look: ~192 per ms when playing */
+    if (last_rpos && dt_us < 50000 && adv > 192 * (dt_us / 1000) + 192 * 40 && (mon_jump++, mon_logged++ < 60) && logf)
+        logf("audio: DSP read jumped %u ms in %u ms at t=%u ms\n", adv / 192, dt_us / 1000, (u32)(now / 1000));
+    last_rpos = rpos;
     u32 r = REG(ring_r);
     if (r != last_r)
         last_r = r, r_moved_t = now;
@@ -730,10 +739,10 @@ int aud_status(char *o, aud_fmt fmt)
     k += fmt(o + k, "; ");
     o += k;
     return k + fmt(o, "audio: %s state %08x (sys %d front %d) heartbeat %x (%u changes) 1880 %08x 18a8 %08x msgs %u timeouts %u "
-                  "path %u ring %08x W %x R %x played %u KB; underruns %u (%u ms), low %u stall %u full %u; taken/dropped media %u/%u guide %u/%u tone %u/%u; tone %d Hz vol %02x "
+                  "path %u ring %08x W %x R %x played %u KB; underruns %u (%u ms), low %u stall %u full %u jump %u; taken/dropped media %u/%u guide %u/%u tone %u/%u; tone %d Hz vol %02x "
                   "1e14 %08x banks %08x %08x %08x",
                ready ? "ready" : "NOT ready", REG(0x18b0), state(0), state(7), REG(0x18b4), hb_seen, REG(0x1880), REG(0x18a8),
-               msgs, cmd_timeouts, path, ring, REG(ring_w), REG(ring_r), rpos >> 10, underruns, underrun_bytes / 192, mon_low, mon_stall, mon_full, taken[0], dropped[0], taken[1] + taken[2],
+               msgs, cmd_timeouts, path, ring, REG(ring_w), REG(ring_r), rpos >> 10, underruns, underrun_bytes / 192, mon_low, mon_stall, mon_full, mon_jump, taken[0], dropped[0], taken[1] + taken[2],
                dropped[1] + dropped[2], taken[3], dropped[3], tone_hz,
                dsp_get(APP, 0x3d) & 0xff, REG(0x1e14), REG(0x1744), REG(0x1750), REG(0x1758));
 }
