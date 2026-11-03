@@ -31,6 +31,11 @@ struct aa_status {
     unsigned long long m_rtt_sum_us[4];
     /* the last 64 video frames: arrival (ms since boot), bytes, time in the video callback (us) */
     unsigned int vlog_n, vlog_t[64], vlog_b[64], vlog_dec[64];
+    /* media audio timestamps: frames whose timestamp is not where the previous frame ended (the phone skipped or
+     * repeated audio), the largest such jump, and the first raw timestamps (to learn their unit) */
+    unsigned int a_jumps, a_jump_max_us, a_ts_n;
+    unsigned long long a_ts_first[3], a_ts_last;
+    int a_jump_last_us;
 };
 
 int aa_start(const struct aa_platform *p);   /* sends the version request */

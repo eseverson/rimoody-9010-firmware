@@ -373,6 +373,23 @@ static void on_channel(int ch, int ctrl, const u8 *m, int n)
                 }
             } else {
                 st.audio_frames++;
+                if (ch == CH_MEDIA_AUDIO && off == 8) {   /* timestamp continuity: 48 kHz stereo s16 = 192 bytes per ms */
+                    static u64 next_ts;
+                    u64 dur_us = (u64)(bn - off) * 1000 / 192;
+                    if (st.a_ts_n < 3)
+                        st.a_ts_first[st.a_ts_n] = ts;
+                    if (st.a_ts_n++ && next_ts) {
+                        long long d = (long long)(ts - next_ts);
+                        long long ad = d < 0 ? -d : d;
+                        if (ad > 20000) {
+                            st.a_jumps++, st.a_jump_last_us = (int)d;
+                            if ((u64)ad > st.a_jump_max_us)
+                                st.a_jump_max_us = (u32)ad;
+                        }
+                    }
+                    next_ts = ts + dur_us;
+                    st.a_ts_last = ts;
+                }
                 if (pf->audio)
                     pf->audio(ch == CH_MEDIA_AUDIO ? 0 : ch == CH_SPEECH_AUDIO ? 1 : 2, body + off, bn - off);
                 ack_media(ch, session[ch]);

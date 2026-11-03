@@ -3635,7 +3635,8 @@ static int aa_op(int c, const u8 *p, int n, char *t)
     }
     if (c == 6) {   /* media stats: frames, max gap, ack->next frame avg/max per channel */
         static const char *const nm[4] = { "video", "media", "speech", "system" };
-        int k = 0;
+        int k = vfmt_n(t, "media ts: first %u %u %u (low 32 bits), jumps %u (max %u us, last %d us); ", (u32)a->a_ts_first[0],
+                       (u32)a->a_ts_first[1], (u32)a->a_ts_first[2], a->a_jumps, a->a_jump_max_us, a->a_jump_last_us);
         for (int i = 0; i < 4; i++)
             k += vfmt_n(t + k, "%s %u frames, gap max %u ms, ack->next avg %u max %u ms; ", nm[i], a->m_frames[i],
                         a->m_gap_max_us[i] / 1000, a->m_frames[i] ? (u32)(a->m_rtt_sum_us[i] / a->m_frames[i] / 1000) : 0,
