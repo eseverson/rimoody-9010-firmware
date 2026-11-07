@@ -3,11 +3,13 @@
 #include "aa_tcp.h"
 #include "aa.h"
 #include "lwip/tcp.h"
+#include "lwip/sys.h"
 #include <string.h>
 
 static struct tcp_pcb *listener, *conn;
 static struct aa_platform plat;
 static unsigned int tx_drops;
+static u32_t last_rx_ms;
 
 /* Bytes lwIP had no room for, in order. A dropped frame is fatal: a lost media ack stalls the phone (it sends at most
  * 4 unacked frames), and every later TLS record would fail its sequence number. */
@@ -71,7 +73,16 @@ static err_t on_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
     return ERR_OK;
 }
 
-void aa_tcp_poll(void) { flush_pending(); }
+/* lwIP ACKs every second segment itself and leaves a lone one to its 250 ms timer, which the phone would wait on.
+ * Each net loop pass: once no segment has come for ~2 ms, that pending ACK goes out (a burst still coalesces). */
+void aa_tcp_poll(void)
+{
+    flush_pending();
+    if (conn && (conn->flags & TF_ACK_DELAY) && sys_now() - last_rx_ms >= 2) {
+        tcp_set_flags(conn, TF_ACK_NOW);
+        tcp_output(conn);
+    }
+}
 unsigned int aa_tcp_pending_max(void) { return pend_max; }
 
 static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
@@ -90,7 +101,7 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     for (struct pbuf *q = p; q; q = q->next)
         aa_rx(q->payload, q->len);
     tcp_recved(pcb, p->tot_len);
-    tcp_set_flags(pcb, TF_ACK_NOW);   /* no delayed ACK: lwIP holds it up to 250 ms (its TCP timer), and the phone waits on it */
+    last_rx_ms = sys_now();   /* the ACK: lwIP's every-second-segment rule, or aa_tcp_poll for a lone one */
     tcp_output(pcb);
     pbuf_free(p);
     return ERR_OK;
