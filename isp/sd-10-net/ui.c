@@ -1086,6 +1086,7 @@ static void poll_held(void)
     }
 }
 
+unsigned long long ui_lv_us;   /* time in lv_timer_handler (`hu.py vpp aavideo`) */
 static void ui_task(void *arg)
 {
     (void)arg;
@@ -1142,7 +1143,9 @@ static void ui_task(void *arg)
             else if (!aa_session && aa_view)
                 show_home();
         }
+        unsigned long long t0 = clk_us();
         uint32_t wait = lv_timer_handler();
+        ui_lv_us += clk_us() - t0;
         vTaskDelay(pdMS_TO_TICKS(wait < 10 ? 10 : wait > 30 ? 30 : wait));
     }
 }

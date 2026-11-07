@@ -3209,11 +3209,17 @@ static int aa_vpp = 1;   /* AA video through VPP0 (vpp_show_video); HU1 op 24 su
 static u32 aa_vpp_frames;
 static u32 aa_verr_logged;
 
-static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
+/* vdec_done_hook: a picture of the AA stream is decoded (ok) or timed out */
+static unsigned long long aa_show_us;
+static void aa_video_show(int ok)
 {
-    (void)ts;
-    static char m[1024];   /* vfmt_n is unbounded: room for a few pictures of text */
-    if (!vdec_feed(p, (u32)n, m, vfmt_n)) {
+    unsigned long long t_show = clk_us();
+    if (!ok) {
+        if (aa_verr_logged++ < 8)
+            lprintf("aa: video: picture timed out, decoder reset\n");
+        return;
+    }
+    {
         unsigned int l, c;
         /* the conversion takes ~37 ms of this task: show at most one picture per 100 ms so the network keeps up
            (issue #5 makes it cheaper) */
@@ -3233,7 +3239,16 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
             osdvid_frame(l, c, w, h);
             next_show = now + osd_interval_us;
         }
-    } else {
+    }
+    aa_show_us += clk_us() - t_show;
+}
+
+static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
+{
+    (void)ts;
+    static char m[1024];   /* vfmt_n is unbounded: room for a few pictures of text */
+    vdec_done_hook = aa_video_show;
+    if (vdec_feed(p, (u32)n, m, vfmt_n)) {
         for (u32 i = 0; i < sizeof aa_vmsg - 1; i++)
             aa_vmsg[i] = m[i];
         if (aa_verr_logged++ < 8)
@@ -4056,7 +4071,11 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             aa_vpp = n >= 2 ? p[1] : 1;
             if (!aa_vpp)
                 vpp_hide();
-            return vfmt_n(t, "aa video via %s, %u pictures shown through VPP0", aa_vpp ? "VPP0" : "OSD", aa_vpp_frames);
+        {
+            extern unsigned long long ui_lv_us;
+            return vfmt_n(t, "aa video via %s, %u pictures shown through VPP0; %u ms showing them, ui drawing %u ms",
+                          aa_vpp ? "VPP0" : "OSD", aa_vpp_frames, (u32)(aa_show_us / 1000), (u32)(ui_lv_us / 1000));
+        }
         }
         int k = vpp_op(p, n, t, vfmt_n, (u32)slot, 0x14u + (u32)slot);
         if (c == 3)
@@ -4549,6 +4568,8 @@ static void net_loop(void)
             aa_touch_poll();
             aa_tcp_poll();
         }
+        if (vdec_busy())   /* the AA picture the hardware is decoding: finish and show it once done */
+            vdec_poll();
         if (vpp_restore_at && (int)(ub_ms(0) - vpp_restore_at) >= 0)
             vpp_restore_now();
         if (osdvid_until && (int)(ub_ms(0) - osdvid_until) >= 0)

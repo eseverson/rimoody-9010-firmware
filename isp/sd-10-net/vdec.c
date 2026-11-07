@@ -316,8 +316,21 @@ struct vslice { const u8 *nal; u32 len; struct h264_slice sh; };
 /* one picture: its slice NALs (each from its header byte) into the EVB, each slice header through the bit reader and a
  * command block per slice, the kick, and the wait for the last pixel. kick 0 stops before the kick (the ring is left
  * for inspection). */
+/* A kicked picture the hardware is still decoding (issue #3: the net task used to spin ~5 ms per picture on the
+ * status bits; now it receives and decrypts the next frame meanwhile). pend_step() advances the same waits as before,
+ * one look per call: start acknowledged, done (D570), DC84, then the last pixel leaving its 0x55 marker. */
+static struct {
+    int active, phase, ns, cur, timeouts;
+    volatile u8 *lastpx;
+    unsigned long long t_kick, t_phase;
+    u32 a380, d570, spins;
+} pend;
+void (*vdec_done_hook)(int ok);
+static int pend_step(int from_poll);
+#define PHASE_US 300000   /* per wait; the spin counts before were 3000000 register reads, ~0.4 s */
+
 static int decode_pic(const struct vslice *sl, int ns, const struct h264_sps *sps, const struct h264_pps *pps, int cur,
-                      const int *l0, int n0, int kick, u32 skip, struct pic_result *pr)
+                      const int *l0, int n0, int kick, u32 skip, struct pic_result *pr, int async)
 {
     crumb(1);   /* bitstream into the EVB, emulation-prevention bytes removed (00 00 03 -> 00 00): the hardware does not
                    strip them (a noise frame desynced at once); eCos's start-code scanner presumably does on its copy */
@@ -452,6 +465,7 @@ static int decode_pic(const struct vslice *sl, int ns, const struct h264_sps *sp
     M(0xd54c) = SPMP_KB << 8 | IDX_SPMP;
     M(0xd548) = 1;
     unsigned long long t_kick = clk_us();
+    pend.a380 = M(0xa380);
     M(0xd048) = 1, M(0xd1a4) = 0, M(0xd558) = 0, M(0xd55c) = 0, M(0xd564) = 0;
     M(0xd550) = 0x1f8;
     M(0xd550) = 0;
@@ -461,45 +475,93 @@ static int decode_pic(const struct vslice *sl, int ns, const struct h264_sps *sp
     M(0xd550) = 0;
     M(0xd550) = 1;
     crumb(45);
-    /* start acknowledged (D550 bit 0; eCos waits on it with no timeout). It can be missed: once in ~15000 pictures it
-     * never read 1 while the block had already completed (D570 0x2CB), so done (D570 bit 0) counts as acknowledged */
-    int k1 = -1;
-    for (u32 n = 0; n < 3000000; n++)
-        if (M(0xd550) & 1) {
-            k1 = 0;
-            break;
-        } else if (M(0xd570) & 1) {
-            k1 = 0;
-            vdec_stats.ack_missed++;   /* usual: 78% of 18000 pictures; harmless */
-            break;
-        }
-    int k2 = k1 ? -1 : poll(0xd570, 1, 1, 3000000);
-    crumb(47);
-    pr->d570 = M(0xd570);
-    M(0xd570) = 1;
-    M(0xd550) = 0;
-    if (ns != 1) {   /* the engine runs the following slices' blocks itself (0x41466a) */
-        M(0xd558) = (u32)ns;
-        M(0xd550) = 0;
-    }
-    int k3 = k2 ? -1 : poll(0xdc84, 1, 1, 3000000);
-    crumb(48);
-    u32 spins = 0;
-    for (; spins < 2000000; spins++) {
-        __asm__ volatile("cctl %0, L1D_VA_INVAL\n\tmsync all" ::"r"((u32)lastpx & ~31u) : "memory");
-        if (*lastpx != 0x55)
-            break;
-    }
+    pend.active = 1, pend.phase = 0, pend.ns = ns, pend.cur = cur, pend.timeouts = 0, pend.lastpx = lastpx;
+    pend.t_kick = pend.t_phase = t_kick, pend.d570 = 0, pend.spins = 0;
+    if (async)
+        return 0;
+    while (pend.active && !pend_step(0))
+        ;
     pr->t_us = (u32)(clk_us() - t_kick);
-    pr->spins = spins;
-    pr->timeouts = (u32)(k1 & 1) | (u32)(k2 & 1) << 1 | (u32)(k3 & 1) << 2;
-    CRUMB[4] = pr->timeouts, CRUMB[5] = pr->d570;
-    crumb(49);
-    if (pr->timeouts) {   /* stuck: its status registers stall the bus when read; reset it through MOON0 */
-        vdec_hw_reset();
-        return -1;
+    pr->spins = pend.spins;
+    pr->timeouts = (u32)pend.timeouts;
+    pr->d570 = pend.d570;
+    return pr->timeouts ? -1 : 0;
+}
+
+/* one look at the kicked picture; 1 = finished (decoded, or timed out and the decoder reset), 0 = still running.
+ * from_poll: the async path, which also does the bookkeeping feed() leaves to it and calls vdec_done_hook. */
+static int last_slot = -1;
+static int pend_step(int from_poll)
+{
+    unsigned long long now = clk_us();
+    if (pend.phase == 0) {   /* start acknowledged (D550 bit 0; eCos waits on it with no timeout). It can be missed:
+                              * once in ~15000 pictures it never read 1 while the block had already completed (D570
+                              * 0x2CB), so done (D570 bit 0) counts as acknowledged */
+        if (M(0xd550) & 1)
+            pend.phase = 1, pend.t_phase = now;
+        else if (M(0xd570) & 1)
+            pend.phase = 1, pend.t_phase = now, vdec_stats.ack_missed++;   /* usual: 78% of 18000 pictures; harmless */
+        else if (now - pend.t_phase > PHASE_US)
+            pend.timeouts = 7;
     }
-    return 0;
+    if (pend.phase == 1 && !pend.timeouts) {
+        if (M(0xd570) & 1) {
+            crumb(47);
+            pend.d570 = M(0xd570);
+            M(0xd570) = 1;
+            M(0xd550) = 0;
+            if (pend.ns != 1) {   /* the engine runs the following slices' blocks itself (0x41466a) */
+                M(0xd558) = (u32)pend.ns;
+                M(0xd550) = 0;
+            }
+            pend.phase = 2, pend.t_phase = now;
+        } else if (now - pend.t_phase > PHASE_US)
+            pend.timeouts = 6;
+    }
+    if (pend.phase == 2 && !pend.timeouts) {
+        if (M(0xdc84) & 1) {
+            crumb(48);
+            pend.phase = 3, pend.t_phase = now;
+        } else if (now - pend.t_phase > PHASE_US)
+            pend.timeouts = 4;
+    }
+    if (pend.phase == 3 && !pend.timeouts) {   /* the picture's own value there may be 0x55: then the wait runs out */
+        __asm__ volatile("cctl %0, L1D_VA_INVAL\n\tmsync all" ::"r"((u32)pend.lastpx & ~31u) : "memory");
+        pend.spins++;
+        if (*pend.lastpx == 0x55 && now - pend.t_phase < 150000)
+            return 0;
+    } else if (!pend.timeouts)
+        return 0;
+    pend.active = 0;
+    CRUMB[4] = (u32)pend.timeouts, CRUMB[5] = pend.d570;
+    crumb(49);
+    M(0xa380) = pend.a380;
+    if (pend.timeouts)   /* stuck: its status registers stall the bus when read; reset it through MOON0 */
+        vdec_hw_reset();
+    if (from_poll) {
+        u32 t = (u32)(now - pend.t_kick);
+        if (pend.timeouts) {
+            vdec_stats.errors++;
+            for (int i = 0; i < NSLOT; i++)   /* references are gone: P pictures fail until the next IDR */
+                dpb[i].used = 0;
+        } else {
+            last_slot = pend.cur;
+            vdec_stats.decodes++;
+            vdec_stats.last_us = t;
+        }
+        crumb_clear();
+        if (vdec_done_hook)
+            vdec_done_hook(!pend.timeouts);
+    }
+    return 1;
+}
+
+int vdec_busy(void) { return pend.active; }
+int vdec_poll(void) { return pend.active ? pend_step(1) : 1; }
+static void pend_wait(void)
+{
+    while (pend.active && !pend_step(1))
+        ;
 }
 
 static int frame_num_wrap(u32 fn, u32 cur_fn, u32 max_fn) { return fn > cur_fn ? (int)fn - (int)max_fn : (int)fn; }
@@ -507,7 +569,6 @@ static int frame_num_wrap(u32 fn, u32 cur_fn, u32 max_fn) { return fn > cur_fn ?
 /* Stream state, kept across access units (vdec_feed): parameter sets, the DPB, the last picture. */
 static struct h264_sps sps;
 static struct h264_pps pps;
-static int last_slot = -1;
 
 void vdec_stream_reset(void)
 {
@@ -522,7 +583,8 @@ struct feed_out { u32 pics, t_sum, t_max; int err; };
 
 /* Decode the NAL units in [s, s + len): SPS/PPS update the parameters; each slice starting at macroblock 0, with the
  * slices after it, is one picture. maxpics 0: all. Text (per-picture times, errors) goes to o; returns its length. */
-static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, vdec_fmt fmt, struct feed_out *fo)
+static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, vdec_fmt fmt, struct feed_out *fo,
+                int async)
 {
     u32 pos = 0, st, nl, pics = 0;
     int k = 0;
@@ -542,6 +604,7 @@ static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, 
         }
         if (t != 5 && t != 1)
             continue;
+        pend_wait();   /* the EVB, the command ring and the DPB belong to a picture still decoding */
         /* a picture: this slice and the ones after it that do not start at macroblock 0 */
         static struct vslice sl[MAX_SLICES];
         int ns = 0, is_p = 0;
@@ -629,8 +692,9 @@ static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, 
         if (cur == NSLOT)
             return k + fmt(o + k, " ERR no free slot");
         struct pic_result pr = { 0 };
-        int r = decode_pic(sl, ns, &sps, &pps, cur, l0, n0, kick, skip, &pr);
-        M(0xa380) = a380;
+        int r = decode_pic(sl, ns, &sps, &pps, cur, l0, n0, kick, skip, &pr, async && kick);
+        if (!(async && kick))
+            M(0xa380) = a380;
         if (!kick) {
             crumb_clear();
             return k + fmt(o + k, " prepared picture %u (header %u bits, DPFU %d, save %x/%x, ring %u words, slot %d, %d refs)",
@@ -677,15 +741,18 @@ static int feed(const u8 *s, u32 len, u32 maxpics, int kick, u32 skip, char *o, 
             }
             dpb[cur].used = 1, dpb[cur].frame_num = sh.frame_num;
         }
-        last_slot = cur;
         pics++;
         fo->pics = pics;
-        vdec_stats.decodes++;
-        vdec_stats.last_us = pr.t_us;
+        if (!(async && kick)) {   /* else pend_step does these when the picture is done */
+            last_slot = cur;
+            vdec_stats.decodes++;
+            vdec_stats.last_us = pr.t_us;
+        }
         if (maxpics && pics >= maxpics)
             break;
     }
-    crumb_clear();
+    if (!(async && kick) || !pend.active)
+        crumb_clear();
     fo->err = 0;
     return k;
 }
@@ -701,7 +768,8 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32
     vdec_stream_reset();
     struct feed_out fo = { 0 };
     int k = fmt(o, "vdec decode (skip %x):", skip);
-    k += feed((const u8 *)src, len, maxpics, kick, skip, o + k, fmt, &fo);
+    pend_wait();
+    k += feed((const u8 *)src, len, maxpics, kick, skip, o + k, fmt, &fo, 0);
     if (fo.err || !kick)
         return k;
     if (!fo.pics)
@@ -716,6 +784,7 @@ int vdec_decode(u32 src, u32 len, char *o, vdec_fmt fmt, int kick, u32 skip, u32
  * o and the stream restarts at the next IDR. */
 int vdec_feed(const unsigned char *p, unsigned int n, char *o, vdec_fmt fmt)
 {
+    pend_wait();   /* the previous picture first (a timeout there resets the decoder: init below) */
     if (!inited) {   /* after a reset through MOON0 (a stuck picture): init again, carry on from the next IDR */
         char m[200];
         vdec_init(m, fmt);
@@ -724,7 +793,7 @@ int vdec_feed(const unsigned char *p, unsigned int n, char *o, vdec_fmt fmt)
             dpb[i].used = 0;
     }
     struct feed_out fo = { 0 };
-    feed(p, n, 0, 1, 0, o, fmt, &fo);
+    feed(p, n, 0, 1, 0, o, fmt, &fo, 1);
     if (fo.err) {
         vdec_stats.errors++;
         for (int i = 0; i < NSLOT; i++)   /* references are gone: P pictures fail until the next IDR */

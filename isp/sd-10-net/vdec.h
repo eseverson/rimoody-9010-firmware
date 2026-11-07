@@ -3,6 +3,11 @@
 #define VDEC_H
 struct vdec_stats { unsigned int bitreads, decodes, errors, last_us, reinits, ack_missed; };
 extern struct vdec_stats vdec_stats;
+/* vdec_feed kicks the hardware and returns; the picture finishes in vdec_poll (call it every loop pass while
+ * vdec_busy) or at the next vdec_feed, which then calls vdec_done_hook(ok): the moment to show it */
+int vdec_busy(void);
+int vdec_poll(void);
+extern void (*vdec_done_hook)(int ok);
 typedef int (*vdec_fmt)(char *, const char *, ...);
 int vdec_init(char *o, vdec_fmt fmt);
 int vdec_bitread(unsigned int src, unsigned int len, char *o, vdec_fmt fmt);
