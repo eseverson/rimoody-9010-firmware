@@ -1,14 +1,65 @@
-/* Video through the OSD0 layer (notes/vpp0_display.md: VPP0 does not run yet). Each decoded picture (the MFD's tiled
- * NV12, tools/mfd_detile.py) is converted by the CPU into a linear YUY2 buffer that OSD0 scans (SP7021 OSD region format
- * 4, header word 5 = 0x0004xxxx). A picture at least as large as the 1024 x 600 panel (Android Auto at 1280 x 720 with
- * margins) shows its center 1:1 full screen; a smaller one is centered. Two buffers: the header's data address flips
- * to the finished one. Net task only. */
+/* Video through the OSD0 layer (notes/vpp0_display.md: the fallback to VPP0). Each decoded picture (the MFD's tiled
+ * NV12 in either frame layout, vdec_scan_type, tools/mfd_detile.py) is converted by the CPU into a linear YUY2 buffer
+ * that OSD0 scans (SP7021 OSD region format 4, header word 5 = 0x0004xxxx). A picture at least as large as the
+ * 1024 x 600 panel (Android Auto at 1280 x 720 with margins) shows its center 1:1 full screen; a smaller one is
+ * centered. Two buffers: the header's data address flips to the finished one. Net task only. */
 #include "osdvid.h"
-#include "irq.h"
-#include "memmap.h"
+#include "vdec.h"
 
 typedef unsigned int u32;
 typedef unsigned char u8;
+
+static inline u32 bswap(u32 v) { return v >> 24 | (v >> 8 & 0xff00) | (v << 8 & 0xff0000) | v << 24; }
+
+#define PITCH    1920u         /* the decoder's pitch */
+
+/* Where row y's four 16-pixel runs of each 64-pixel group start in a tiled plane: *row is the row's offset (stripe and
+ * line within it), go[g] the offset of run g within the group's 4096 bytes. Same layout for the CbCr plane, in rows
+ * of interleaved Cb Cr bytes. scan 0: the bring-up layout, line pairs interleaved across the 0x800 halves; scan 1:
+ * eCos's layout (VPP0's index mode), lines in order, runs at 0 / 0x800 / 0x400 / 0xC00, swapped on odd stripes. */
+static void row_runs(u32 y, int scan, u32 *row, u32 go[4])
+{
+    u32 st = y / 64;
+    if (scan) {
+        *row = st * PITCH * 64 + (y % 64) * 16;
+        for (u32 g = 0; g < 4; g++)
+            go[g] = (((g & 1) ^ (st & 1)) * 0x800) + (g >> 1) * 0x400;
+    } else {
+        *row = st * PITCH * 64 + ((y % 64) / 2) * 16;
+        for (u32 g = 0; g < 4; g++)
+            go[g] = (((y & 1) ^ (g & 1) ^ (st & 1)) * 0x800) + g * 0x200;
+    }
+}
+
+/* the W x H window at (x0, y0) of a tiled picture (x0, W multiples of 16; y0, H even) into linear YUY2 at dst */
+void osdvid_convert(u8 *dst, const u8 *luma, const u8 *chroma, u32 x0, u32 y0, u32 W, u32 H, int scan)
+{
+    for (u32 y = 0; y < H; y++) {
+        u32 *o = (u32 *)(dst + y * W * 2);
+        u32 ly = y0 + y, lrow, crow, lo[4], co[4];
+        row_runs(ly, scan, &lrow, lo);
+        row_runs(ly / 2, scan, &crow, co);
+        for (u32 x = x0; x < x0 + W; x += 16) {
+            u32 g = (x / 16) & 3, grp = (x / 64) * 4096;
+            const u32 *l = (const u32 *)(luma + lrow + grp + lo[g]);
+            const u32 *c = (const u32 *)(chroma + crow + grp + co[g]);
+            /* each 8-byte group is stored byte-reversed: pixels 0..3 = bswap(word 1), 4..7 = bswap(word 0) */
+            u32 ys[4] = { bswap(l[1]), bswap(l[0]), bswap(l[3]), bswap(l[2]) };
+            u32 cs[4] = { bswap(c[1]), bswap(c[0]), bswap(c[3]), bswap(c[2]) };   /* U V U V ... */
+            for (int k = 0; k < 4; k++) {   /* 4 pixels (2 pairs) per step: Y0 U Y1 V little-endian */
+                u32 yy = ys[k], cc = cs[k];
+                o[0] = (yy & 0xff) | (cc & 0xff) << 8 | (yy >> 8 & 0xff) << 16 | (cc >> 8 & 0xff) << 24;
+                o[1] = (yy >> 16 & 0xff) | (cc >> 16 & 0xff) << 8 | (yy >> 24) << 16 | (cc >> 24) << 24;
+                o += 2;
+            }
+        }
+    }
+}
+
+#ifndef OSDVID_HOST   /* the rest drives the hardware; test/osdvid_host.c builds only the conversion above */
+#include "irq.h"
+#include "memmap.h"
+
 #define R(a) (*(volatile u32 *)(a))
 
 #define OSD0     0x9c006200u
@@ -17,19 +68,9 @@ typedef unsigned char u8;
 #define BUF1     MM_OSDVID_BUF1
 #define PANEL_W  1024u
 #define PANEL_H  600u
-#define PITCH    1920u         /* the decoder's pitch */
 
 static int cur, on;
 static u32 frames, last_us, saved_link;
-
-static inline u32 bswap(u32 v) { return v >> 24 | (v >> 8 & 0xff00) | (v << 8 & 0xff0000) | v << 24; }
-
-/* byte offset of the 16-byte run holding pixels x..x+15 (x % 16 == 0) of row y in the tiled plane */
-static inline u32 run(u32 x, u32 y)
-{
-    u32 st = y / 64, xg = (x / 16) % 4;
-    return st * PITCH * 64 + (x / 64) * 4096 + (((y & 1) ^ (xg & 1) ^ (st & 1)) * 0x800) + xg * 0x200 + ((y % 64) / 2) * 16;
-}
 
 static u32 out_w = 800, out_h = 480;   /* the region's size, set by the last picture */
 
@@ -94,30 +135,7 @@ void osdvid_frame(u32 luma, u32 chroma, u32 src_w, u32 src_h)
     }
     unsigned long long t1 = clk_us();
     u32 dst = cur ? BUF0 : BUF1;   /* the one not being shown */
-    for (u32 y = 0; y < H; y++) {
-        u32 *o = (u32 *)(dst + y * W * 2);
-        u32 ly = y0 + y, cy = ly / 2;
-        /* offsets of the four 16-pixel runs of a 64-pixel group (run()), for this luma row and its chroma row */
-        u32 lst = ly / 64, cst = cy / 64, lp = (ly & 1) ^ (lst & 1), cp = (cy & 1) ^ (cst & 1);
-        u32 lrow = luma + lst * PITCH * 64 + ((ly % 64) / 2) * 16, crow = chroma + cst * PITCH * 64 + ((cy % 64) / 2) * 16;
-        u32 lo[4], co[4];
-        for (u32 g = 0; g < 4; g++)
-            lo[g] = ((lp ^ (g & 1)) * 0x800) + g * 0x200, co[g] = ((cp ^ (g & 1)) * 0x800) + g * 0x200;
-        for (u32 x = x0; x < x0 + W; x += 16) {
-            u32 g = (x / 16) & 3, grp = (x / 64) * 4096;
-            const u32 *l = (const u32 *)(lrow + grp + lo[g]);
-            const u32 *c = (const u32 *)(crow + grp + co[g]);
-            /* each 8-byte group is stored byte-reversed: pixels 0..3 = bswap(word 1), 4..7 = bswap(word 0) */
-            u32 ys[4] = { bswap(l[1]), bswap(l[0]), bswap(l[3]), bswap(l[2]) };
-            u32 cs[4] = { bswap(c[1]), bswap(c[0]), bswap(c[3]), bswap(c[2]) };   /* U V U V ... */
-            for (int k = 0; k < 4; k++) {   /* 4 pixels (2 pairs) per step: Y0 U Y1 V little-endian */
-                u32 yy = ys[k], cc = cs[k];
-                o[0] = (yy & 0xff) | (cc & 0xff) << 8 | (yy >> 8 & 0xff) << 16 | (cc >> 8 & 0xff) << 24;
-                o[1] = (yy >> 16 & 0xff) | (cc >> 16 & 0xff) << 8 | (yy >> 24) << 16 | (cc >> 24) << 24;
-                o += 2;
-            }
-        }
-    }
+    osdvid_convert((u8 *)dst, (const u8 *)luma, (const u8 *)chroma, x0, y0, W, H, vdec_scan_type);
     unsigned long long t2 = clk_us();
     if (osdvid_fast)
         dcache_wb_all();
@@ -160,3 +178,4 @@ void osdvid_off(void)
 int osdvid_on_now(void) { return on; }
 unsigned int osdvid_frames(void) { return frames; }
 unsigned int osdvid_last_us(void) { return last_us; }
+#endif
