@@ -32,7 +32,7 @@ import argparse, os, socket, struct, sys, time, zlib
 PORT_CMD, PORT_HELLO = 5151, 5152
 OP_PING, OP_CMD, OP_WRITE, OP_READ, OP_SYNC, OP_LOG = 1, 2, 3, 4, 5, 6
 OP_MCU_TX, OP_MCU_STATE, OP_SETTIME, OP_EXEC, OP_IRQ, OP_FB, OP_SAY, OP_TOUCH, OP_RTOS, OP_USB, OP_FS, OP_AP, OP_VDEC = 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
-OP_AA, OP_VPP, OP_OSDVID, OP_UI, OP_AUDIO = 22, 24, 25, 26, 27
+OP_AA, OP_VPP, OP_OSDVID, OP_UI, OP_AUDIO, OP_WIFI = 22, 24, 25, 26, 27, 28
 TRAMP_ADDR = 0x02f00000
 
 # Builds without OP_EXEC that `exec` can still replace: CRC32 of their first 4 KB at 0x1800000 -> addresses of their
@@ -236,6 +236,8 @@ def main():
     p.add_argument('what', choices=['status', 'ls', 'crc', 'raw', 'rawtest', 'write', 'rm', 'load', 'put']); p.add_argument('args', nargs='*')
     p = sub.add_parser('ap', help='access-point mode: ap [CHANNEL SSID PSK] (no args: status)')
     p.add_argument('channel', nargs='?', type=int); p.add_argument('ssid', nargs='?'); p.add_argument('psk', nargs='?')
+    p = sub.add_parser('wifi', help='station Wi-Fi: status | avoid (skip the current BSS for 10 min and rescan; the unit drops off the network for a few seconds)')
+    p.add_argument('what', nargs='?', default='status', choices=['status', 'avoid'])
     p = sub.add_parser('vdec', help='hardware H.264 decoder bring-up: status | init | bitread FILE.h264')
     p.add_argument('what', choices=['status', 'init', 'bitread', 'decode', 'spmp', 'prepare']); p.add_argument('file', nargs='?')
     p.add_argument('--pics', type=int, default=1, help='decode: pictures to decode (0: all)'); p.add_argument('--skip', type=lambda x: int(x, 0), default=0)
@@ -357,6 +359,12 @@ def main():
         else:   # the unit leaves its current network; it resets back to station mode after 5 min without a station
             r = u.send_once(OP_AP, bytes([a.channel]) + a.ssid.encode() + b'\0' + a.psk.encode() + b'\0')
             print(r.decode(errors='replace') if r is not None else 'no reply')
+    elif a.op == 'wifi':
+        if a.what == 'avoid':
+            r = u.send_once(OP_WIFI, b'\x01')
+            print(r.decode(errors='replace') if r is not None else 'no reply')
+        else:
+            print(u.call(OP_WIFI, b'').decode(errors='replace'))
     elif a.op == 'vdec':
         if a.what in ('bitread', 'decode', 'prepare'):   # upload the access unit, then run it through the decoder
             data = open(a.file, 'rb').read()

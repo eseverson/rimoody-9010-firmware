@@ -2117,6 +2117,18 @@ static void join_fail(const char *why)
         flush("join failed");
 }
 
+/* issue #8: a BSS that joins but gives no lease is skipped by scan_and_choose for 10 min (any BSS, nothing hard-coded) */
+static void avoid_bss(const char *why)
+{
+    char m[20];
+    fmt_mac(m, bss.addr);
+    lprintf("wifi: avoiding %s for 10 min and scanning: %s\n", m, why);
+    cpy(bad_bss, bss.addr, 6);
+    bad_until = ub_ms(0) + 600000;
+    join_fail(why);
+    set_state(J_SCAN);
+}
+
 /* RSN IE of the AP: CCMP group and pairwise, PSK AKM, PMF not required */
 static int rsn_ok(const u8 *ie)
 {
@@ -2484,7 +2496,8 @@ static int scan_and_choose(void)
         return -1;
     int best = -1;
     for (int i = 0; i < n_cands; i++) {
-        int bad = (int)(ub_ms(0) - bad_until) < 0;
+        /* the avoidance lapses once the other BSSs have failed two scan rounds too (j_fail counts since the last join) */
+        int bad = (int)(ub_ms(0) - bad_until) < 0 && j_fail < 7;
         for (int k = 0; k < 6 && bad; k++)
             bad = cands[i].addr[k] == bad_bss[k];
         if (!bad && (best < 0 || cands[i].rssi > cands[best].rssi))
@@ -3100,6 +3113,7 @@ const char *plat_build(void) { return hu_build_id; }
 #define TRAMP_ADDR MM_TRAMP
 static u32 exec_src, exec_len;
 static int exec_pending, fatal_pending;
+static int roam_pending;   /* HU1 WIFI avoid: leave the current BSS after the reply has gone out */
 static u32 deferred_at;   /* EXEC / fatal trap wait this long after their HU1 reply so it leaves the radio first */
 
 static int rtos_status(char *o)
@@ -3914,6 +3928,25 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         ap_start_ch = ch, ap_start_pending = 1, deferred_at = ub_ms(0) + 300;
         return vfmt_n(t, "ap: starting on channel %d as '%s' after this reply; this network connection ends", ch, ap_req_ssid);
     }
+    case 28: {   /* WIFI: status; [u8 1] = avoid the current BSS for 10 min and rescan, after this reply (issue #8 test) */
+        char m[20];
+        fmt_mac(m, bss.addr);
+        if (n >= 1 && p[0] == 1) {
+            if (jstate != J_UP)
+                return vfmt_n(t, "ERR wifi: not joined (state %s)", jnames[jstate]);
+            roam_pending = 1, deferred_at = now + 300;
+            return vfmt_n(t, "wifi: avoiding %s for 10 min and rescanning after this reply; this connection drops", m);
+        }
+        char *o = t;
+        o += vfmt_n(o, "wifi: %s, bss %s ch %d %d dBm, joins failed %d", jnames[jstate], m, cur_ch, rssi_now, j_fail);
+        int left = (int)(bad_until - now);
+        if (left > 0)
+            fmt_mac(m, bad_bss), o += vfmt_n(o, "; avoiding %s for %d s", m, left / 1000);
+        o += vfmt_n(o, "; last scan:");
+        for (int i = 0; i < n_cands; i++)
+            fmt_mac(m, cands[i].addr), o += vfmt_n(o, " %s ch %d %d dBm", m, cands[i].ds, cands[i].rssi);
+        return o - t;
+    }
     case 21:   /* HWSEC: [u8 on] -> hardware CCMP for unicast (applied to the current key at once); status */
         if (n >= 1) {
             hwsec = p[0] != 0;
@@ -4397,13 +4430,7 @@ static void net_loop(void)
             continue;
         }
         if (jstate == J_UP && !ip_addr() && ub_ms(0) - up_at > 30000) {
-            char m[20];
-            fmt_mac(m, bss.addr);
-            lprintf("dhcp: no lease from %s in 30 s: avoiding it for 10 min and scanning (issue #8)\n", m);
-            cpy(bad_bss, bss.addr, 6);
-            bad_until = ub_ms(0) + 600000;
-            join_fail("no DHCP lease");
-            set_state(J_SCAN);
+            avoid_bss("no DHCP lease in 30 s");
             continue;
         }
         if (jstate == J_WAIT && (int)(ub_ms(0) - retry_at) >= 0) {
@@ -4536,6 +4563,10 @@ static void net_loop(void)
                 if (h & IMR1_RXFOVW)
                     rxff_ovf++, rw32(REG_HISRE, IMR1_RXFOVW);
             }
+        }
+        if (roam_pending && (int)(ub_ms(0) - deferred_at) >= 0) {
+            roam_pending = 0;
+            avoid_bss("requested over HU1");
         }
         if (ap_start_pending && (int)(ub_ms(0) - deferred_at) >= 0) {
             ap_start_pending = 0;
