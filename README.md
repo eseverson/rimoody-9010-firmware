@@ -25,7 +25,7 @@ In progress: occasional audio skips during AA (`notes/android_auto.md`, "Stutter
 | Serial NOR flash (16 MB) | xboot, U-Boot 2014.04 (vendor), stock eCos. Default env patched to `bootcmd=source 98e00000;bootsp` (`tools/patch_uboot.py`, `tools/flash_bootcmd.py`). Full dumps are kept locally (`dump*.bin`, gitignored). |
 | Realtek RTL8188FTV | USB Wi-Fi dongle on EHCI1 (0bda:f179); firmware `isp/sd-10-net/rtl8188fufw.bin`. |
 | Jieli AC6965A | The "MCU": Bluetooth plus ACC, backlight, mute and RTC, over UART1 at 115200 (`ff aa` frames, `tools/mcuframe.py`). It cuts SoC power if the heartbeat stops. Notes: [notes/audio.md](notes/audio.md), [notes/android_auto.md](notes/android_auto.md). |
-| Panel and touch | 1024x600 TTL panel; Goodix GT911 on bit-banged I2C (GPIO90-93); the five front buttons are touch areas right of the display. [notes/display_touch.md](notes/display_touch.md). |
+| Panel and touch | 1024x600 TTL panel; Goodix GT911 on bit-banged I2C (GPIO90-93), as the stock firmware does it (its hardware I2C masters serve only the FM tuner); the five front buttons are touch areas right of the display. [notes/display_touch.md](notes/display_touch.md). |
 
 ## Repository layout
 
