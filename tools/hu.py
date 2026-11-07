@@ -232,8 +232,8 @@ def main():
     sub.add_parser('mcu')
     p = sub.add_parser('mcu-tx'); p.add_argument('bytes', nargs='+', help='payload bytes in hex, e.g. d1 00')
     sub.add_parser('settime')
-    p = sub.add_parser('fs', help='our own SD/FAT driver: status, ls [dir], crc NAME, raw LBA, rawtest NAME SRC, write NAME ADDR LEN, rm NAME, load NAME ADDR MAX')
-    p.add_argument('what', choices=['status', 'ls', 'crc', 'raw', 'rawtest', 'write', 'rm', 'load']); p.add_argument('args', nargs='*')
+    p = sub.add_parser('fs', help='our own SD/FAT driver: status, ls [dir], crc NAME, raw LBA, rawtest NAME SRC, write NAME ADDR LEN, rm NAME, load NAME ADDR MAX, put FILE [NAME] (upload, write, check both CRCs against FILE)')
+    p.add_argument('what', choices=['status', 'ls', 'crc', 'raw', 'rawtest', 'write', 'rm', 'load', 'put']); p.add_argument('args', nargs='*')
     p = sub.add_parser('ap', help='access-point mode: ap [CHANNEL SSID PSK] (no args: status)')
     p.add_argument('channel', nargs='?', type=int); p.add_argument('ssid', nargs='?'); p.add_argument('psk', nargs='?')
     p = sub.add_parser('vdec', help='hardware H.264 decoder bring-up: status | init | bitread FILE.h264')
@@ -330,6 +330,10 @@ def main():
     elif a.op == 'usb':
         c = {'status': 0, 'compare': 1, 'own': 2, 'uboot': 3}[a.what]
         print(u.call(OP_USB, struct.pack('<BH', c, a.count)).decode(errors='replace'))
+    elif a.op == 'fs' and a.what == 'put':
+        if not 1 <= len(a.args) <= 2:
+            sys.exit('fs put FILE [NAME]')
+        return do_fs_put(u, a.args[0], a.args[1] if len(a.args) > 1 else os.path.basename(a.args[0]).upper())
     elif a.op == 'fs':
         c = {'status': 0, 'ls': 1, 'crc': 2, 'raw': 3, 'rawtest': 4, 'write': 5, 'rm': 6, 'load': 7}[a.what]
         args = a.args
@@ -343,7 +347,10 @@ def main():
             name, x = args[0], int(args[1], 0)
         elif a.what in ('write', 'load'):   # name addr len
             name, x, y = args[0], int(args[1], 0), int(args[2], 0)
-        print(u.call(OP_FS, struct.pack('<BII', c, x, y) + name.encode()).decode(errors='replace'))
+        r = u.call(OP_FS, struct.pack('<BII', c, x, y) + name.encode()).decode(errors='replace')
+        print(r)
+        if a.what == 'write' and 'MISMATCH' in r:
+            return 1
     elif a.op == 'ap':
         if a.channel is None:
             print(u.call(OP_AP, b'').decode(errors='replace'))
@@ -448,6 +455,32 @@ def main():
     elif a.op == 'persist':
         return do_persist(u, a.file, a.name)
     return 0
+
+
+def do_fs_put(u, path, name):
+    """A local file onto the card under NAME through our FAT driver (HU1 op 17/5), checked end to end: the unit's RAM copy
+    just before the write and the file read back afterwards must both match the local file. Issue #2: once the first
+    word of the upload area changed between the upload and the card write, so a plain `write` + `fs write` stored a
+    corrupt file without any error."""
+    import re
+    data = open(path, 'rb').read()
+    want = zlib.crc32(data) & 0xffffffff
+    u.write(LOAD_ADDR, data)
+    r = u.call(OP_FS, struct.pack('<BII', 5, LOAD_ADDR, len(data)) + name.encode()).decode(errors='replace')
+    print(r)
+    m = re.search(r'ram crc ([0-9a-f]{8})', r)   # older images do not report it
+    ram = int(m.group(1), 16) if m else None
+    c = u.call(OP_FS, struct.pack('<BII', 2, 0, 0) + name.encode()).decode(errors='replace')
+    m = re.search(r': (\d+) bytes, crc ([0-9a-f]{8})', c)
+    card_len, card = (int(m.group(1)), int(m.group(2), 16)) if m else (None, None)
+    if ram is not None and ram != want:
+        verdict = 'FAILED: the RAM copy changed between the upload and the card write (ram %08x)' % ram
+    elif card is None or card_len != len(data) or card != want:
+        verdict = 'FAILED: the card holds %s bytes, crc %s' % (card_len, '%08x' % card if card is not None else '?')
+    else:
+        verdict = 'ok'
+    print('%s on card: %s (file %d bytes, crc %08x)' % (name, verdict, len(data), want))
+    return 0 if verdict == 'ok' else 1
 
 
 def do_persist(u, path, name):

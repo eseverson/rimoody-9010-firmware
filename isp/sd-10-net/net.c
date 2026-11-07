@@ -3763,13 +3763,18 @@ static int fs_op(const cu8 *p, int n, char *o)
         return vfmt_n(o, "raw write lba %u (cluster %u of %s): %d", lba, cl, name, e);
     }
     if (c == 5) {   /* write file name from RAM a, b bytes */
-        u32 t0 = clk_ms();
+        /* the reply carries the CRC of the RAM source just before the write and of the file read back after it: the
+         * host compares "ram" with what it uploaded (a source that changed since the upload, #2: the first word of
+         * 0x03000000 once became 0x08000800) and "card" with "ram" (a bad card write) */
+        u32 t0 = clk_ms(), ram = crc32_le((const u8 *)a, (int)b), got_len;
         UINT put = 0;
         if ((r = f_open(&f, name, FA_CREATE_ALWAYS | FA_WRITE)) != FR_OK)
             return vfmt_n(o, "ERR create %s: %d", name, r);
         r = f_write(&f, (const void *)a, b, &put);
         FRESULT r2 = f_close(&f);
-        return vfmt_n(o, "%s: wrote %u of %u bytes, %u ms, write %d close %d", name, (u32)put, b, clk_ms() - t0, r, r2);
+        u32 ms = clk_ms() - t0, card = fs_crc(name, &got_len);
+        return vfmt_n(o, "%s: wrote %u of %u bytes, %u ms, write %d close %d; ram crc %08x, card %d bytes crc %08x%s", name,
+                      (u32)put, b, ms, r, r2, ram, (int)got_len, card, got_len == b && card == ram ? "" : " MISMATCH");
     }
     if (c == 6)
         return vfmt_n(o, "rm %s: %d", name, f_unlink(name));
