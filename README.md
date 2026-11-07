@@ -1,6 +1,6 @@
-# Miata head unit
+# Rimoody 9" 9010 head unit: custom firmware
 
-Reverse engineering and replacement firmware for a Rimoody 9" single-DIN car head unit (Sunplus SPHE8268K SoC, stock eCos firmware) installed in the owner's Miata. The stock firmware stays in NOR flash; a patched U-Boot boot script loads our own bare-metal payload (`isp/sd-10-net`) from the SD card instead. The payload runs FreeRTOS on its own NDS32 port with our own USB, Wi-Fi, SD/FAT, display, touch, audio and H.264 drivers, shows an LVGL UI, runs wireless Android Auto, and is driven from a PC over Wi-Fi with `tools/hu.py`. Linux is not an option: the CPU has an MPU, not a paging MMU (`notes/linux_feasibility.md`).
+Reverse engineering and replacement firmware for the **Rimoody 9" single-DIN car stereo, model 9010** (printed on the front bezel), sold as "Rimoody 9'' Single Din Car Stereo Wireless CarPlay Android Auto Detachable". It runs on a Sunplus SPHE8268K SoC with stock eCos firmware. This one is installed in the owner's Miata. The stock firmware stays in NOR flash; a patched U-Boot boot script loads our own bare-metal payload (`isp/sd-10-net`) from the SD card instead. The payload runs FreeRTOS on its own NDS32 port with our own USB, Wi-Fi, SD/FAT, display, touch, audio and H.264 drivers, shows an LVGL UI, runs wireless Android Auto, and is driven from a PC over Wi-Fi with `tools/hu.py`. Linux is not an option: the CPU has an MPU, not a paging MMU (`notes/linux_feasibility.md`).
 
 Working on the unit today:
 
@@ -18,6 +18,12 @@ Working on the unit today:
 In progress: occasional audio skips during AA (`notes/android_auto.md`, "Stutter hunt"), VPP0 tearing and downscaling, AES-GCM throughput limiting AA video, and Wi-Fi join reliability.
 
 ## Hardware
+
+Identifying marks, for matching other units (the same board likely ships under other brands):
+
+- Front bezel: "9010", plus "cmlplay" on the front of the unit.
+- Main board silkscreen: `7388-2900-260L V03`, dated `20240504`.
+- Stock firmware: eCos on the SPHE8268K, with a touch-panel profile named `TP_9010` among others.
 
 | Part | Role and key facts |
 |---|---|
