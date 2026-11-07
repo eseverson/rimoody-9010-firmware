@@ -1858,6 +1858,19 @@ static u32 prof_iters, prof_rx_n;
 static int usb_tx(int ep, int len)
 {
     u32 pipe = (3u << 30) | pipe_base(wdev, ep);
+    if (own_usb && n_out_eps >= 2 && ep == out_ep[1]) {   /* data frames: queued, no wait (ehci.c v4) */
+        unsigned long long t0 = clk_us();
+        int r = ehci_tx_async(wdev, pipe, txbuf, len);
+        tx_us += clk_us() - t0;
+        if (r == 0) {
+            tx_count++;
+            return 0;
+        }
+        if (r == -2) {
+            tx_err++;
+            return -1;
+        }
+    }
     for (int i = 0; i < 3; i++) {
         int actual = 0;
         unsigned long long t0 = clk_us();
@@ -3162,9 +3175,9 @@ static int usb_op(int c, int count, char *o)
                    count, fail_ub, t_ub, fail_own, t_own, bad, v_own);
         lprintf("%s", o);
     }
-    return k + vfmt_n(o + k, "usb: driver %s, ehci.c ok %u (rx %u) err %u timeout %u busy %u refused %u, portsc %x, status %x; tx %u frames, %u ms in bulk OUT; loop %u iterations %u frames, ms in rx %u mlme/ip %u lwip %u all %u",
+    return k + vfmt_n(o + k, "usb: driver %s, ehci.c ok %u (rx %u) err %u timeout %u busy %u refused %u, portsc %x, status %x; tx %u frames (queued %u, errors %u, ring full %u), %u ms in bulk OUT; loop %u iterations %u frames, ms in rx %u mlme/ip %u lwip %u all %u",
                   own_usb ? "ehci.c" : "u-boot", ehci_stats.ok, ehci_stats.rx, ehci_stats.errors, ehci_stats.timeouts,
-                  ehci_stats.busy, ehci_stats.refused, ehci_portsc(), rd32(wdev + UDEV_STATUS), tx_count, (u32)(tx_us / 1000), prof_iters, prof_rx_n,
+                  ehci_stats.busy, ehci_stats.refused, ehci_portsc(), rd32(wdev + UDEV_STATUS), tx_count, ehci_stats.txq, ehci_stats.txerr, ehci_stats.txfull, (u32)(tx_us / 1000), prof_iters, prof_rx_n,
                   (u32)(prof_rx_us / 1000), (u32)(prof_mid_us / 1000), (u32)(prof_lw_us / 1000), (u32)(prof_loop_us / 1000));
 }
 

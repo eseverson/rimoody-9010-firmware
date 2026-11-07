@@ -9,7 +9,12 @@ int ehci_bulk(void *dev, unsigned int pipe, void *data, int len, int *actual, in
  * refused (data must be cache-line aligned in address and length, at most one qTD). Call again to re-queue. */
 int ehci_rx_poll(void *dev, unsigned int pipe, void *data, int len, int *actual);
 void ehci_rx_stop(void);   /* before U-Boot uses USB, and before memory under the buffer is reused */
+/* v4: a bulk OUT queued on the running ring without waiting for it (one OUT endpoint; data copied, <= 2048 bytes).
+ * 0 = queued, -1 = not possible now (the RX ring is not up, or another endpoint): send it with ehci_bulk instead,
+ * -2 = dropped (ring stuck or the endpoint halted). Once an endpoint is queued here, all its frames must come here
+ * until a -1: its data toggle lives in the queue head. */
+int ehci_tx_async(void *dev, unsigned int pipe, const void *data, int len);
 unsigned int ehci_portsc(void);
-struct ehci_stats { unsigned int ok, errors, timeouts, busy, refused, rx; };
+struct ehci_stats { unsigned int ok, errors, timeouts, busy, refused, rx, txq, txerr, txfull; };
 extern struct ehci_stats ehci_stats;
 #endif

@@ -17,12 +17,14 @@
  * only ever rewritten with the schedule stopped. ehci_rx_stop must run before U-Boot touches USB or memory is reused.
  *
  * v3 (ehci_rx_poll): a ring of RQN queued bulk INs instead of one, see below.
+ * v4 (ehci_tx_async): bulk OUT on the same running ring, see below.
  *
  * DMA buffers: used in place when cache-line aligned in address and length, otherwise through a bounce buffer, so
  * invalidating never throws away another task's writes that share a line. */
 #include "ehci.h"
 #include "usbdev.h"
 #include "clk.h"
+#include "memmap.h"
 
 typedef unsigned int u32;
 typedef unsigned short u16;
@@ -297,6 +299,47 @@ static int rx_armed, rq_head;
 static u8 *rx_dev;
 static u32 rx_pipe, rx_ep, ub_async;
 
+/* v4: TX ring. Each Wi-Fi frame through xfer() stopped the schedule (the RX ring with it), ran, and restarted it:
+ * ~330 us per frame, a TCP ACK each, during an AA stream ~0.6 s of every 5.6 s. Instead a second QH (tqh) joins
+ * the RX ring once the first data frame comes (rhead -> rqh -> tqh -> rhead), with TQN qTDs in a circle, all
+ * inactive until filled: the controller parks on the first inactive one and picks it up on a later pass, as on the
+ * RX ring. A frame is copied into its slot's buffer, the qTD armed, and ehci_tx_async returns; finished slots are
+ * reaped on later calls. DTC = 0: the toggle lives in tqh's overlay and goes back to struct usb_device whenever tqh
+ * leaves the ring (an error, or the RX ring coming down). */
+#define TQN 16
+#define TQ_LEN 2048
+static struct qh tqh __attribute__((aligned(64)));
+static struct rq_slot tq[TQN] __attribute__((aligned(64)));
+#ifdef __nds32__
+static u8 tqbuf[TQN][TQ_LEN] __attribute__((aligned(4096), section(".bigbss")));
+#else
+static u8 tqbuf[TQN][TQ_LEN] __attribute__((aligned(4096)));
+#endif
+static int tx_armed, tq_head, tq_tail;
+static u32 tx_pipe, tx_ep;
+
+/* Breadcrumbs for a hang that kills the tick (issue #14): DRAM survives the watchdog reset, so after one
+ * `hu.py read 0x01F0F080 32` shows the last stage, its time, the TX ring and the RX count. */
+#define ECRUMB ((volatile u32 *)(MM_CRUMB + 0x80))
+static void ecrumb(u32 stage)
+{
+    ECRUMB[0] = 0xec0b0000u | stage;
+    ECRUMB[1] = clk_ms();
+    ECRUMB[2] = ehci_stats.txq;
+    ECRUMB[3] = (u32)tq_head << 16 | (u32)tq_tail;
+    ECRUMB[4] = ehci_stats.rx;
+    ECRUMB[5] = REG(USBSTS);
+    __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(MM_CRUMB + 0x80) : "memory");
+}
+
+static void tx_save_toggle(void)   /* schedule stopped */
+{
+    INV(&tqh, sizeof tqh);
+    if (tqh.cur)
+        RD32(rx_dev + UDEV_TOGGLE + 4) = (RD32(rx_dev + UDEV_TOGGLE + 4) & ~(1u << tx_ep)) | (tqh.ov_token >> 31) << tx_ep;
+    tx_armed = 0;
+}
+
 static int sched_stop(void)
 {
     REG(USBCMD) = REG(USBCMD) & ~CMD_ASE;
@@ -314,6 +357,8 @@ static int sched_start(void)
  * ASYNCLISTADDR back. Transfers received but not yet polled are dropped. */
 static void rx_down(void)
 {
+    if (tx_armed)   /* queued frames not yet sent are dropped */
+        tx_save_toggle();
     INV(&rqh, sizeof rqh);
     if (rqh.cur)
         RD32(rx_dev + UDEV_TOGGLE) = (RD32(rx_dev + UDEV_TOGGLE) & ~(1u << rx_ep)) | (rqh.ov_token >> 31) << rx_ep;
@@ -390,6 +435,7 @@ static int rx_arm(u8 *dev, u32 pipe)
 int ehci_rx_poll(void *dev, u32 pipe, void *data, int len, int *actual)
 {
     *actual = 0;
+    ecrumb(10);
     if (rx_armed && (rx_dev != dev || rx_pipe != pipe))
         ehci_rx_stop();
     if (!rx_armed)
@@ -425,10 +471,126 @@ int ehci_rx_poll(void *dev, u32 pipe, void *data, int len, int *actual)
     return 0;
 }
 
+/* Schedule stopped, RX ring armed: put tqh into the ring for `pipe` */
+static int tx_link(u8 *dev, u32 pipe)
+{
+    u32 devnum = (pipe >> 8) & 0x7f, ep = (pipe >> 15) & 0xf;
+    u32 maxp = RD32(dev + UDEV_EPMAX_OUT + 4 * ep);
+    if (!maxp || maxp > 1024)
+        return -1;
+    for (int i = 0; i < TQN; i++) {
+        struct qtd *q = &tq[i].q;
+        q->next = (u32)&tq[(i + 1) % TQN].q;
+        q->alt = T_BIT;
+        q->token = 0;
+        for (int k = 0; k < 5; k++)
+            q->buf[k] = 0;
+    }
+    tq_head = tq_tail = 0;
+    tqh.link = (u32)&rhead | TYPE_QH;
+    tqh.ep1 = 8u << 28 | maxp << 16 | 2u << 12 | ep << 8 | devnum;   /* DTC = 0: toggle in the overlay */
+    tqh.ep2 = 1u << 30;
+    tqh.cur = 0;
+    tqh.ov_next = (u32)&tq[0].q;
+    tqh.ov_alt = T_BIT;
+    tqh.ov_token = ((RD32(dev + UDEV_TOGGLE + 4) >> ep) & 1) << 31;
+    for (int k = 0; k < 5; k++)
+        tqh.ov_buf[k] = 0;
+    WB(&tqh, sizeof tqh);
+    WB(tq, sizeof tq);
+    INV(&rqh, sizeof rqh);   /* the controller owns the overlay: re-read, change only the link, write back */
+    rqh.link = (u32)&tqh | TYPE_QH;
+    WB(&rqh, sizeof rqh);
+    tx_pipe = pipe, tx_ep = ep, tx_armed = 1;
+    return 0;
+}
+
+static void tx_unlink(void)   /* schedule stopped */
+{
+    tx_save_toggle();
+    INV(&rqh, sizeof rqh);
+    rqh.link = (u32)&rhead | TYPE_QH;
+    WB(&rqh, sizeof rqh);
+}
+
+int ehci_tx_async(void *dev, u32 pipe, const void *data, int len)
+{
+    ecrumb(1);
+    if (!tx_armed) {
+        if (!rx_armed || dev != rx_dev || (pipe >> 30) != 3 || (pipe & 0x80) || len <= 0 || len > TQ_LEN)
+            return -1;
+        if (sched_stop()) {
+            ehci_stats.busy++;
+            return -1;
+        }
+        ecrumb(2);
+        int r = tx_link(dev, pipe);
+        ecrumb(3);
+        if (sched_start()) {
+            ehci_stats.busy++;
+            ehci_rx_stop();
+            return -1;
+        }
+        if (r)
+            return -1;
+    } else if (pipe != tx_pipe || dev != rx_dev)
+        return -1;   /* another endpoint: tx_pipe's frames keep coming here */
+    if (len <= 0 || len > TQ_LEN)
+        return -2;
+    u32 t0 = clk_ms();
+    for (;;) {   /* reap finished slots */
+        while (tq_tail != tq_head) {
+            struct qtd *q = &tq[tq_tail].q;
+            INV(q, sizeof *q);
+            u32 tk = q->token;
+            if (tk & TK_ACTIVE)
+                break;
+            if (tk & TK_HALTED) {   /* the QH halted: take tqh out; the next frame links a fresh one */
+                ehci_stats.txerr++;
+                ecrumb(5);
+                if (sched_stop()) {
+                    ehci_stats.busy++;
+                    ehci_rx_stop();
+                    return -2;
+                }
+                tx_unlink();
+                if (sched_start()) {
+                    ehci_stats.busy++;
+                    ehci_rx_stop();
+                }
+                return -2;
+            }
+            tq_tail = (tq_tail + 1) % TQN;
+        }
+        if ((tq_head + 1) % TQN != tq_tail)
+            break;
+        if (clk_ms() - t0 > 20) {   /* the dongle took nothing for 20 ms */
+            ehci_stats.txfull++;
+            return -2;
+        }
+    }
+    ecrumb(4);
+    int i = tq_head;
+    u8 *b = tqbuf[i];
+    const u8 *src = data;
+    for (int k = 0; k < len; k++)
+        b[k] = src[k];
+    WB(b, (u32)len);
+    struct qtd *q = &tq[i].q;
+    q->buf[0] = (u32)b;   /* 2 KB slots in a 4 KB-aligned array: never across a page */
+    q->token = (u32)len << 16 | 3u << 10 | (u32)PID_OUT << 8 | TK_ACTIVE;
+    WB(q, sizeof *q);
+    tq_head = (i + 1) % TQN;
+    ehci_stats.txq++;
+    ecrumb(6);
+    return 0;
+}
+
 /* Any other transfer: pause the queued IN around it (or end it, for a blocking read of the same endpoint). */
 static int xfer(u8 *dev, u32 pipe, const u8 *setup, void *data, u32 len, int timeout_ms)
 {
     int paused = 0;
+    ecrumb(20);
     if (rx_armed) {
         if (dev == rx_dev && (pipe & 0x80) && (pipe >> 30) == 3 && ((pipe >> 15) & 0xf) == rx_ep)
             ehci_rx_stop();
@@ -438,7 +600,9 @@ static int xfer(u8 *dev, u32 pipe, const u8 *setup, void *data, u32 len, int tim
         } else
             paused = 1;
     }
+    ecrumb(21);
     int r = xfer1(dev, pipe, setup, data, len, timeout_ms);
+    ecrumb(22);
     if (paused) {
         REG(ASYNCLA) = (u32)&rhead;
         if (sched_start()) {
