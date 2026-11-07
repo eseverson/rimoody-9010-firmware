@@ -2,7 +2,7 @@
 # Host test of aa_tls.c against openssl s_server, with a throwaway CA and RSA-2048 client/server keys (never real keys).
 set -e
 cd "$(dirname "$0")"
-T=$(mktemp -d); trap 'kill $SRV 2>/dev/null; rm -rf $T' EXIT
+T=$(mktemp -d); trap 'kill $SRV 2>/dev/null || true; rm -rf $T' EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -keyout $T/ca.key -out $T/ca.crt -days 1 -subj /CN=test-ca 2>/dev/null
 for n in srv cli; do
   openssl req -newkey rsa:2048 -nodes -keyout $T/$n.key -out $T/$n.csr -subj /CN=$n 2>/dev/null
