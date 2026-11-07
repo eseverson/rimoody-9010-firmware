@@ -43,7 +43,7 @@ volatile u32 gt9_down_ms;
 
 static void drive(u32 reg, int pin, int v) { REG(reg) = (M(pin) << 16) | (v ? M(pin) : 0); }
 static int in(int pin) { return (REG(G_IN) & F(pin)) != 0; }
-static void dly(void) { plat_udelay(5); }   /* ~100 kHz; the 100 Hz tick ISR only stretches it */
+static void dly(void) { plat_udelay(2); }   /* ~250 kHz (the GT911 takes 400); the 100 Hz tick ISR only stretches it */
 static void sda(int high) { drive(G_OE, P_SDA, !high); }
 static int scl(int high)
 {
@@ -294,6 +294,11 @@ void gt9_tick(u32 now)
         plat_logf("touch: events on (gt911 at 0x%x%s)\n", a, tries ? ", after a reset" : "");
     }
     u8 b[12];
+    /* idle: the status byte alone (6 bytes on the bus, not 15), the record only once it says one is ready */
+    if (!down && (rd(0x814e, b, 1) || !(b[0] & 0x80))) {
+        busy = 0;
+        return;
+    }
     if (rd(0x814e, b, 10) == 0 && (b[0] & 0x80)) {
         int np = b[0] & 0x0f;
         unsigned x = b[2] | b[3] << 8, y = b[4] | b[5] << 8;
