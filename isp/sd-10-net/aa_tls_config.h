@@ -14,10 +14,11 @@
 
 #define MBEDTLS_AES_C
 #define MBEDTLS_AES_ROM_TABLES
+#define MBEDTLS_AES_FEWER_TABLES   /* 1 KB of tables, not 4: gcm_alt.c's 4 KB GHASH table needs the cache room */
 #define MBEDTLS_CIPHER_C
 #define MBEDTLS_CIPHER_MODE_CBC
 #define MBEDTLS_GCM_C
-#define MBEDTLS_GCM_LARGE_TABLE   /* 8-bit GHASH tables: faster in software */
+#define MBEDTLS_GCM_ALT   /* gcm_alt.c: GHASH in 32-bit words, ~2x mbedtls's 64-bit one on this core (issue #3) */
 #define MBEDTLS_CHACHA20_C
 #define MBEDTLS_POLY1305_C
 #define MBEDTLS_CHACHAPOLY_C

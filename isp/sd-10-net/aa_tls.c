@@ -261,9 +261,28 @@ int aa_tls_bench(char *o, int (*fmt)(char *, const char *, ...))
         mbedtls_gcm_context g;
         mbedtls_gcm_init(&g);
         mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, key, (unsigned)bits);
-        t0 = clk_us();
-        mbedtls_gcm_crypt_and_tag(&g, MBEDTLS_GCM_DECRYPT, sizeof buf, iv, 12, 0, 0, buf, out, 16, tag);
-        k += fmt(o + k, " gcm%d %u", bits, (unsigned)(clk_us() - t0));
+        unsigned best = ~0u;   /* best of 3: the ui task (higher priority) can preempt a run */
+        for (int rep = 0; rep < 3; rep++) {
+            t0 = clk_us();
+            mbedtls_gcm_crypt_and_tag(&g, MBEDTLS_GCM_DECRYPT, sizeof buf, iv, 12, 0, 0, buf, out, 16, tag);
+            unsigned us = (unsigned)(clk_us() - t0);
+            best = us < best ? us : best;
+        }
+        k += fmt(o + k, " gcm%d %u", bits, best);
+        mbedtls_gcm_free(&g);
+    }
+    {   /* in place at the offset TLS 1.2 puts GCM ciphertext in mbedtls's record buffer (header + explicit nonce) */
+        mbedtls_gcm_context g;
+        mbedtls_gcm_init(&g);
+        mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, key, 128);
+        unsigned best = ~0u;
+        for (int rep = 0; rep < 3; rep++) {
+            t0 = clk_us();
+            mbedtls_gcm_crypt_and_tag(&g, MBEDTLS_GCM_DECRYPT, sizeof buf - 32, iv, 12, 0, 0, buf + 21, buf + 21, 16, tag);
+            unsigned us = (unsigned)(clk_us() - t0);
+            best = us < best ? us : best;
+        }
+        k += fmt(o + k, " gcm128-inplace+21 %u", best);
         mbedtls_gcm_free(&g);
     }
     mbedtls_aes_context a;

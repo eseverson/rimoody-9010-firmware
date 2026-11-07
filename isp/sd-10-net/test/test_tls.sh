@@ -9,9 +9,13 @@ for n in srv cli; do
   openssl x509 -req -in $T/$n.csr -CA $T/ca.crt -CAkey $T/ca.key -CAcreateserial -out $T/$n.crt -days 1 2>/dev/null
 done
 M=../mbedtls
-gcc -O1 -DAA_TLS_HOST -I.. -I$M/include '-DMBEDTLS_CONFIG_FILE="aa_tls_config.h"' -o tls_host aatls.c ../aa_tls.c $M/library/*.c
-PORT=$((20000 + RANDOM % 20000))
-openssl s_server -accept $PORT -cert $T/srv.crt -key $T/srv.key -CAfile $T/ca.crt -Verify 1 -tls1_2 -rev -quiet >$T/srv.log 2>&1 &
-SRV=$!; sleep 0.5
-./tls_host $PORT $T/cli.crt $T/cli.key
-grep -q "CN=cli\|CN = cli" $T/srv.log && echo "PASS server saw client certificate CN=cli" || { echo "server log:"; cat $T/srv.log; }
+gcc -O1 -DAA_TLS_HOST -I.. -I$M/include '-DMBEDTLS_CONFIG_FILE="aa_tls_config.h"' -o tls_host aatls.c ../aa_tls.c $M/library/*.c ../gcm_alt.c
+# the server's own pick (ChaCha20, our first offer), then AES-128-GCM as a real phone picks it (gcm_alt.c)
+for C in "" "-cipher ECDHE-RSA-AES128-GCM-SHA256"; do
+  PORT=$((20000 + RANDOM % 20000))
+  openssl s_server -accept $PORT -cert $T/srv.crt -key $T/srv.key -CAfile $T/ca.crt -Verify 1 -tls1_2 $C -rev -quiet >$T/srv.log 2>&1 &
+  SRV=$!; sleep 0.5
+  ./tls_host $PORT $T/cli.crt $T/cli.key
+  grep -q "CN=cli\|CN = cli" $T/srv.log && echo "PASS server saw client certificate CN=cli" || { echo "server log:"; cat $T/srv.log; exit 1; }
+  kill $SRV 2>/dev/null; wait $SRV 2>/dev/null || true
+done

@@ -15,7 +15,7 @@ BUILD_ID := $(shell date +%Y%m%d-%H%M%S)
 RTOS    := freertos/tasks.c freertos/list.c freertos/queue.c freertos/timers.c freertos/heap_4.c freertos/port/port.c
 MBEDTLS_SRC := $(wildcard mbedtls/library/*.c)
 # mbedtls is built at -O2 into its own archive: the payload decrypts the whole AA video stream in software
-MBEDTLS_OBJ := $(patsubst mbedtls/library/%.c,obj/mbedtls/%.o,$(MBEDTLS_SRC))
+MBEDTLS_OBJ := $(patsubst mbedtls/library/%.c,obj/mbedtls/%.o,$(MBEDTLS_SRC)) obj/gcm_alt.o
 # LVGL v9 (lvgl/README.vendor, lv_conf.h): its own archive at -O2, like mbedtls
 LVGL_SRC := $(shell find lvgl/src -name '*.c')
 LVGL_OBJ := $(patsubst lvgl/%.c,obj/lvgl/%.o,$(LVGL_SRC))
@@ -36,6 +36,10 @@ TRAMP.BIN: tramp.elf
 
 obj/mbedtls/%.o: mbedtls/library/%.c aa_tls_config.h
 	@mkdir -p obj/mbedtls
+	$(CC) $(subst -Os,-O2,$(CFLAGS)) -c -o $@ $<
+
+obj/gcm_alt.o: gcm_alt.c gcm_alt.h aa_tls_config.h
+	@mkdir -p obj
 	$(CC) $(subst -Os,-O2,$(CFLAGS)) -c -o $@ $<
 
 mbedtls.a: $(MBEDTLS_OBJ)
@@ -59,10 +63,10 @@ NET.BIN: net.elf
 
 # host tests (plain gcc + python3 with the `cryptography` package)
 HOSTCC ?= gcc
-test: test/crypto_host test/wpa_host test/ip_host test/mcu_host test/con_host test/h264p_host test/lwiptcp_host test/aawl_host test/wpaap_host test/dhcps_host test/ap80211_host test/osdvid_host
+test: test/crypto_host test/wpa_host test/ip_host test/mcu_host test/con_host test/h264p_host test/lwiptcp_host test/aawl_host test/wpaap_host test/dhcps_host test/ap80211_host test/osdvid_host test/gcm_host
 	cd test && python3 -I test_crypto.py ./crypto_host && python3 -I test_wpa.py ./wpa_host && \
 	  python3 -I test_ip.py ./ip_host && python3 -I test_mcu.py ./mcu_host && \
-	  python3 -I test_console.py ./con_host && python3 -I test_h264p.py ./h264p_host && ./lwiptcp_host && ./aawl_host && ./wpaap_host && ./dhcps_host && python3 -I test_ap80211.py ./ap80211_host && python3 -I test_osdvid.py ./osdvid_host && ./test_tls.sh && ./test_aatcp.sh
+	  python3 -I test_console.py ./con_host && python3 -I test_h264p.py ./h264p_host && ./lwiptcp_host && ./aawl_host && ./wpaap_host && ./dhcps_host && python3 -I test_ap80211.py ./ap80211_host && python3 -I test_osdvid.py ./osdvid_host && python3 -I test_gcm.py ./gcm_host && ./test_tls.sh && ./test_aatcp.sh
 
 test/%_host: test/%_host.c h264p.c h264p.h aa_wl.c aa_wl.h wpa_ap.c wpa_ap.h ap80211.c ap80211.h crypto.c crypto.h wpa.c wpa.h ip.c ip.h mcu.c mcu.h console.c console.h font8x16.h osdvid.c osdvid.h vdec.h
 	$(HOSTCC) -O2 -Wall -Wextra -o $@ $<
@@ -70,6 +74,8 @@ test/%_host: test/%_host.c h264p.c h264p.h aa_wl.c aa_wl.h wpa_ap.c wpa_ap.h ap8
 clean:
 	rm -rf obj mbedtls.a lvgl.a && rm -f net.elf NET.BIN net.dis net.map tramp.elf TRAMP.BIN tramp.dis tramp.map test/*_host
 
+test/gcm_host: test/gcm_host.c gcm_alt.c gcm_alt.h aa_tls_config.h
+	$(HOSTCC) -O2 -Wall -Wextra -I. -Imbedtls/include '-DMBEDTLS_CONFIG_FILE="aa_tls_config.h"' -o $@ test/gcm_host.c gcm_alt.c mbedtls/library/aes.c mbedtls/library/platform_util.c mbedtls/library/platform.c
 test/lwiptcp_host: test/lwiptcp.c lwip/lwipopts.h $(LWIP_SRC)
 	$(HOSTCC) -O2 -w -Ilwip -Ilwip/arch -Ilwip/src/include -o $@ test/lwiptcp.c $(LWIP_SRC)
 test/dhcps_host: test/dhcps.c dhcps.c dhcps.h lwip/lwipopts.h $(LWIP_SRC)
