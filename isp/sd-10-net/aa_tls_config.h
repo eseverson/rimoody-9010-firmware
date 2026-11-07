@@ -14,7 +14,7 @@
 
 #define MBEDTLS_AES_C
 #define MBEDTLS_AES_ROM_TABLES
-#define MBEDTLS_AES_FEWER_TABLES   /* 1 KB of tables, not 4: gcm_alt.c's 4 KB GHASH table needs the cache room */
+#define MBEDTLS_AES_FEWER_TABLES   /* 1 KB of tables, not 4 (AES-CBC; GCM uses gcm_alt.c's own AES) */
 #define MBEDTLS_CIPHER_C
 #define MBEDTLS_CIPHER_MODE_CBC
 #define MBEDTLS_GCM_C

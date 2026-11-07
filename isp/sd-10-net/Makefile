@@ -75,7 +75,7 @@ clean:
 	rm -rf obj mbedtls.a lvgl.a && rm -f net.elf NET.BIN net.dis net.map tramp.elf TRAMP.BIN tramp.dis tramp.map test/*_host
 
 test/gcm_host: test/gcm_host.c gcm_alt.c gcm_alt.h aa_tls_config.h
-	$(HOSTCC) -O2 -Wall -Wextra -I. -Imbedtls/include '-DMBEDTLS_CONFIG_FILE="aa_tls_config.h"' -o $@ test/gcm_host.c gcm_alt.c mbedtls/library/aes.c mbedtls/library/platform_util.c mbedtls/library/platform.c
+	$(HOSTCC) -O2 -Wall -Wextra -I. -Imbedtls/include '-DMBEDTLS_CONFIG_FILE="aa_tls_config.h"' -o $@ test/gcm_host.c gcm_alt.c mbedtls/library/platform_util.c mbedtls/library/platform.c
 test/lwiptcp_host: test/lwiptcp.c lwip/lwipopts.h $(LWIP_SRC)
 	$(HOSTCC) -O2 -w -Ilwip -Ilwip/arch -Ilwip/src/include -o $@ test/lwiptcp.c $(LWIP_SRC)
 test/dhcps_host: test/dhcps.c dhcps.c dhcps.h lwip/lwipopts.h $(LWIP_SRC)
