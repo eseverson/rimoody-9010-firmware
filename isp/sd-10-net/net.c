@@ -3312,6 +3312,8 @@ void plat_ui_aa_dpi(int dpi) { ui_aa_dpi = dpi; }
  * to start Bluetooth (~5 s after its power-up), and again whenever the name changes. */
 static char ui_bt_name[24];
 static volatile int ui_bt_gen;
+static u32 bt_name_at;   /* U-Boot ms when the name first went out, 0 before */
+static volatile int bt_connected; /* the chip reported a connected device (`ac 10`) or an RFCOMM channel since boot */
 void plat_ui_bt_name(const char *name)
 {
     int n = 0;
@@ -3335,7 +3337,29 @@ static void bt_name_tick(void)
         f[3 + i] = (u8)ui_bt_name[i];
     mcu_send(&mcu_st, f, 3 + n, ub_ms(0));
     sent = g;
+    if (!bt_name_at)
+        bt_name_at = ub_ms(0);
     lprintf("bt: name \"%s\" sent\n", ui_bt_name);
+}
+
+/* Reconnect: `ac 30` (no data) makes the AC6965A page the last device it was connected to. It is stock eCos's
+ * power-on reconnect (0x47b0f8 "power_on_wifi_aa_isvalid" -> 0x387b8c -> 0x388354, selector cmd 0x3b), which the
+ * chip never does by itself. Bench check 2026-11-06 with the PC as the last device: no reconnect in 110 s after the
+ * name, connected 2.6 s after `ac 30`. Sent 2 s after the name and retried with backoff until the chip reports a
+ * connection (`ac 10`) or an RFCOMM channel opens. Only on a cold boot (name sent in the first minute): after a
+ * live EXEC the phone may still be connected, and stock sends `ac 30` only while it is not. */
+static void bt_reconnect_tick(void)
+{
+    static const u16 at_s[] = { 2, 15, 45, 105, 225 };
+    static int tries;
+    if (bt_connected || !bt_name_at || bt_name_at > 60000u || tries >= (int)(sizeof at_s / sizeof at_s[0]))
+        return;
+    if ((int)(ub_ms(0) - bt_name_at - 1000u * at_s[tries]) < 0)
+        return;
+    static const u8 f[2] = { 0xac, 0x30 };
+    mcu_send(&mcu_st, f, 2, ub_ms(0));
+    tries++;
+    lprintf("bt: reconnect to the last device, try %d\n", tries);
 }
 
 /* Wireless AA over the AC6965A's RFCOMM (notes/android_auto.md; frames as stock eCos, logic-analyzer capture
@@ -3419,6 +3443,18 @@ void plat_mcu_bt(const cu8 *p, int n, cu32 now)
     static const u8 aa_uuid[4] = { 0x4d, 0xe1, 0x7a, 0x00 };
     if (n < 1)
         return;
+    if (p[0] == 0x10 && n >= 8) {   /* device connected: `ac 10 <u8> <bdaddr 6, LE> <name NUL>` */
+        char nm[33];
+        int k = 0;
+        for (int i = 8; i < n && p[i] && k < (int)sizeof nm - 1; i++)
+            nm[k++] = p[i] >= 0x20 && p[i] < 0x7f ? (char)p[i] : '?';
+        nm[k] = 0;
+        bt_connected = 1;
+        lprintf("bt: connected %02x:%02x:%02x:%02x:%02x:%02x \"%s\"\n", p[7], p[6], p[5], p[4], p[3], p[2], nm);
+        return;
+    }
+    if (p[0] == 0x18)
+        bt_connected = 1;
     if ((p[0] == 0x18 || p[0] == 0x19) && n >= 2 + 0x22) {
         const u8 *ri = p + 2;
         int h = ri[10] | ri[11] << 8, aa = same(ri + 0x12, aa_uuid, 4);
@@ -4394,6 +4430,7 @@ static void net_loop(void)
                 ui_aa_session(0);
             aa_was = aac;
             bt_name_tick();
+            bt_reconnect_tick();
             if (ui_req_mute >= 0) {   /* MCU system mute: 01 01 on, 01 00 off (notes/audio.md) */
                 u8 m[2] = { 0x01, (u8)ui_req_mute };
                 mcu_send(&mcu_st, m, 2, ub_ms(0));
