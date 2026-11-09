@@ -38,7 +38,7 @@ static int volume = 20, muted, dark = 1;
  * (dark while the headlights are on) */
 static int bright_day = 100, bright_night = 40, theme_mode = 1;
 static int lights;   /* debounced headlight input */
-static int boot_console = 1;
+static int boot_console = 1;   /* UI.TXT boot=1: power up into the text console (Home goes to the home screen) */
 /* equalizer: 10 octave bands (audio.c), -12..+12 dB each; presets are ours, not stock's */
 #define EQ_N 10
 static signed char eq_db[EQ_N];
@@ -51,7 +51,7 @@ static const signed char eq_preset[][EQ_N] = {
     { 0, 0, 0, 0, 0, 0, 1, 3, 5, 6 },           /* Treble */
 };
 static const char *const eq_preset_map[] = { "Flat", "Bass", "Loud", "Voice", "Treble", "" };
-#define EQ_PRESETS 5   /* UI.TXT boot=1: power up into the text console (Home goes to the home screen) */
+#define EQ_PRESETS 5
 static char settings_text[256];
 static void settings_save(void);
 
@@ -453,6 +453,15 @@ static void wifi_mode_cb(lv_event_t *e)
     }
     wifi_mode = (int)i;
     plat_ui_wifi_mode(wifi_mode);
+    settings_save();
+}
+
+static void boot_cb(lv_event_t *e)
+{
+    uint32_t i = lv_buttonmatrix_get_selected_button(lv_event_get_target(e));
+    if (i > 1)
+        return;
+    boot_console = (int)i;
     settings_save();
 }
 
@@ -910,6 +919,16 @@ static void build_settings(void)
     lv_obj_t *b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Reboot");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)0);
+    r = row(p, "Start up in");
+    static const char *const boot_map[] = { "Home screen", "Log console", "" };
+    lv_obj_t *bt = lv_buttonmatrix_create(r);
+    lv_buttonmatrix_set_map(bt, boot_map);
+    lv_buttonmatrix_set_button_ctrl_all(bt, LV_BUTTONMATRIX_CTRL_CHECKABLE);
+    lv_buttonmatrix_set_one_checked(bt, true);
+    lv_buttonmatrix_set_button_ctrl(bt, (uint32_t)boot_console, LV_BUTTONMATRIX_CTRL_CHECKED);
+    lv_obj_set_size(bt, 360, 64);
+    lv_obj_set_style_pad_all(bt, 4, 0);
+    lv_obj_add_event_cb(bt, boot_cb, LV_EVENT_VALUE_CHANGED, 0);
     r = row(p, "Log console");
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Open");
