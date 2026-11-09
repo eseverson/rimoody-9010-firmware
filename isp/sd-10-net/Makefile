@@ -21,8 +21,8 @@ LVGL_SRC := $(shell find lvgl/src -name '*.c')
 LVGL_OBJ := $(patsubst lvgl/%.c,obj/lvgl/%.o,$(LVGL_SRC))
 LVGL_CFLAGS := -DLV_CONF_INCLUDE_SIMPLE -Ilvgl
 LWIP_SRC := $(wildcard lwip/src/core/*.c lwip/src/core/ipv4/*.c) lwip/src/netif/ethernet.c
-SRCS    := head.S memmap_check.c net.c crypto.c wpa.c ip.c mcu.c irq.c irq.S clk.c ehci.c usbh.c sd.c diskio.c fatfs/ff.c wpa_ap.c ap80211.c lwnet.c vdec.c h264p.c aa.c aa_tls.c aa_tcp.c aa_wl.c vpp.c osdvid.c audio.c ui.c ui_logo.c $(LWIP_SRC) gt9.c console.c libc.c fw.S tramp_bin.S $(RTOS)
-HDRS    := memmap.h aa_wl.h FreeRTOSConfig.h freertos/port/portmacro.h freertos/port/port_nds32.h crypto.h wpa.h ip.h mcu.h irq.h clk.h ehci.h usbh.h wpa_ap.h ap80211.h lwnet.h vdec.h h264p.h aa.h aa_tls.h aa_tcp.h aa_tls_config.h vpp.h osdvid.h ui.h lv_conf.h lwip/lwipopts.h sd.h fatfs/ff.h fatfs/ffconf.h fatfs/diskio.h usbdev.h gt9.h console.h font8x16.h ub_sig.h rtl8188f_tables.h rtl8xxxu_regs.h
+SRCS    := head.S memmap_check.c net.c crypto.c wpa.c ip.c mcu.c irq.c irq.S clk.c ehci.c usbh.c sd.c diskio.c fatfs/ff.c wpa_ap.c ap80211.c lwnet.c vdec.c h264p.c aa.c aa_tls.c aa_tcp.c aa_wl.c vpp.c osdvid.c audio.c nor.c ui.c ui_logo.c $(LWIP_SRC) gt9.c console.c libc.c fw.S tramp_bin.S $(RTOS)
+HDRS    := memmap.h aa_wl.h FreeRTOSConfig.h freertos/port/portmacro.h freertos/port/port_nds32.h crypto.h wpa.h ip.h mcu.h irq.h clk.h ehci.h usbh.h wpa_ap.h ap80211.h lwnet.h vdec.h h264p.h aa.h aa_tls.h aa_tcp.h aa_tls_config.h vpp.h osdvid.h nor.h ui.h lv_conf.h lwip/lwipopts.h sd.h fatfs/ff.h fatfs/ffconf.h fatfs/diskio.h usbdev.h gt9.h console.h font8x16.h ub_sig.h rtl8188f_tables.h rtl8xxxu_regs.h
 
 .PHONY: all test clean
 all: NET.BIN net.dis TRAMP.BIN tramp.dis
@@ -63,10 +63,10 @@ NET.BIN: net.elf
 
 # host tests (plain gcc + python3 with the `cryptography` package)
 HOSTCC ?= gcc
-test: test/crypto_host test/wpa_host test/ip_host test/mcu_host test/con_host test/h264p_host test/lwiptcp_host test/aawl_host test/wpaap_host test/dhcps_host test/ap80211_host test/osdvid_host test/gcm_host
+test: test/crypto_host test/wpa_host test/ip_host test/mcu_host test/con_host test/h264p_host test/lwiptcp_host test/aawl_host test/wpaap_host test/dhcps_host test/ap80211_host test/osdvid_host test/gcm_host test/nor_host
 	cd test && python3 -I test_crypto.py ./crypto_host && python3 -I test_wpa.py ./wpa_host && \
 	  python3 -I test_ip.py ./ip_host && python3 -I test_mcu.py ./mcu_host && \
-	  python3 -I test_console.py ./con_host && python3 -I test_h264p.py ./h264p_host && ./lwiptcp_host && ./aawl_host && ./wpaap_host && ./dhcps_host && python3 -I test_ap80211.py ./ap80211_host && python3 -I test_osdvid.py ./osdvid_host && python3 -I test_gcm.py ./gcm_host && ./test_tls.sh && ./test_aatcp.sh
+	  python3 -I test_console.py ./con_host && python3 -I test_h264p.py ./h264p_host && ./lwiptcp_host && ./aawl_host && ./wpaap_host && ./dhcps_host && python3 -I test_ap80211.py ./ap80211_host && python3 -I test_osdvid.py ./osdvid_host && python3 -I test_gcm.py ./gcm_host && ./nor_host && ./test_tls.sh && ./test_aatcp.sh
 
 test/%_host: test/%_host.c h264p.c h264p.h aa_wl.c aa_wl.h wpa_ap.c wpa_ap.h ap80211.c ap80211.h crypto.c crypto.h wpa.c wpa.h ip.c ip.h mcu.c mcu.h console.c console.h font8x16.h osdvid.c osdvid.h vdec.h
 	$(HOSTCC) -O2 -Wall -Wextra -o $@ $<
@@ -76,6 +76,8 @@ clean:
 
 test/gcm_host: test/gcm_host.c gcm_alt.c gcm_alt.h aa_tls_config.h
 	$(HOSTCC) -O2 -Wall -Wextra -I. -Imbedtls/include '-DMBEDTLS_CONFIG_FILE="aa_tls_config.h"' -o $@ test/gcm_host.c gcm_alt.c mbedtls/library/platform_util.c mbedtls/library/platform.c
+test/nor_host: test/nor_host.c nor.c nor.h
+	$(HOSTCC) -O2 -Wall -Wextra -o $@ test/nor_host.c
 test/lwiptcp_host: test/lwiptcp.c lwip/lwipopts.h $(LWIP_SRC)
 	$(HOSTCC) -O2 -w -Ilwip -Ilwip/arch -Ilwip/src/include -o $@ test/lwiptcp.c $(LWIP_SRC)
 test/dhcps_host: test/dhcps.c dhcps.c dhcps.h lwip/lwipopts.h $(LWIP_SRC)

@@ -24,6 +24,8 @@ UDP 5151. Requests carry the shared token from WIFI.TXT on the card (`--token` o
   hu.py settime                      set the payload's wall clock (and the MCU's RTC) to this host's local time
   hu.py persist NET.BIN              make it the card's /BOOT.BIN (what power-on runs), read back and CRC-checked
   hu.py fs status|ls|crc NAME|raw LBA  our own SD/FAT driver (sd.c + FatFs); rawtest/write/rm/load also exist
+  hu.py nor status|compare|read|verify  SPI NOR through the flash controller (nor.c), read-only;
+  hu.py nor erase|erase64|program ... --write  writes, free region only (notes/nor_flash.md)
 
 The target IP comes from --ip, $HU_IP, or the first hello heard. Stdlib only.
 """
@@ -32,7 +34,8 @@ import argparse, os, re, socket, struct, sys, time, zlib
 PORT_CMD, PORT_HELLO = 5151, 5152
 OP_PING, OP_CMD, OP_WRITE, OP_READ, OP_SYNC, OP_LOG = 1, 2, 3, 4, 5, 6
 OP_MCU_TX, OP_MCU_STATE, OP_SETTIME, OP_EXEC, OP_IRQ, OP_FB, OP_SAY, OP_TOUCH, OP_RTOS, OP_USB, OP_FS, OP_AP, OP_VDEC = 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
-OP_AA, OP_VPP, OP_OSDVID, OP_UI, OP_AUDIO, OP_WIFI = 22, 24, 25, 26, 27, 28
+OP_AA, OP_VPP, OP_OSDVID, OP_UI, OP_AUDIO, OP_WIFI, OP_NOR = 22, 24, 25, 26, 27, 28, 29
+NOR_MAGIC = 0x57524f4e   # "NORW": the payload refuses NOR write sub-ops without it
 TRAMP_ADDR = 0x02f00000
 
 # Builds without OP_EXEC that `exec` can still replace: CRC32 of their first 4 KB at 0x1800000 -> addresses of their
@@ -294,6 +297,10 @@ def main():
     p.add_argument('--out', help='mic rec: also fetch the capture (16 kHz mono s16le) into FILE; .wav gets a WAV header')
     p.add_argument('--peak', type=int, default=256, help='tone: peak level of 32767 (256 = -42 dBFS)')
     p.add_argument('--ms', type=int, default=2000, help='tone: stops by itself after this many ms (max 10000)')
+    p = sub.add_parser('nor', help='SPI NOR flash through the controller (nor.c): status | compare OFF LEN | read OFF LEN -o FILE | verify OFF FILE | erase OFF | erase64 OFF | program OFF FILE; erase/erase64/program need --write and only touch 0xC50000..0xC5FFFF, 0xC70000..0xDFFFFF, 0xE10000..0xFBFFFF')
+    p.add_argument('what', choices=['status', 'compare', 'read', 'verify', 'erase', 'erase64', 'program']); p.add_argument('args', nargs='*')
+    p.add_argument('-o', '--out', help='read: save the bytes to FILE'); p.add_argument('--cmd', default='03', choices=['03', '0b'], help='controller read command (0b = fast read, 8 dummy cycles)')
+    p.add_argument('--write', action='store_true', help='required for erase, erase64 and program')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -473,6 +480,8 @@ def main():
             print('saved', a.args[0])
     elif a.op == 'audio' and a.what == 'mic':
         return do_mic(u, a)
+    elif a.op == 'nor':
+        return do_nor(u, a)
     elif a.op == 'audio':
         c = {'status': 0, 'init': 1, 'tone': 2, 'volume': 3, 'mute': 4, 'eq': 5}[a.what]
         value, db = int(a.value), float(a.db)
@@ -506,6 +515,58 @@ def main():
     elif a.op == 'persist':
         return do_persist(u, a.file, a.name)
     return 0
+
+
+def do_nor(u, a):
+    """HU1 op 29 (nor.c). Read-only: status, compare (controller read against the XIP window), read (controller read
+    into the upload area, fetched and CRC-checked), verify (a local file against flash, both paths). Writes (erase one
+    4 KB sector, erase64 one 64 KB block, program a file of up to 64 KB onto blank flash) need --write; the payload
+    also refuses anything outside the free region and any part other than the XM25QH128C."""
+    need = {'status': 0, 'compare': 2, 'read': 2, 'verify': 2, 'erase': 1, 'erase64': 1, 'program': 2}[a.what]
+    if len(a.args) != need:
+        sys.exit('usage: nor status | compare OFF LEN | read OFF LEN -o FILE | verify OFF FILE | erase OFF | erase64 OFF'
+                 ' | program OFF FILE')
+    files = a.args[1:] if a.what in ('verify', 'program') else []
+    args = [int(x, 0) for x in a.args if x not in files]
+    cmd = int(a.cmd, 16)
+    if a.what in ('erase', 'erase64', 'program') and not a.write:
+        sys.exit('nor %s writes the flash: add --write' % a.what)
+
+    def show(r):
+        print(r.replace('; ', '\n  '))
+        return 1 if r.startswith('ERR') or 'MISMATCH' in r else 0
+
+    if a.what == 'status':
+        return show(u.call(OP_NOR, bytes([0])).decode(errors='replace'))
+    if a.what == 'compare':
+        return show(u.call(OP_NOR, struct.pack('<BIIB', 1, args[0], args[1], cmd)).decode(errors='replace'))
+    if a.what == 'read':
+        r = u.call(OP_NOR, struct.pack('<BIIIB', 2, args[0], args[1], LOAD_ADDR, cmd)).decode(errors='replace')
+        print(r)
+        m = re.search(r'crc ([0-9a-f]{8})', r)
+        if r.startswith('ERR') or not m or ': ok,' not in r:
+            return 1
+        data = u.read(LOAD_ADDR, args[1])
+        ok = zlib.crc32(data) & 0xffffffff == int(m.group(1), 16)
+        print('fetched %d bytes: %s' % (len(data), 'crc ok' if ok else 'CRC MISMATCH'))
+        if a.out:
+            open(a.out, 'wb').write(data)
+            print('-> %s' % a.out)
+        return 0 if ok else 1
+    data = open(files[0], 'rb').read() if files else b''
+    if data:
+        u.write(LOAD_ADDR, data)   # CRC-checked per chunk
+    if a.what == 'verify':
+        return show(u.call(OP_NOR, struct.pack('<BIII', 3, args[0], LOAD_ADDR, len(data))).decode(errors='replace'))
+    u.sock.settimeout(max(a.timeout, 8.0))   # a 64 KB erase may take up to 2 s; a retransmit only gets the cached reply
+    if a.what in ('erase', 'erase64'):
+        sub = 4 if a.what == 'erase' else 5
+        r = u.call(OP_NOR, struct.pack('<BII', sub, NOR_MAGIC, args[0])).decode(errors='replace')
+        show(r)
+        return 0 if '(BLANK)' in r else 1
+    r = u.call(OP_NOR, struct.pack('<BIIII', 6, NOR_MAGIC, args[0], LOAD_ADDR, len(data))).decode(errors='replace')
+    show(r)
+    return 0 if 'controller MATCH, xip MATCH' in r else 1
 
 
 def do_fs_put(u, path, name):

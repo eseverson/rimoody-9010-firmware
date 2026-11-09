@@ -109,6 +109,7 @@ typedef int (*bulk_fn)(void *dev, u32 pipe, void *data, int len, int *actual, in
 #include "sd.h"
 #include "fatfs/ff.h"
 #include "audio.h"
+#include "nor.h"
 
 /* ---- time budget, in ub_ms(0) (which starts ~3 s after U-Boot itself; the unit resets ~150 s after U-Boot) ---- */
 #define EHCI_BULK_MS   5000    /* ehci_submit_async gives up on a bulk TD after 5000 ms, others after 1000 (0xf7e562) */
@@ -4022,6 +4023,8 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         ap_start_ch = ch, ap_start_pending = 1, deferred_at = ub_ms(0) + 300;
         return vfmt_n(t, "ap: starting on channel %d as '%s' after this reply; this network connection ends", ch, ap_req_ssid);
     }
+    case 29:   /* NOR (nor.c): 0 status, 1 compare, 2 read, 3 verify (read-only); 4 erase, 5 erase64, 6 program (magic) */
+        return nor_op(p, n, t, vfmt_n);
     case 28: {   /* WIFI: status; [u8 1] = avoid the current BSS for 10 min and rescan, after this reply (issue #8 test) */
         char m[20];
         fmt_mac(m, bss.addr);
