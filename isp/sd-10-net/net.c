@@ -3287,6 +3287,35 @@ static void aa_audio_check(const unsigned char *p, int n)
     last_l = (short)(p[n - 4] | p[n - 3] << 8), have_last = 1, last_loud = peak > 1000;
 }
 
+static int mic_rec_state, mic_rec_result;   /* state 0 idle, 1 recording, 2 saved (result: fs_save) */
+
+/* AA microphone: the phone opens it for the assistant; the net loop sends 64 ms messages (1024 samples) from the DSP's
+ * uplink while it is open, and drops audio rather than queue it when the phone's ack window is full. */
+static int aa_mic_open, aa_mic_fill;
+static short aa_mic_buf[1024];
+static void aa_mic_cb(int open)
+{
+    aa_mic_open = open, aa_mic_fill = 0;
+    if (open) {
+        int r = aud_mic_on() ? 0 : aud_mic_start();
+        lprintf("aa: mic open, capture start %d\n", r);
+    } else {
+        if (mic_rec_state != 1)
+            aud_mic_stop();
+        lprintf("aa: mic closed\n");
+    }
+}
+static void aa_mic_poll(void)
+{
+    if (!aa_mic_open || !aud_mic_on() || mic_rec_state == 1)
+        return;
+    aa_mic_fill += aud_mic_read(aa_mic_buf + aa_mic_fill, (int)(sizeof aa_mic_buf / 2) - aa_mic_fill);
+    if (aa_mic_fill * 2 < (int)sizeof aa_mic_buf)
+        return;
+    aa_send_mic((const unsigned char *)aa_mic_buf, (int)sizeof aa_mic_buf);
+    aa_mic_fill = 0;
+}
+
 static void aa_audio_cb(int stream, const unsigned char *p, int n)
 {
     static short buf[2048];
@@ -3700,7 +3729,7 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         pf.video = aa_video_cb, pf.log = aa_log_cb, pf.now_us = clk_us;
         pf.cert = aa_cert, pf.cert_len = cl + 1, pf.key = aa_key, pf.key_len = kl + 1, pf.dpi = ui_aa_dpi;
         pf.audio_mask = 0x87, pf.ver_minor = 7, pf.hd = 1;   /* what a Pixel on AA 17.9 accepted */
-        pf.audio = aa_audio_cb;
+        pf.audio = aa_audio_cb, pf.mic = aa_mic_cb;
         if (c == 2 && n >= 9)   /* connect extras: protocol minor version, audio mask, [hd] */
             pf.ver_minor = p[7], pf.audio_mask = p[8];
         if (c == 2 && n >= 10)
@@ -3769,11 +3798,11 @@ static int aa_op(int c, const u8 *p, int n, char *t)
     int slot = vdec_last_slot(&luma, &chroma);
     return vfmt_n(t, "aa: %s, listening %d, connected %d; version %u.%u, rx frames %u msgs %u, tx frames %u (drops %u), "
                      "channels %u, video %u frames %u B, audio %u, unknown %u, errors %u; vdec decodes %u errors %u reinits %u (done before the start bit %u) last %u us, "
-                     "slot %d luma %x chroma %x; time in decrypt %u ms, video %u ms; touches sent %u dropped %u; tx backlog max %u B%s%s",
+                     "slot %d luma %x chroma %x; time in decrypt %u ms, video %u ms; touches sent %u dropped %u; mic opens %u frames %u acks %u drops %u%s; tx backlog max %u B%s%s",
                   names[a->state], aa_listening, aa_tcp_connected(), a->version_major, a->version_minor, a->rx_frames,
                   a->rx_msgs, a->tx_frames, aa_tcp_tx_drops(), a->channels_open, a->video_frames, a->video_bytes,
                   a->audio_frames, a->unknown, a->errors, vdec_stats.decodes, vdec_stats.errors, vdec_stats.reinits, vdec_stats.ack_missed, vdec_stats.last_us, slot,
-                  luma, chroma, (u32)(a->decrypt_us / 1000), (u32)(a->video_us / 1000), aa_touch_sent, aa_touch_dropped, aa_tcp_pending_max(),
+                  luma, chroma, (u32)(a->decrypt_us / 1000), (u32)(a->video_us / 1000), aa_touch_sent, aa_touch_dropped, a->mic_opens, a->mic_frames, a->mic_acks, a->mic_drops, aa_mic_open ? " (open)" : "", aa_tcp_pending_max(),
                   aa_vmsg[0] ? "; last video error: " : "", aa_vmsg);
 }
 
@@ -3870,7 +3899,6 @@ static int fs_op(const cu8 *p, int n, char *o)
 #define MIC_REC_BPS 32000u
 #define MIC_REC_MAX_S 60u
 static u32 mic_rec_len, mic_rec_pos, mic_rec_t0, mic_rec_save_ms, mic_rec_own;
-static int mic_rec_state, mic_rec_result;   /* state 0 idle, 1 recording, 2 saved (result: fs_save) */
 
 static void mic_rec_poll(void)
 {
@@ -4634,6 +4662,7 @@ static void net_loop(void)
         if (aa_listening || aa_tcp_connected()) {
             aa_touch_poll();
             aa_tcp_poll();
+            aa_mic_poll();
         }
         if (vdec_busy())   /* the AA picture the hardware is decoding: finish and show it once done */
             vdec_poll();
