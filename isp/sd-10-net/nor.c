@@ -109,7 +109,22 @@ const char *nor_strerror(int e)
  * 0x0B fast read matches the XIP window */
 #define NOR_RD      0x0bu
 
+/* Waits on CTRL busy and the PIO / DMA go bits. U-Boot polls them with no limit at all (udelay(40) loops in 0xF08A52,
+ * 0xF08DBC, 0xF08CB6). On the unit a 0x05 status read issued while a status-register write is still running did not
+ * finish within 10 ms: the controller holds the command until the flash is ready (the result lands in STAT, 0x10, not
+ * DATA). So the bound has to cover the longest flash operation (64 KB erase, 2 s worst case), not a register access. */
+#define HW_TMO 5000000u
+
 static int fault;   /* sticky: a step timed out and the flash may still be busy */
+static const char *stage = "-";   /* which driver step is running, for the timeout record */
+static const char *tmo_stage = "-";
+static u32 tmo_cmd, tmo_where, tmo_ctrl, tmo_auto, tmo_us;   /* the last timeout: command, which wait, registers */
+static u32 go_max_us, go_max_cmd;   /* the slowest PIO seen (go to done), to see the controller hold a 0x05 */
+static int tmo(u32 cmd, u32 where, u32 aux, u32 us)   /* record a timeout; returns NOR_ETIME */
+{
+    tmo_stage = stage, tmo_cmd = cmd, tmo_where = where, tmo_ctrl = R(CTRL), tmo_auto = aux, tmo_us = us;
+    return NOR_ETIME;
+}
 static int suspended;
 static u32 s_auto, s_cfg0, s_cfg1;
 static u8 dbuf[DMA_MAX] __attribute__((aligned(32)));   /* DMA bounce buffer (reads and page programs) */
@@ -134,20 +149,24 @@ static int wait_bit(u32 reg, u32 bit, int set, u32 us)
     return 0;
 }
 
+static u32 since(unsigned long long t0) { return (u32)(clk_us() - t0); }
+
 /* a window: no other task runs (none can reach the XIP window), interrupts stay on, controller config saved */
 static void begin(void)
 {
     suspended = xTaskGetSchedulerState() == taskSCHEDULER_RUNNING;
     if (suspended)
         vTaskSuspendAll();
-    wait_bit(CTRL, CTRL_BUSY, 0, 10000);
+    if (wait_bit(CTRL, CTRL_BUSY, 0, HW_TMO))
+        tmo(0, 4, R(AUTO), HW_TMO), fault = 1;
     s_auto = R(AUTO) & ~(AUTO_PIO_GO | AUTO_DMA_GO), s_cfg0 = R(CFG0), s_cfg1 = R(CFG1);
     R(CFG1) = CFG1_SINGLE;
 }
 
 static void end(void)
 {
-    wait_bit(CTRL, CTRL_BUSY, 0, 10000);
+    if (wait_bit(CTRL, CTRL_BUSY, 0, HW_TMO))   /* never rewrite AUTO / CFG under a running command if avoidable */
+        tmo(0, 5, R(AUTO), HW_TMO), fault = 1;
     R(CTRL) &= ~CTRL_DMA_WR;
     R(CFG1) = s_cfg1, R(CFG0) = s_cfg0, R(AUTO) = s_auto;
     if (suspended)
@@ -158,16 +177,21 @@ static void end(void)
 /* one PIO command (U-Boot 0xF08A52 / 0xF08DBC / 0xF08CB6): flags = data bytes << 4 | CTRL_WR | address bytes */
 static int pio(u32 cmd, u32 flags, u32 addr, u32 data, u32 *rx)
 {
-    if (wait_bit(CTRL, CTRL_BUSY, 0, 10000))
-        return NOR_ETIME;
+    if (wait_bit(CTRL, CTRL_BUSY, 0, HW_TMO))
+        return fault = 1, tmo(cmd, 1, R(AUTO), HW_TMO);
     if (flags & 3)
         R(ADDR) = addr;
     if (flags & 0x70)
         R(DATA) = data;
     R(CTRL) = (R(CTRL) & 0xffff0000u) | cmd << 8 | flags;
+    unsigned long long t0 = clk_us();
     R(AUTO) |= AUTO_PIO_GO;
-    if (wait_bit(AUTO, AUTO_PIO_GO, 0, 10000))
-        return NOR_ETIME;
+    int r = wait_bit(AUTO, AUTO_PIO_GO, 0, HW_TMO);
+    u32 us = since(t0);
+    if (us > go_max_us)
+        go_max_us = us, go_max_cmd = cmd;
+    if (r)
+        return fault = 1, tmo(cmd, 2, R(AUTO), us);
     if (rx)
         *rx = cmd == 0x05 ? R(STAT) & 0xff : R(DATA);
     return 0;
@@ -186,7 +210,7 @@ static int wait_wip(u32 us)   /* poll 0x05 until WIP clears, as U-Boot does afte
         if (!(s & 1))
             return 0;
         if (clk_us() > end)
-            return fault = 1, NOR_ETIME;
+            return fault = 1, tmo(0x05, 3, s, us);
         clk_udelay(20);
     }
 }
@@ -203,7 +227,7 @@ static int wr_sr(u32 cmd, u32 v)   /* WREN, 0x01 / 0x31 with one byte, wait (U-B
 static int dma_read(u32 off, u32 n, u32 cmd)
 {
     dc((u32)dbuf, n, 1, 1);
-    if (wait_bit(CTRL, CTRL_BUSY, 0, 10000))
+    if (wait_bit(CTRL, CTRL_BUSY, 0, HW_TMO))
         return NOR_ETIME;
     R(CFG1) = cmd == 0x0b ? CFG1_SINGLE | 8u << 24 : CFG1_SINGLE;   /* 0x0B: 8 dummy cycles (field: inference) */
     R(ADDR) = off;
@@ -214,9 +238,11 @@ static int dma_read(u32 off, u32 n, u32 cmd)
     R(AUTO) = (R(AUTO) & 0x00ffffffu & ~(AUTO_PIO_GO | AUTO_DMA_GO)) | AUTO_USR_RD | cmd << 24;
     R(AUTO) |= AUTO_DMA_GO;
     int r = wait_bit(ISTS, ISTS_DMA, 1, 100000);
+    if (r)
+        tmo(cmd, 6, R(AUTO), 100000);
     R(ISTS) |= ISTS_DMA;
     if (!r)
-        r = wait_bit(CTRL, CTRL_BUSY, 0, 10000);
+        r = wait_bit(CTRL, CTRL_BUSY, 0, HW_TMO);
     dc((u32)dbuf, n, 0, 1);
     return r;
 }
@@ -228,10 +254,10 @@ static int dma_program(u32 off, u32 n)
     if (!nor_range_ok(off, n) || nor_page_chunk(off, n) != n)
         return NOR_EARG;
     int r = wren();
-    if (r || (r = wait_bit(CTRL, CTRL_BUSY, 0, 10000)))
+    if (r || (r = wait_bit(CTRL, CTRL_BUSY, 0, HW_TMO)))
         return r;
     R(CTRL) |= CTRL_DMA_WR;
-    if ((r = wait_bit(CTRL, CTRL_BUSY, 0, 10000)))
+    if ((r = wait_bit(CTRL, CTRL_BUSY, 0, HW_TMO)))
         return r;
     R(ADDR) = off;
     R(CTRL) = (R(CTRL) & 0xffff0000u) | CTRL_WR | CTRL_A3;
@@ -240,8 +266,10 @@ static int dma_program(u32 off, u32 n)
     R(AUTO) |= 0x201u;
     R(AUTO) |= AUTO_DMA_GO;
     r = wait_bit(ISTS, ISTS_DMA, 1, 100000);
+    if (r)
+        tmo(0x02, 7, R(AUTO), 100000);
     R(ISTS) |= ISTS_DMA;
-    if (wait_bit(CTRL, CTRL_BUSY, 0, 10000) && !r)
+    if (wait_bit(CTRL, CTRL_BUSY, 0, HW_TMO) && !r)
         r = NOR_ETIME;
     R(CTRL) &= ~CTRL_DMA_WR;
     if (r)
@@ -259,6 +287,7 @@ static int net_task_only(void)
 
 int nor_jedec(unsigned *id)
 {
+    stage = "jedec";
     u32 v = 0;
     begin();
     int r = pio(0x9f, 3 << 4, 0, 0, &v);
@@ -280,6 +309,7 @@ static int sr_read(u32 sr[3])
 
 int nor_status(unsigned sr[3])
 {
+    stage = "status";
     begin();
     int r = sr_read(sr);
     end();
@@ -288,6 +318,7 @@ int nor_status(unsigned sr[3])
 
 int nor_read(unsigned off, void *dst, unsigned len, unsigned cmd)
 {
+    stage = "read";
     if (off >= NOR_SIZE || len > NOR_SIZE - off || (cmd != 0x03 && cmd != 0x0b))
         return NOR_EARG;
     u8 *d = dst;
@@ -311,6 +342,7 @@ static u32 wp_sr1, wp_sr2, wp_changed;
 
 static int wp_clear(void)
 {
+    stage = "wp_clear";
     u32 sr[3];
     begin();
     int r = sr_read(sr);
@@ -329,6 +361,7 @@ static int wp_clear(void)
 
 static int wp_restore(void)
 {
+    stage = "wp_restore";
     if (!wp_changed)
         return 0;
     u32 sr[3];
@@ -387,6 +420,7 @@ int nor_erase(unsigned off, unsigned len)
     while (len && !r) {
         int blk = !(off & (NOR_BLOCK - 1)) && len >= NOR_BLOCK;
         u32 n = blk ? NOR_BLOCK : NOR_SECTOR;
+        stage = blk ? "erase64" : "erase";
         if (!nor_range_ok(off, n)) {   /* cannot happen: the whole span was checked; fail closed anyway */
             r = NOR_EARG;
             break;
@@ -420,6 +454,7 @@ int nor_program(unsigned off, const void *src, unsigned len)
     const u8 *s = src;
     while (len && !r) {
         u32 n = nor_page_chunk(off, len);
+        stage = "program";
         for (u32 i = 0; i < n; i++)
             dbuf[i] = s[i];
         dc((u32)dbuf, n, 1, 0);
@@ -433,7 +468,9 @@ int nor_program(unsigned off, const void *src, unsigned len)
 }
 
 /* ---- HU1 op 29 ----
- * 0 status: JEDEC ID, SR1..3, protected range, controller registers, the write ranges
+ * 0 status: JEDEC ID, SR1..3, protected range, controller registers, the write ranges, the last timeout (wait: 1 busy
+ *   before a PIO, 2 PIO go, 3 WIP poll, 4 busy at window start, 5 busy at window end, 6 DMA read, 7 DMA program)
+ *   and the slowest PIO seen
  * 1 compare  u32 off, u32 len [, u8 cmd]: controller read against the XIP window (len <= 1 MB)
  * 2 read     u32 off, u32 len, u32 dst [, u8 cmd]: controller read into the upload area (MM_UPLOAD)
  * 3 verify   u32 off, u32 src, u32 len: controller read and XIP window against RAM (len <= 1 MB)
@@ -517,7 +554,9 @@ int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt)
         o += fmt(o, "; writable");
         for (u32 i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
             o += fmt(o, " %06x..%06x", allowed[i].lo, allowed[i].hi - 1);
-        return o - out + fmt(o, "; fault %d", fault);
+        o += fmt(o, "; fault %d (last timeout: %s cmd %02x wait %u after %u us, ctrl %08x auto/sr %08x)", fault, tmo_stage,
+                 tmo_cmd, tmo_where, tmo_us, tmo_ctrl, tmo_auto);
+        return o - out + fmt(o, "; slowest pio: cmd %02x %u us", go_max_cmd, go_max_us);
     }
     if (c == 1 || c == 2) {   /* compare / read: off, len [, dst], cmd */
         u32 cmd = c == 1 ? (n >= 10 ? p[9] : NOR_RD) : (n >= 14 ? p[13] : NOR_RD);

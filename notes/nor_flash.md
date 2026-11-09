@@ -44,6 +44,8 @@ FlashInit also pulses bit 8 of 0x9C000054 (module reset), clears CTRL[23:20], se
 
 All PIO commands follow 0xF08A52 / 0xF08DBC / 0xF08CB6 (proven): wait for CTRL[31] = 0; write ADDR if the command has an address; write DATA (0 for a read, the value for a write); write CTRL; set AUTO_CFG[21]; wait for it to clear; read STATUS (command 5) or DATA.
 
+U-Boot waits for CTRL[31] and AUTO_CFG[21] with no limit (udelay(40) loops). The first on-unit write test (2026-11-09) showed why: a 0x05 status read issued while a status-register write was still running did not finish within the driver's original 10 ms bound. The controller holds the 0x05 command until the flash is ready, so its result lands in STATUS, not DATA. The first try failed during the protection clear, before any erase was sent, and the restore that followed set SR1 back to 04. The driver now gives every busy and go wait a 5 s bound, which covers a 64 KB erase. `nor status` records which step timed out (wait code, elapsed time, registers) and the slowest PIO seen. That slowest PIO should show the 0x05 after a status write taking several ms.
+
 | Operation | Driver | Source and confidence |
 |---|---|---|
 | JEDEC ID | 0x9F, 3 data bytes, read | 0xF09474, proven |
