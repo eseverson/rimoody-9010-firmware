@@ -465,10 +465,240 @@ static int stream1_start(void)
     return 0;
 }
 
+/* ---- microphone: the hands-free uplink (notes/aa_mic.md section 2) ----
+ * Stock AA, CarPlay and CarLife record through AUDIF_Record "uplink" (uplink_init 0x3a9a5e, uplink_start 0x3a99fa,
+ * uplink_stop 0x3a9996, uplink_read 0x3a9634): the HF_ENC module (state nibble 6, resident code, no download) writes
+ * 16 kHz mono s16 into ring 6 and advances W 0x9C0018C0; the CPU copies whole 256-byte frames (8 ms) and acknowledges
+ * by writing its read offset to 0x9C0018C4, the mirror image of the playback rings. eCos copies the bytes unswapped.
+ *
+ * Nothing here touches the analog mux, the media route, the master volume or the EQ: HF_ENC is a separate module.
+ * eCos's route function (0x3ae338, AUDIF_Set 0x24) stops HF_DEC and HF_ENC when both are playing and the new source
+ * is not the hands-free one; stream1_start only reproduces its parameter writes and HF_DEC never plays here, so our
+ * routing cannot stop capture. aud_init resets the DSP and starts capture again if it was open. */
+/* ring 6 size, 0x3bc8a4(6): (KB count) << 10 while RISC 0 bit 5 is set (it is, params_init); 0x3bc63e hands the DSP the
+ * same KB count as RISC 0x16 and 0x1c, which params_init sets to 100 */
+#define MIC_RING_SZ 0x19000u
+#define MIC_FRAME 256u         /* uplink_init: 2 bytes x 1 ch x 16000 / 125 */
+#define MIC_WIN 4000u          /* level meter window: 250 ms */
+static u32 mic_ring, mic_r, mic_w_last, mic_on, mic_errs, mic_read_bytes, mic_dsp_bytes, mic_reads, mic_drained, mic_ms;
+static int mic_start_r = 1;
+static unsigned long long mic_t0, mic_last_read, mic_win_sq;
+static u32 mic_win_n, mic_win_peak, mic_rms, mic_peak, mic_peak_max;
+
+static u32 isqrt(u32 v)
+{
+    u32 r = 0, b = 1u << 30;
+    while (b > v)
+        b >>= 2;
+    for (; b; b >>= 2) {
+        if (v >= r + b)
+            v -= r + b, r = (r >> 1) + b;
+        else
+            r >>= 1;
+    }
+    return r;
+}
+
+static int dbfs(u32 x)   /* 20 log10(x / 32767), to about 1 dB */
+{
+    u32 v = 32767u << 10, t = x << 10;
+    int d = 0;
+    if (!x)
+        return -99;
+    while (v > t && d < 99)
+        v = v / 64 * 57, d++;   /* 57/64 = -1.0 dB */
+    return -d;
+}
+
+static void mic_meter(const short *s, u32 n)
+{
+    for (u32 i = 0; i < n; i++) {
+        u32 a = (u32)(s[i] < 0 ? -s[i] : s[i]);
+        mic_win_sq += a * a;
+        if (a > mic_win_peak)
+            mic_win_peak = a;
+        if (++mic_win_n == MIC_WIN) {
+            mic_rms = isqrt((u32)(mic_win_sq / MIC_WIN));
+            mic_peak = mic_win_peak;
+            if (mic_peak > mic_peak_max)
+                mic_peak_max = mic_peak;
+            mic_win_n = mic_win_peak = 0, mic_win_sq = 0;
+        }
+    }
+}
+
+static u32 mic_track_w(void)   /* the DSP's write offset, counting what it wrote since the last look; ~0 if out of range */
+{
+    u32 w = REG(0x18c0);
+    if (w >= MIC_RING_SZ || (w & 1)) {
+        mic_errs++;
+        return ~0u;
+    }
+    mic_dsp_bytes += (w + MIC_RING_SZ - mic_w_last) % MIC_RING_SZ;
+    mic_w_last = w;
+    return w;
+}
+
+static void mic_ptrs_clear(void)   /* AUDIF_Set_DumpPtr / AUDIF_Set_BarrierPtr (0x3bb50c / 0x3bb598) to 0 */
+{
+    REG(0x18c0) = 0, REG(0x18c4) = 0;
+    mic_r = mic_w_last = 0;
+}
+
+static int mic_start_seq(void)
+{
+    if (!data || state(0) != 3)
+        return -1;   /* DSP not running */
+    if (state(6) == 0)
+        return -2;   /* HF_ENC not present: DSP_SetCodecStop / DSP_CheckCodec refuse state 0 */
+    /* uplink_init 1, AUDIF_Set(0x43, 0) = 0x3b2e10(0): stop HF_ENC (0x3bbaec: 0/6/2 unless already stopped), then 0/0xA/0 */
+    if (state(6) != 2) {
+        send_cmd(0, 6, 2, 0);
+        if (wait_state(6, 2))
+            return -3;
+    }
+    send_cmd(0, 0xa, 0, 0);
+    /* 2, AUDIF_Set(0x44, asr 0) = 0x3b2dbe: RISC 0xB7 bit 5 = 0, 5/2 */
+    dsp_set(RISC, 0xb7, (u16)(dsp_get(RISC, 0xb7) & ~0x20u));
+    send_cmd(5, 2, 0, 0);
+    /* 3, ring 6 W and R to 0 */
+    mic_ptrs_clear();
+    /* 4, AUDIF_Set(0x29, AA's six zero flags, 1, 0) = 0x3b2938: RISC 0xA1 = (old & 0x180) | 0x40 | min(0, 30) << 11, 5/2 */
+    dsp_set(RISC, 0xa1, (u16)((dsp_get(RISC, 0xa1) & 0x180u) | 0x40u));
+    send_cmd(5, 2, 0, 0);
+    /* 5, AUDIF_Set(0x28, 2, {0xff, 0xff}) = AUD_Set_Handsfree_Fs 0x3b193c, rate code 2 (PCM 16 kHz), the path without
+     * the "DSP" magic in the AEC block (nothing writes it) and AEC profile 0: plain RISC/App stores (0x3bd312 / 0x3bd336) */
+    static const u16 hf[][2] = { { 0xa5, 0x233d }, { 0xa6, 0x234d }, { 0xad, 0x2157 }, { 0xae, 0x399b }, { 0xaf, 0x431b },
+                                 { 0xb0, 0x1b3b }, { 0xa0, 16000 }, { 0xa2, 0x148 },  { 0xa3, 0 },      { 0xa4, 0x1906 },
+                                 { 0xb6, 0 } };
+    for (u32 i = 0; i < sizeof hf / sizeof hf[0]; i++)
+        dsp_set(RISC, hf[i][0], hf[i][1]);
+    dsp_set(APP, 0x6e, 16000);
+    dsp_set(RISC, 0xb6, 0);   /* 0x3bd766: single-parameter update, cmd 5/3/index with the value */
+    send_cmd(5, 3, 0xb6, 0);
+    u16 b7 = (u16)(dsp_get(RISC, 0xb7) | 0x80u);
+    dsp_set(RISC, 0xb7, b7);
+    send_cmd(5, 3, 0xb7, b7);
+    for (int i = 0; i < 16; i++)   /* 0x3bdaa0(6, d): media-6 descriptor at RISC byte 0x120, d[0] = 0, d[15] = 0x20 */
+        dsp_set(RISC, 0x90 + i, i == 15 ? 0x20 : 0);
+    /* DSP_CheckCodec(6) 0x3bbc88: already stopped, no code download for modules 3 and 6, play (0x3bbb70: 0/6/3) */
+    send_cmd(0, 6, 3, 0);
+    if (wait_state(6, 3))
+        return -4;
+    /* 6, ring 6 address (0x3bc720: info +0xE) */
+    u16 o = info(0xe);
+    if (!o)
+        return -5;
+    mic_ring = data + (u32)o * 128;
+    /* uplink_start, AUDIF_Set(0x43, 1) = 0x3b2e10(1): play HF_ENC (already playing) and 0/0xA/1 */
+    send_cmd(0, 0xa, 1, 0);
+    return 0;
+}
+
+int aud_mic_start(void)
+{
+    mic_on = 0;
+    int r = mic_start_seq();
+    if (!r) {
+        mic_on = 1;
+        mic_read_bytes = mic_dsp_bytes = mic_reads = mic_drained = mic_errs = 0;
+        mic_win_n = mic_win_peak = mic_rms = mic_peak = mic_peak_max = 0, mic_win_sq = 0;
+        mic_t0 = mic_last_read = clk_us();
+    }
+    mic_start_r = r;
+    if (logf)
+        logf("audio: mic start %d, state %08x, ring 6 at %08x, %u command timeouts\n", r, REG(0x18b0), mic_ring,
+             cmd_timeouts);
+    return r;
+}
+
+void aud_mic_stop(void)   /* uplink_stop (AUDIF_Set(0x43, 0)), then clear: W and R to 0 */
+{
+    if (!data)
+        return;
+    if (mic_on)
+        mic_ms = (u32)((clk_us() - mic_t0) / 1000);
+    mic_on = 0;
+    if (state(6) != 0 && state(6) != 2) {
+        send_cmd(0, 6, 2, 0);
+        wait_state(6, 2);
+    }
+    send_cmd(0, 0xa, 0, 0);
+    mic_ptrs_clear();
+    if (logf)
+        logf("audio: mic stop, state %08x\n", REG(0x18b0));
+}
+
+int aud_mic_on(void) { return (int)mic_on; }
+
+int aud_mic_read(short *buf, int max_samples)   /* uplink_read 0x3a9634 */
+{
+    if (!mic_on || !mic_ring || max_samples <= 0)
+        return 0;
+    u32 w = mic_track_w();
+    mic_last_read = clk_us();
+    if (w == ~0u)
+        return 0;
+    u32 fill = (w + MIC_RING_SZ - mic_r) % MIC_RING_SZ, room = 2u * (u32)max_samples;
+    u32 n = fill - fill % MIC_FRAME;
+    if (n > room - room % MIC_FRAME)
+        n = room - room % MIC_FRAME;
+    if (!n)
+        return 0;
+    u16 *d = (u16 *)buf;
+    for (u32 done = 0; done < n;) {   /* the DSP writes behind the cache: invalidate, then copy, by contiguous piece */
+        u32 k = MIC_RING_SZ - mic_r;
+        if (k > n - done)
+            k = n - done;
+        dc_inval(mic_ring + mic_r, k);
+        const volatile u16 *s = (const volatile u16 *)(mic_ring + mic_r);
+        for (u32 i = 0; i < k / 2; i++)
+            d[done / 2 + i] = s[i];
+        done += k;
+        mic_r = (mic_r + k) % MIC_RING_SZ;
+    }
+    REG(0x18c4) = mic_r;
+    mic_read_bytes += n, mic_reads++;
+    mic_meter(buf, n / 2);
+    return (int)(n / 2);
+}
+
+static void mic_poll(void)   /* nobody read for 1 s, or the ring is 3/4 full: drain it (keeps the meter live) */
+{
+    if (!mic_on || !mic_ring)
+        return;
+    u32 w = REG(0x18c0);
+    u32 fill = w < MIC_RING_SZ ? (w + MIC_RING_SZ - mic_r) % MIC_RING_SZ : 0;
+    if (clk_us() - mic_last_read < 1000000 && fill < MIC_RING_SZ / 4 * 3)
+        return;
+    static short tmp[1024];
+    u32 before = mic_read_bytes;
+    while (aud_mic_read(tmp, 1024) > 0)
+        ;
+    mic_drained += mic_read_bytes - before;
+}
+
+int aud_mic_status(char *o, aud_fmt fmt)
+{
+    if (!data)
+        return fmt(o, "mic: audio not initialized");
+    if (mic_on)
+        mic_track_w(), mic_ms = (u32)((clk_us() - mic_t0) / 1000);
+    u32 rate = mic_ms ? (u32)((unsigned long long)mic_dsp_bytes * 1000 / mic_ms) : 0;
+    return fmt(o, "mic: %s (start %d), HF_ENC state %d (18b0 %08x), ring 6 at %08x W(18c0) %x R(18c4) %x ours %x; "
+                  "DSP wrote %u bytes in %u ms = %u B/s (32000 expected); read %u bytes in %u reads, %u of them drained; "
+                  "level rms %u (%d dBFS) peak %u (%d dBFS), max peak %u (%d dBFS); bad W %u",
+               mic_on ? "on" : "off", mic_start_r, state(6), REG(0x18b0), mic_ring, REG(0x18c0), REG(0x18c4), mic_r,
+               mic_dsp_bytes, mic_ms, rate, mic_read_bytes, mic_reads, mic_drained, mic_rms, dbfs(mic_rms), mic_peak,
+               dbfs(mic_peak), mic_peak_max, dbfs(mic_peak_max), mic_errs);
+}
+
 int aud_init(aud_logf log)
 {
     logf = log;
     ready = 0;
+    u32 mic_was = mic_on;   /* the DSP reset below drops capture; start it again at the end */
+    mic_on = 0;
     u32 id = REG(0x0000) & 0xffff;
     chip651 = id == 0x651;
     if (logf)
@@ -497,6 +727,8 @@ int aud_init(aud_logf log)
         logf("audio: ready; path %u, ring at %08x, state %08x, %u command timeouts\n", path, ring, REG(0x18b0),
              cmd_timeouts);
     ready = 1;
+    if (mic_was)
+        aud_mic_start();
     return ring ? 0 : -7;
 }
 
@@ -704,6 +936,7 @@ void aud_poll(void)
         return;
     play_monitor();
     service_msgs();
+    mic_poll();
     u32 hb = REG(0x18b4) & 0xffff;
     if (hb != hb_last)
         hb_last = hb, hb_stuck = 0, hb_seen++;

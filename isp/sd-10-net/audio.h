@@ -17,4 +17,12 @@ int aud_write_mono16k(int src, const short *m, int samples);   /* 1 guidance/spe
 #define AUD_EQ_BANDS 10                  /* 31, 63, 125, 250, 500 Hz, 1, 2, 4, 8, 16 kHz */
 void aud_eq_set(int band, int half_db);  /* gain in 0.5 dB steps, -24..24 (+-12 dB); kept and re-applied after an init */
 int aud_status(char *o, aud_fmt fmt);
+/* microphone: the DSP's hands-free uplink (HF_ENC, ring 6), 16 kHz mono s16 little-endian, as stock AA records it.
+ * Playback, routing and the EQ are not touched. While open and nobody reads for 1 s, aud_poll drains the ring (the
+ * level meter stays live). aud_init restarts capture if it was open. */
+int aud_mic_start(void);                 /* 0, or < 0 for the step that failed (logged) */
+void aud_mic_stop(void);                 /* stop HF_ENC, ring pointers to 0 */
+int aud_mic_on(void);
+int aud_mic_read(short *buf, int max_samples);   /* whole 8 ms frames (128 samples) only; returns samples copied */
+int aud_mic_status(char *o, aud_fmt fmt);   /* HF_ENC state, ring pointers, byte counts, level (RMS / peak) */
 #endif

@@ -3864,6 +3864,44 @@ static int fs_op(const cu8 *p, int n, char *o)
     return vfmt_n(o, "ERR fs sub-op");
 }
 
+/* Microphone capture to the card (AUDIO sub-op 9): 16 kHz mono s16 from aud_mic_read into the upload area, then
+ * MIC.RAW. The net loop pumps it (mic_rec_poll), so the HU1 reply and the network keep going while it records; the
+ * capture stays at MM_UPLOAD afterwards for hu.py to read back. */
+#define MIC_REC_BPS 32000u
+#define MIC_REC_MAX_S 60u
+static u32 mic_rec_len, mic_rec_pos, mic_rec_t0, mic_rec_save_ms, mic_rec_own;
+static int mic_rec_state, mic_rec_result;   /* state 0 idle, 1 recording, 2 saved (result: fs_save) */
+
+static void mic_rec_poll(void)
+{
+    if (mic_rec_state != 1)
+        return;
+    u32 want = (mic_rec_len - mic_rec_pos) / 2;
+    if (want)
+        mic_rec_pos += 2u * (u32)aud_mic_read((short *)MM_UPLOAD + mic_rec_pos / 2, (int)want);
+    /* done, or the DSP stopped writing: give up 3 s after the expected end and keep what came */
+    if (mic_rec_pos < mic_rec_len && clk_ms() - mic_rec_t0 < mic_rec_len / (MIC_REC_BPS / 1000) + 3000)
+        return;
+    if (mic_rec_own)
+        aud_mic_stop();
+    u32 t = clk_ms();
+    mic_rec_result = fs_save("MIC.RAW", (const void *)MM_UPLOAD, mic_rec_pos);
+    mic_rec_save_ms = clk_ms() - t;
+    mic_rec_state = 2;
+    lprintf("audio: mic rec %u of %u bytes in %u ms, MIC.RAW save %d (%u ms)\n", mic_rec_pos, mic_rec_len,
+            t - mic_rec_t0, mic_rec_result, mic_rec_save_ms);
+}
+
+static int mic_rec_status(char *o)
+{
+    if (mic_rec_state == 1)
+        return vfmt_n(o, "rec: recording %u of %u bytes, %u ms", mic_rec_pos, mic_rec_len, clk_ms() - mic_rec_t0);
+    if (mic_rec_state == 2)
+        return vfmt_n(o, "rec: MIC.RAW %u bytes of %u (save %d, %u ms), copy at 0x%08x", mic_rec_pos, mic_rec_len,
+                      mic_rec_result, mic_rec_save_ms, MM_UPLOAD);
+    return vfmt_n(o, "rec: idle");
+}
+
 int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
 {
     char *t = (char *)out;
@@ -4082,8 +4120,36 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
             vpp_restore_now();
         return k;
     }
-    case 27: {   /* AUDIO (audio.c): 0 status, 1 init, 2 tone u16 Hz (0 off), 3 volume u8 0..40, 4 mute u8 */
+    case 27: {   /* AUDIO (audio.c): 0 status, 1 init, 2 tone u16 Hz (0 off), 3 volume u8 0..40, 4 mute u8, 5 eq;
+                  * microphone: 6 start, 7 stop, 8 status, 9 rec u16 seconds (to MIC.RAW, poll 8 for the end) */
         int c = n ? p[0] : 0;
+        if (c >= 6 && c <= 9) {
+            int k = 0;
+            if (c == 6)
+                k = vfmt_n(t, "start %d; ", aud_mic_start());
+            else if (c == 7) {
+                if (mic_rec_state == 1)   /* end the recording now with what it has */
+                    mic_rec_len = mic_rec_pos;
+                aud_mic_stop();
+                mic_rec_poll();
+            } else if (c == 9 && mic_rec_state == 1)
+                k = vfmt_n(t, "ERR already recording; ");
+            else if (c == 9) {
+                u32 secs = n >= 3 ? (u32)(p[1] | p[2] << 8) : 5;
+                secs = secs < 1 ? 1 : secs > MIC_REC_MAX_S ? MIC_REC_MAX_S : secs;
+                mic_rec_own = !aud_mic_on();
+                int r = mic_rec_own ? aud_mic_start() : 0;
+                if (r)
+                    k = vfmt_n(t, "ERR mic start %d; ", r);
+                else {
+                    mic_rec_len = secs * MIC_REC_BPS, mic_rec_pos = 0, mic_rec_t0 = clk_ms(), mic_rec_state = 1;
+                    k = vfmt_n(t, "rec %u s; ", secs);
+                }
+            }
+            k += aud_mic_status(t + k, vfmt_n);
+            k += vfmt_n(t + k, "; ");
+            return k + mic_rec_status(t + k);
+        }
         if (c == 1) {
             int r = aud_init(lprintf);
             aud_vol_sent = aud_mute_sent = aud_eq_sent = -1;   /* init leaves it muted at volume 0: the UI's settings go again */
@@ -4564,6 +4630,7 @@ static void net_loop(void)
             }
         }
         aud_poll();
+        mic_rec_poll();
         if (aa_listening || aa_tcp_connected()) {
             aa_touch_poll();
             aa_tcp_poll();

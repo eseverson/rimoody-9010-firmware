@@ -27,7 +27,7 @@ UDP 5151. Requests carry the shared token from WIFI.TXT on the card (`--token` o
 
 The target IP comes from --ip, $HU_IP, or the first hello heard. Stdlib only.
 """
-import argparse, os, socket, struct, sys, time, zlib
+import argparse, os, re, socket, struct, sys, time, zlib
 
 PORT_CMD, PORT_HELLO = 5151, 5152
 OP_PING, OP_CMD, OP_WRITE, OP_READ, OP_SYNC, OP_LOG = 1, 2, 3, 4, 5, 6
@@ -137,6 +137,45 @@ class Unit:
             return None
         finally:
             self.sock.settimeout(self.timeout)
+
+
+def do_mic(u, a):
+    """audio mic start|stop|status|rec SECONDS: the DSP's hands-free uplink (audio.c), AUDIO sub-ops 6..9. rec records
+    on the unit into MIC.RAW (and RAM at MM_UPLOAD), polls until it is saved, and with --out fetches it from RAM."""
+    sub = {'start': 6, 'stop': 7, 'status': 8, 'rec': 9}.get(a.value)
+    if sub is None:
+        sys.exit('audio mic start|stop|status|rec SECONDS [--out FILE]')
+    if sub != 9:
+        print(u.call(OP_AUDIO, bytes([sub])).decode(errors='replace'))
+        return 0
+    secs = max(1, min(60, int(float(a.db)) if a.db != '0' else 5))
+    r = u.call(OP_AUDIO, bytes([9]) + struct.pack('<H', secs)).decode(errors='replace')
+    print(r)
+    if r.startswith('ERR'):
+        return 1
+    end = time.time() + secs + 20
+    while time.time() < end:
+        time.sleep(1.0)
+        r = u.call(OP_AUDIO, bytes([8])).decode(errors='replace')
+        if 'rec: recording' not in r:
+            break
+    print(r)
+    m = re.search(r'rec: MIC\.RAW (\d+) bytes of \d+ \(save (-?\d+).*copy at (0x[0-9a-f]+)', r)
+    if not m:
+        print('recording did not finish', file=sys.stderr)
+        return 1
+    n, save, addr = int(m.group(1)), int(m.group(2)), int(m.group(3), 16)
+    if a.out and n:
+        data = u.read(addr, n)
+        if a.out.lower().endswith('.wav'):
+            import wave
+            with wave.open(a.out, 'wb') as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(data)
+        else:
+            with open(a.out, 'wb') as f:
+                f.write(data)
+        print('saved %d bytes (%.2f s) to %s' % (n, n / 32000, a.out))
+    return 0 if save == 0 and n else 1
 
 
 def image_build(data):
@@ -249,9 +288,10 @@ def main():
     p.add_argument('what', choices=['status', 'show', 'on', 'off', 'fast', 'every']); p.add_argument('secs', nargs='?', type=int, default=0)
     p = sub.add_parser('ui', help='UI tests: tap X Y | button N [HOLD_MS] | drag X1 Y1 X2 Y2 | lights 0|1|2 (forced off/on, input) | shot OUT.png (the OSD0 framebuffer)')
     p.add_argument('what', choices=['tap', 'button', 'drag', 'lights', 'shot']); p.add_argument('args', nargs='*')
-    p = sub.add_parser('audio', help='audio DSP (audio.c): status | init | tone HZ (0 off) | volume 0..40 | mute 0|1 | eq BAND DB')
-    p.add_argument('what', choices=['status', 'init', 'tone', 'volume', 'mute', 'eq']); p.add_argument('value', nargs='?', type=int, default=0)
-    p.add_argument('db', nargs='?', type=float, default=0.0, help='eq: gain in dB (-12..12, 0.5 steps)')
+    p = sub.add_parser('audio', help='audio DSP (audio.c): status | init | tone HZ (0 off) | volume 0..40 | mute 0|1 | eq BAND DB | mic start|stop|status|rec SECONDS [--out FILE]')
+    p.add_argument('what', choices=['status', 'init', 'tone', 'volume', 'mute', 'eq', 'mic']); p.add_argument('value', nargs='?', default='0')
+    p.add_argument('db', nargs='?', default='0', help='eq: gain in dB (-12..12, 0.5 steps); mic rec: seconds (1..60)')
+    p.add_argument('--out', help='mic rec: also fetch the capture (16 kHz mono s16le) into FILE; .wav gets a WAV header')
     p.add_argument('--peak', type=int, default=256, help='tone: peak level of 32767 (256 = -42 dBFS)')
     p.add_argument('--ms', type=int, default=2000, help='tone: stops by itself after this many ms (max 10000)')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
@@ -431,10 +471,13 @@ def main():
             raw = u.read(0x03400000, 1024 * 600 * 4)
             Image.frombuffer('RGBA', (1024, 600), raw, 'raw', 'BGRA', 0, 1).convert('RGB').save(a.args[0])
             print('saved', a.args[0])
+    elif a.op == 'audio' and a.what == 'mic':
+        return do_mic(u, a)
     elif a.op == 'audio':
         c = {'status': 0, 'init': 1, 'tone': 2, 'volume': 3, 'mute': 4, 'eq': 5}[a.what]
-        pl = bytes([c]) + (struct.pack('<HHH', a.value, a.peak, a.ms) if c == 2 else bytes([a.value]) if c in (3, 4)
-                           else struct.pack('<Bb', a.value, int(round(a.db * 2))) if c == 5 else b'')
+        value, db = int(a.value), float(a.db)
+        pl = bytes([c]) + (struct.pack('<HHH', value, a.peak, a.ms) if c == 2 else bytes([value]) if c in (3, 4)
+                           else struct.pack('<Bb', value, int(round(db * 2))) if c == 5 else b'')
         print(u.call(OP_AUDIO, pl).decode(errors='replace'))
     elif a.op == 'op':
         print(u.call(a.num, bytes.fromhex(a.payload)).decode(errors='replace'))
