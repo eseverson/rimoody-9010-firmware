@@ -135,3 +135,7 @@ If anything times out the driver refuses further writes until a reboot; let the 
 - The meaning of AUTO_CFG bit 0 and CTRL[28] (the hardware write enable and page split U-Boot relies on).
 - Whether the controller's prefetch buffer needs more than one unrelated read to drop old data after a write (step 9 shows it).
 - Volatile status writes (0x50) would avoid the non-volatile protection round trip, but U-Boot never uses them on this part.
+
+## On-unit results
+
+- 2026-11-09, build 20261109-121550: `nor status` reads JEDEC 204018 (XM25QH128C), SR1 04 / SR2 42 / SR3 60, protected 000000..fbffff, as expected. Controller reads with 0x03 differ from the XIP window in exactly the first byte of every 1 KB DMA chunk (offsets 0, 0x400, 0x800, 0xC00; checked at 0x000000, 0x3BF000, 0x900000, 0xE00000); with 0x0B fast read all four regions match the XIP window. The driver and `hu.py nor` now default to 0x0B. No erase or program has been run yet.

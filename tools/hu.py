@@ -299,7 +299,7 @@ def main():
     p.add_argument('--ms', type=int, default=2000, help='tone: stops by itself after this many ms (max 10000)')
     p = sub.add_parser('nor', help='SPI NOR flash through the controller (nor.c): status | compare OFF LEN | read OFF LEN -o FILE | verify OFF FILE | erase OFF | erase64 OFF | program OFF FILE; erase/erase64/program need --write and only touch 0xC50000..0xC5FFFF, 0xC70000..0xDFFFFF, 0xE10000..0xFBFFFF')
     p.add_argument('what', choices=['status', 'compare', 'read', 'verify', 'erase', 'erase64', 'program']); p.add_argument('args', nargs='*')
-    p.add_argument('-o', '--out', help='read: save the bytes to FILE'); p.add_argument('--cmd', default='03', choices=['03', '0b'], help='controller read command (0b = fast read, 8 dummy cycles)')
+    p.add_argument('-o', '--out', help='read: save the bytes to FILE'); p.add_argument('--cmd', default='0b', choices=['03', '0b'], help='controller read command (0b = fast read, 8 dummy cycles)')
     p.add_argument('--write', action='store_true', help='required for erase, erase64 and program')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')

@@ -105,6 +105,9 @@ const char *nor_strerror(int e)
 #define CFG1_SINGLE 0x00150095u   /* what FlashInit and every `sfsp read` leave here */
 #define ISTS_DMA    0x2u
 #define DMA_MAX     1024u
+/* controller read command: 0x03 returns a wrong first byte in every 1 KB DMA chunk on the unit (offsets 0, 0x400, ...);
+ * 0x0B fast read matches the XIP window */
+#define NOR_RD      0x0bu
 
 static int fault;   /* sticky: a step timed out and the flash may still be busy */
 static int suspended;
@@ -483,7 +486,7 @@ static int blank(u32 off, u32 len, u32 *bad_c, u32 *bad_x)
     *bad_c = *bad_x = 0;
     for (u32 done = 0; done < len;) {
         u32 n = len - done < DMA_MAX ? len - done : DMA_MAX;
-        int r = nor_read(off + done, cbuf, n, 0x03);
+        int r = nor_read(off + done, cbuf, n, NOR_RD);
         if (r)
             return r;
         const volatile u8 *x = (const volatile u8 *)(NOR_XIP + off + done);
@@ -517,7 +520,7 @@ int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt)
         return o - out + fmt(o, "; fault %d", fault);
     }
     if (c == 1 || c == 2) {   /* compare / read: off, len [, dst], cmd */
-        u32 cmd = c == 1 ? (n >= 10 ? p[9] : 0x03) : (n >= 14 ? p[13] : 0x03);
+        u32 cmd = c == 1 ? (n >= 10 ? p[9] : NOR_RD) : (n >= 14 ? p[13] : NOR_RD);
         if (a1 >= NOR_SIZE || a2 == 0 || a2 > NOR_SIZE - a1 || (cmd != 0x03 && cmd != 0x0b))
             return fmt(o, "ERR nor: off < 16 MB, 0 < len, off + len <= 16 MB, cmd 03 or 0b");
         if (c == 1) {
@@ -534,7 +537,7 @@ int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt)
     if (c == 3) {   /* verify off, src, len */
         if (a1 >= NOR_SIZE || a3 == 0 || a3 > NOR_SIZE - a1 || a3 > 0x100000u || !ram_ok(a2, a3))
             return fmt(o, "ERR nor verify: flash range, len <= 1 MB, src in DRAM");
-        return compare(a1, a3, (const u8 *)a2, 0x03, o, fmt);
+        return compare(a1, a3, (const u8 *)a2, NOR_RD, o, fmt);
     }
     if (c >= 4 && c <= 6) {
         if (n < 9 || a1 != NOR_MAGIC)
@@ -569,7 +572,7 @@ int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt)
                  (u32)((clk_us() - t) / 1000));
         if (r && r != NOR_EWP && r != NOR_EVERIFY)
             return o - out;
-        return o - out + compare(off, len, (const u8 *)src, 0x03, o, fmt);
+        return o - out + compare(off, len, (const u8 *)src, NOR_RD, o, fmt);
     }
     return fmt(o, "ERR nor sub-op: 0 status, 1 compare, 2 read, 3 verify, 4 erase, 5 erase64, 6 program");
 }

@@ -123,10 +123,12 @@ Other tools, one line each:
 ## Notes index
 
 - [android_auto.md](notes/android_auto.md): AA options and decision, Bluetooth/RFCOMM protocol, wireless AA bring-up, car network, stutter hunt, reconnect with `ac 30`. The most current status log.
+- [aa_mic.md](notes/aa_mic.md): microphone capture from the DSP's hands-free uplink, the +30 dB preamp boost and the AA mic channel.
 - [audio.md](notes/audio.md): audio path overview, MCU commands, amplifier, GPIOs.
 - [audio_dsp.md](notes/audio_dsp.md): DSP bring-up and PCM playback from stock eCos.
 - [audio_eq.md](notes/audio_eq.md): stock EQ and tone controls, our EQ implementation.
 - `audio_trace/`: call and register traces from stock eCos runs.
+- [bt_calls.md](notes/bt_calls.md): stock Bluetooth hands-free call frames and audio route (research, not built yet).
 - [console.md](notes/console.md): framebuffer text console.
 - [display_touch.md](notes/display_touch.md): panel timing, OSD0, GT911 touch, front buttons, display haze notes.
 - [h264_decoder.md](notes/h264_decoder.md): the MFD hardware decoder, reverse-engineered from eCos.
@@ -135,6 +137,7 @@ Other tools, one line each:
 - [interrupts.md](notes/interrupts.md): interrupt controller, tick, exceptions, crash records.
 - [linux_feasibility.md](notes/linux_feasibility.md): why Linux is ruled out (MPU, no MMU).
 - [memory_map.md](notes/memory_map.md): 64 MB DRAM map and aliasing (source of truth: `memmap.h`).
+- [nor_flash.md](notes/nor_flash.md): the XM25QH128C SPI NOR, its controller, the guarded erase/program driver (`nor.c`, `hu.py nor`) and the free region for a NOR copy of the payload.
 - [rtos.md](notes/rtos.md): FreeRTOS port design, milestones, EHCI/USB/SD bring-up, lockup handling.
 - [session-state.md](notes/session-state.md): early session log (2026-10-31 to 11-01); outdated, kept for history.
 - [usb_host.md](notes/usb_host.md): U-Boot's USB PHY/EHCI init sequence.
