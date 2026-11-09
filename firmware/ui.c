@@ -722,7 +722,7 @@ static void build_btname(void)
 /* ---- settings: categories down the left, one page each that fits without scrolling (scrolling a full-height list
  * is choppy on this CPU, and a car screen should not need it) ---- */
 
-#define NPAGES 5
+#define NPAGES 6
 static lv_obj_t *pages[NPAGES], *navs[NPAGES];
 
 static void show_page(int i)
@@ -742,8 +742,8 @@ static void nav_cb(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
     show_page(i);
-    if (i == 4)
-        plat_ui_install(3);   /* System: refresh the install status line (reads the flash, so only on demand) */
+    if (i == 5)
+        plat_ui_install(3);   /* Flash: refresh the install status line (reads the flash, so only on demand) */
 }
 
 static lv_obj_t *page(lv_obj_t *parent, int i, const char *name, lv_obj_t *nav)
@@ -985,6 +985,8 @@ static void build_settings(void)
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Boot stock");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)1);
+
+    p = page(scr_settings, 5, "Flash", nav);   /* its own page: on System the rows ran off the panel */
     r = row(p, "Back up the flash to the SD card");
     dump_label = lv_label_create(r);
     lv_label_set_text(dump_label, "");
