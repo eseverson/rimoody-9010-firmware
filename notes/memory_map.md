@@ -27,6 +27,7 @@ The source of truth is `isp/sd-10-net/memmap.h`. `memmap_check.c` asserts at com
 | 0x02400000 | 0x4C4800 | audio DSP window (microcode banks, data memory, PCM rings) | audio.c |
 | 0x02A00000 | 1 MB | LVGL heap | lv_conf.h |
 | 0x02B00000 | 480 KB | LVGL draw buffer (1024 × 120 × 4) | ui.c |
+| 0x02B80000 | 3.5 MB | install to flash: the image being copied (1.6 MB), then the stage 1 plan's blocks | install.c |
 | 0x02F00000 | 64 KB | EXEC trampoline, argv at +0xF000 | tramp.ld, net.c |
 | 0x03000000 | 4 MB | hu.py upload area (EXEC images ≤ 0x180000, tools/fb.py to 0x032F0080) | tools |
 | 0x03400000 | 0x258000 | console / UI framebuffer (1024 × 600 × 4) | net.c, console.c, ui.c |

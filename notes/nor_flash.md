@@ -66,7 +66,7 @@ Audit of everything that reads the window in this payload:
 
 - **The payload itself runs from DRAM** (linked at 0x01800000; net.map has no section outside DRAM, and the driver's functions sit at 0x0182xxxx). Exception vectors are at 0x01F10000. No code executes from flash.
 - **audio.c**: `download_code` / `download_data` copy the DSP microcode out of the window (flash 0x4AF5E8..0x5941xx) and checksum it. Their only caller is `aud_init` (boot via `audio_boot`, and HU1 AUDIO sub-op 1), both on the net task. The master-volume table is a copy in DRAM. Nothing else in audio.c touches flash.
-- **net.c `plat_ui_install_status`**: reads the boot-script header at 0x98E00000 and scans the environment block at 0x98920000; called by ui.c when it builds the settings page, on the UI task.
+- **install.c** (install to flash, notes/nor_install.md): the whole-region CRC through the window after a stage 2 write, on the net task between driver windows. The Settings status line is a string the net task prepares; the UI task no longer reads the window.
 - **Interrupt handlers** (irq.c `isr`: tick, software watchdog, hardware watchdog pet, MCU heartbeat, UART drain) and the crash path: no flash access.
 - **HU1**: READ refuses 0x08000000..0x9BFFFFFF, so the window cannot be read over the network. The CMD op runs U-Boot commands (`md`, `crc32`, `source 98e00000`, `sfsp ...` all read flash) on the net task.
 - **U-Boot code we call** (`ub_ms`, `ub_udelay`, printf, `run("usb reset")`, `fatwrite`): runs from its relocated copy in DRAM and does not read flash. The driver itself calls no U-Boot code.
@@ -89,6 +89,8 @@ The driver accepts erase and program only inside these ranges and fails closed f
 | 0xC50000..0xC5FFFF | 64 KB | blank in the original dump |
 | 0xC70000..0xDFFFFF | 1.56 MB | blank in the dump |
 | 0xE10000..0xFBFFFF | 1.69 MB | blank; 0xE00000..0xE0FFFF is the NOR boot script |
+
+Outside these ranges only stage 1 of the install may write, and only the boot script block 0xE00000 and the U-Boot blocks holding the environment and the uImage header sums, through `nor_boot_write` (notes/nor_install.md); the general erase and program paths never reach them.
 
 0xFD0000..0xFEFFFF is blank too but stays out: it lies in the top 256 KB that U-Boot's protect deliberately leaves writable, next to eCos's settings at 0xFC0000 and 0xFF0000, so eCos may use it. The free region (3.3 MB) fits the payload (NET.BIN is about 1.1 MB, EXEC accepts up to 1.5 MB) twice over. Erase granularity: `nor_erase` takes 4 KB-aligned spans that lie wholly inside one range, uses 64 KB blocks where a whole aligned block is inside the span and 4 KB sectors elsewhere, so no erase unit can reach outside. Programs must start on blank flash (the HU1 op checks) and are split on 256-byte pages. `test/nor_host.c` checks the guard against every sector and block of the 16 MB, the page split, and the protection decode.
 

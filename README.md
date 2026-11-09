@@ -41,7 +41,7 @@ Identifying marks, for matching other units (the same board likely ships under o
 |---|---|
 | `isp/sd-10-net/` | The payload (main code; the name is historical). Built into `NET.BIN`. |
 | `isp/sd-1-probe` .. `isp/sd-12-boot`, `isp/0-reset`, `isp/1-probe`, `isp/2-nordump` | Earlier SD-card ISP rounds (U-Boot scripts run through the update path) used before the Wi-Fi loop existed: probing, NOR dumps, first Wi-Fi, MCU, boot command. Mostly history. |
-| `isp/sd-11-bootcmd/boot.txt` | The NOR boot script that loads `/BOOT.BIN`. |
+| `isp/sd-11-bootcmd/boot.txt` | The NOR boot script that loads `/BOOT.BIN` (version 1, SD card only). Version 2 (SD card, then a payload copy in NOR, then stock) is built into the payload and installed from Settings > System or `hu.py nor install` ([notes/nor_install.md](notes/nor_install.md)). |
 | `isp/mkisp.py` | Builds an `ISP_UPDT.BIN` from the stock dump plus a U-Boot script. |
 | `isp/ecos-snap/` | Hooks that boot stock eCos and snapshot registers or log calls (`tools/ecos_snap.py`). |
 | `tools/` | PC-side tools, see below. |
@@ -138,6 +138,7 @@ Other tools, one line each:
 - [linux_feasibility.md](notes/linux_feasibility.md): why Linux is ruled out (MPU, no MMU).
 - [memory_map.md](notes/memory_map.md): 64 MB DRAM map and aliasing (source of truth: `memmap.h`).
 - [nor_flash.md](notes/nor_flash.md): the XM25QH128C SPI NOR, its controller, the guarded erase/program driver (`nor.c`, `hu.py nor`) and the free region for a NOR copy of the payload.
+- [nor_install.md](notes/nor_install.md): install to flash: the version 2 boot script (SD card, then a payload copy in NOR, then stock), the U-Boot environment patch, the copy's header, every check, power-loss analysis and the on-unit test plan.
 - [rtos.md](notes/rtos.md): FreeRTOS port design, milestones, EHCI/USB/SD bring-up, lockup handling.
 - [session-state.md](notes/session-state.md): early session log (2026-10-31 to 11-01); outdated, kept for history.
 - [usb_host.md](notes/usb_host.md): U-Boot's USB PHY/EHCI init sequence.
