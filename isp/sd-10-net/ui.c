@@ -534,6 +534,26 @@ static void confirm_cb(lv_event_t *e)
         plat_ui_reboot();
     else if (which == 1)
         plat_ui_boot_stock();
+    else if (which == 3 || which == 4)
+        plat_ui_install(which - 2);
+}
+
+static void install_cb(lv_event_t *e)   /* install to flash: ask first, these write the boot flash */
+{
+    int which = (int)(intptr_t)lv_event_get_user_data(e);
+    dialog_close();
+    lv_obj_t *mb = dialog = lv_msgbox_create(0);
+    lv_obj_set_width(mb, 640);
+    lv_msgbox_add_title(mb, which == 3 ? "Set up the boot path?" : "Install this firmware to flash?");
+    lv_msgbox_add_text(mb, which == 3 ? "Power-on then starts BOOT.BIN from the SD card, else the copy in flash, else the "
+                                        "original firmware. This rewrites the boot script and, the first time, U-Boot's "
+                                        "settings. Keep the power on until it says it is done."
+                                      : "Copies this firmware (BOOT.BIN on the SD card) into flash, so the unit starts it "
+                                        "even without the card. Takes about a minute; keep the power on.");
+    lv_obj_t *ok = lv_msgbox_add_footer_button(mb, "Install");
+    lv_obj_add_event_cb(ok, confirm_cb, LV_EVENT_CLICKED, (void *)(intptr_t)which);
+    lv_obj_t *no = lv_msgbox_add_footer_button(mb, "Cancel");
+    lv_obj_add_event_cb(no, cancel_cb, LV_EVENT_CLICKED, 0);
 }
 
 static void sys_cb(lv_event_t *e)   /* restart / stock firmware: ask first, a stray tap must not restart the unit */
@@ -836,7 +856,7 @@ static void build_eq(lv_obj_t *p)
     eq_preset_mark();
 }
 
-static lv_obj_t *dump_label;
+static lv_obj_t *dump_label, *install_label;
 static void dump_cb(lv_event_t *e)
 {
     (void)e;
@@ -966,12 +986,16 @@ static void build_settings(void)
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Back up");
     lv_obj_add_event_cb(b, dump_cb, LV_EVENT_CLICKED, 0);
-    static char inst[120];
-    plat_ui_install_status(inst, sizeof inst);
-    r = row(p, inst);
+    r = row(p, "Boot from the SD card, else from flash");
     b = lv_button_create(r);
-    lv_label_set_text(lv_label_create(b), "Install to flash");
-    lv_obj_add_state(b, LV_STATE_DISABLED);   /* stub: writing the app into NOR permanently is not built yet */
+    lv_label_set_text(lv_label_create(b), "Set up");
+    lv_obj_add_event_cb(b, install_cb, LV_EVENT_CLICKED, (void *)3);
+    r = row(p, "Install this firmware to flash");
+    b = lv_button_create(r);
+    lv_label_set_text(lv_label_create(b), "Install");
+    lv_obj_add_event_cb(b, install_cb, LV_EVENT_CLICKED, (void *)4);
+    r = row(p, "");
+    install_label = lv_obj_get_child(r, 0);
     show_page(0);
 }
 
@@ -984,6 +1008,9 @@ static void status_timer(lv_timer_t *t)
         lv_label_set_text(status_label, buf);
         plat_ui_nor_dump_status(buf, sizeof buf);
         lv_label_set_text(dump_label, buf + 10);   /* without the "nor dump: " prefix */
+        plat_ui_install_status(buf, sizeof buf);
+        if (lv_strcmp(buf, lv_label_get_text(install_label)))
+            lv_label_set_text(install_label, buf);
     }
 }
 

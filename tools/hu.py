@@ -26,6 +26,10 @@ UDP 5151. Requests carry the shared token from WIFI.TXT on the card (`--token` o
   hu.py fs status|ls|crc NAME|raw LBA  our own SD/FAT driver (sd.c + FatFs); rawtest/write/rm/load also exist
   hu.py nor status|compare|read|verify  SPI NOR through the flash controller (nor.c), read-only;
   hu.py nor erase|erase64|program ... --write  writes, free region only (notes/nor_flash.md)
+  hu.py nor install status [FILE]    install to flash, read-only: what is installed, what each stage would do
+  hu.py nor install dryrun [nor|sd]  run the version 2 boot script from RAM with every side effect echoed
+  hu.py nor install boot --write     stage 1: the boot path (SD card, flash copy, stock); notes/nor_install.md
+  hu.py nor install firmware [FILE] --write   stage 2: FILE (or the card's BOOT.BIN = the running build) to flash
 
 The target IP comes from --ip, $HU_IP, or the first hello heard. Stdlib only.
 """
@@ -298,9 +302,9 @@ def main():
     p.add_argument('--peak', type=int, default=256, help='tone: peak level of 32767 (256 = -42 dBFS)')
     p.add_argument('--ms', type=int, default=2000, help='tone: stops by itself after this many ms (max 10000)')
     p = sub.add_parser('nor', help='SPI NOR flash through the controller (nor.c): status | compare OFF LEN | read OFF LEN -o FILE | verify OFF FILE | erase OFF | erase64 OFF | program OFF FILE; erase/erase64/program need --write and only touch 0xC50000..0xC5FFFF, 0xC70000..0xDFFFFF, 0xE10000..0xFBFFFF')
-    p.add_argument('what', choices=['status', 'compare', 'read', 'verify', 'erase', 'erase64', 'program', 'dump']); p.add_argument('args', nargs='*')
+    p.add_argument('what', choices=['status', 'compare', 'read', 'verify', 'erase', 'erase64', 'program', 'dump', 'install']); p.add_argument('args', nargs='*')
     p.add_argument('-o', '--out', help='read: save the bytes to FILE'); p.add_argument('--cmd', default='0b', choices=['03', '0b'], help='controller read command (0b = fast read, 8 dummy cycles)')
-    p.add_argument('--write', action='store_true', help='required for erase, erase64 and program')
+    p.add_argument('--write', action='store_true', help='required for erase, erase64, program, install boot and install firmware')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
     p.add_argument('num', type=int); p.add_argument('payload', nargs='?', default='')
     p = sub.add_parser('persist'); p.add_argument('file'); p.add_argument('--name', default='BOOT.BIN')
@@ -522,6 +526,8 @@ def do_nor(u, a):
     into the upload area, fetched and CRC-checked), verify (a local file against flash, both paths). Writes (erase one
     4 KB sector, erase64 one 64 KB block, program a file of up to 64 KB onto blank flash) need --write; the payload
     also refuses anything outside the free region and any part other than the XM25QH128C."""
+    if a.what == 'install':
+        return do_install(u, a)
     need = {'status': 0, 'compare': 2, 'read': 2, 'verify': 2, 'erase': 1, 'erase64': 1, 'program': 2, 'dump': 0}[a.what]
     if len(a.args) != need:
         sys.exit('usage: nor status | compare OFF LEN | read OFF LEN -o FILE | verify OFF FILE | erase OFF | erase64 OFF'
@@ -575,6 +581,97 @@ def do_nor(u, a):
     r = u.call(OP_NOR, struct.pack('<BIIII', 6, NOR_MAGIC, args[0], LOAD_ADDR, len(data))).decode(errors='replace')
     show(r)
     return 0 if 'controller MATCH, xip MATCH' in r else 1
+
+
+INSTALL_DRY_IMG, INSTALL_DRY_LOAD = 0x03000000, 0x03100000   # dry run: script image, and where the copy goes
+
+
+def install_dry_text(text, variant):
+    """The version 2 boot script with every side effect turned into an echo: pinmux / UART / MCU frame writes, the
+    environment the payload uses (isp_if, isp_dev), the card commands, `wdt stop` and `go`. The card loop's fatloads
+    become `false` (variant nor: no BOOT.BIN, so the NOR copy check runs) or `true` (variant sd), and the copy lands at
+    INSTALL_DRY_LOAD instead of over the running payload."""
+    t = text.replace('mw.l 0x9c', 'echo DRY mw.l 0x9c').replace('uartsp ', 'echo DRY uartsp ')
+    t = t.replace('setenv isp_', 'echo DRY setenv isp_').replace('mmc dev', 'echo DRY mmc dev')
+    t = t.replace('mmc rescan', 'echo DRY mmc rescan').replace('wdt stop all', 'echo DRY wdt stop all')
+    t = re.sub(r'fatload mmc [01] 0x1800000 /BOOT\.BIN', 'false' if variant == 'nor' else 'true', t)
+    t = t.replace('go 0x1800000', 'echo DRY go 0x1800000').replace('0x1800000', '0x%x' % INSTALL_DRY_LOAD)
+    t += 'echo DRY result hu_ok=$hu_ok hu_src=$hu_src\n'
+    for cmd in t.replace(';', '\n').replace(' then ', '\n').replace(' else ', '\n').splitlines():
+        cmd = cmd.strip()
+        for tok in ('if ', 'then ', 'else '):
+            if cmd.startswith(tok):
+                cmd = cmd[len(tok):]
+        if cmd.startswith('echo DRY') or not cmd:
+            continue
+        if re.match(r'(go|wdt|uartsp|fatload|mmc)\b', cmd) or 'setenv isp_' in cmd or '0x9c' in cmd or \
+                '0x1800000' in cmd:
+            sys.exit('dry run: unsafe command left in the script: %r' % cmd)
+    return t
+
+
+def do_install(u, a):
+    """Install to flash (install.c, notes/nor_install.md). status, progress and dryrun are read-only; boot and
+    firmware need --write and then poll until the payload reports the result."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'isp'))
+    from mkisp import check_script, mkscript
+    sub = a.args[0] if a.args else 'status'
+    rest = a.args[1:]
+    u.sock.settimeout(max(a.timeout, 20.0))   # status reads ~3 MB of flash and BOOT.BIN; a retransmit gets the cache
+    if sub not in ('status', 'progress', 'dryrun', 'boot', 'firmware', 'script'):
+        sys.exit('usage: nor install status [FILE] | progress | script | dryrun [nor|sd] | boot --write | '
+                 'firmware [FILE] --write')
+
+    def upload(path):
+        data = open(path, 'rb').read()
+        u.write(LOAD_ADDR, data)   # CRC-checked per chunk; the payload checks the whole CRC again
+        return struct.pack('<III', LOAD_ADDR, len(data), zlib.crc32(data) & 0xffffffff)
+
+    if sub == 'status':
+        print(u.call(OP_NOR, bytes([9]) + (upload(rest[0]) if rest else b'')).decode(errors='replace'), end='')
+        return 0
+    if sub == 'progress':
+        print(u.call(OP_NOR, bytes([12])).decode(errors='replace'))
+        return 0
+    if sub in ('script', 'dryrun'):
+        r = u.call(OP_NOR, bytes([13])).decode(errors='replace')
+        if r.startswith('ERR'):
+            sys.exit(r)
+        head, text = r.split('\n', 1)
+        m = re.match(r'script (.+), uImage (\d+) bytes, crc ([0-9a-f]{8})', head)
+        img = mkscript(text, m.group(1), stamp=0)
+        same = len(img) == int(m.group(2)) and zlib.crc32(img) & 0xffffffff == int(m.group(3), 16)
+        print('%s\n  rebuilt here: %s' % (head, 'identical' if same else 'DIFFERENT'))
+        if sub == 'script':
+            print(text, end='')
+            return 0 if same else 1
+        if not same:
+            return 1
+        for variant in ([rest[0]] if rest else ['nor', 'sd']):
+            dry = mkscript(install_dry_text(text, variant), 'dry boot script', stamp=0)
+            assert check_script(dry) is None
+            u.write(INSTALL_DRY_IMG, dry)
+            out = u.cmd('source 0x%x' % INSTALL_DRY_IMG)
+            print('--- dry run, variant %s (%s) ---\n%s' % (variant, 'no BOOT.BIN: the NOR copy check runs' if
+                                                           variant == 'nor' else 'BOOT.BIN found', out.strip()))
+        return 0
+    if not a.write:
+        print(u.call(OP_NOR, bytes([9]) + (upload(rest[0]) if sub == 'firmware' and rest else b'')).decode(
+            errors='replace'), end='')
+        sys.exit('nor install %s writes the flash: the status above is the dry run; add --write' % sub)
+    pl = struct.pack('<BI', 10 if sub == 'boot' else 11, NOR_MAGIC)
+    if sub == 'firmware' and rest:
+        pl += upload(rest[0])
+    r = u.call(OP_NOR, pl).decode(errors='replace')
+    print(r)
+    if r.startswith('ERR') or 'nothing to do' in r:
+        return 1 if r.startswith('ERR') else 0
+    while True:
+        time.sleep(1)
+        r = u.call(OP_NOR, bytes([12])).decode(errors='replace')
+        print(r, flush=True)
+        if 'running' not in r:
+            return 0 if 'last: ok' in r else 1
 
 
 def do_fs_put(u, path, name):

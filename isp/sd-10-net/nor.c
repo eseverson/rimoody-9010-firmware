@@ -35,6 +35,44 @@ int nor_range_ok(unsigned off, unsigned len)
     return 0;
 }
 
+/* The boot blocks (nor.h). Their bounds come from xboot's limits, not from the flash contents: the uImage header sits at
+ * NOR_UBOOT_HDR and its body is at most NOR_UBOOT_MAX bytes, so an environment string outside that body is refused. */
+#define UB_BODY_LO (NOR_UBOOT_HDR + 64u)
+#define UB_BODY_HI (NOR_UBOOT_HDR + 64u + NOR_UBOOT_MAX)
+_Static_assert(UB_BODY_HI <= 0x00C50000u, "U-Boot's largest extent reaches the free region");
+
+static u32 blk_of(u32 a) { return a & ~(NOR_BLOCK - 1); }
+
+int nor_boot_block_ok(unsigned off, unsigned env_off, unsigned env_len)
+{
+    if (off & (NOR_BLOCK - 1))
+        return 0;
+    if (off == NOR_SCRIPT_BLK)
+        return 1;
+    if (env_len == 0 || env_len > NOR_ENV_MAX || env_off < UB_BODY_LO || env_off > UB_BODY_HI - env_len)
+        return 0;
+    return off == blk_of(NOR_UBOOT_HDR) || off == blk_of(env_off) || off == blk_of(env_off + env_len - 1);
+}
+
+int nor_boot_diff_ok(unsigned off, const unsigned char *live, const unsigned char *blk, unsigned env_off,
+                     unsigned env_len)
+{
+    if (!nor_boot_block_ok(off, env_off, env_len))
+        return 0;
+    if (off == NOR_SCRIPT_BLK)   /* a legacy uImage; install.c checks that it is our script and what it replaces */
+        return blk[0] == 0x27 && blk[1] == 0x05 && blk[2] == 0x19 && blk[3] == 0x56;
+    for (u32 i = 0; i < NOR_BLOCK; i++) {
+        if (live[i] == blk[i])
+            continue;
+        u32 a = off + i;
+        int env = a >= env_off && a < env_off + env_len;
+        int sum = (a >= NOR_UBOOT_HDR + 4 && a < NOR_UBOOT_HDR + 8) || (a >= NOR_UBOOT_HDR + 24 && a < NOR_UBOOT_HDR + 28);
+        if (!env && !sum)
+            return 0;
+    }
+    return 1;
+}
+
 unsigned nor_page_chunk(unsigned off, unsigned len)
 {
     u32 room = NOR_PAGE - (off & (NOR_PAGE - 1));
@@ -70,6 +108,7 @@ const char *nor_strerror(int e)
     case NOR_ESTATE: return "unexpected controller state";
     case NOR_EVERIFY: return "verify mismatch";
     case NOR_ENOTBLANK: return "target not erased";
+    case NOR_ECHANGED: return "boot block changed since the plan";
     }
     return "?";
 }
@@ -124,6 +163,15 @@ static int tmo(u32 cmd, u32 where, u32 aux, u32 us)   /* record a timeout; retur
 {
     tmo_stage = stage, tmo_cmd = cmd, tmo_where = where, tmo_ctrl = R(CTRL), tmo_auto = aux, tmo_us = us;
     return NOR_ETIME;
+}
+/* the one boot block nor_boot_write is rewriting right now (~0 otherwise): the only place outside the free region an
+ * erase unit or a page program may land */
+static u32 boot_blk = ~0u;
+static int unit_ok(u32 off, u32 n)
+{
+    if (nor_range_ok(off, n))
+        return 1;
+    return boot_blk != ~0u && off >= boot_blk && n <= NOR_BLOCK && off - boot_blk <= NOR_BLOCK - n;
 }
 static int suspended;
 static u32 s_auto, s_cfg0, s_cfg1;
@@ -251,7 +299,7 @@ static int dma_read(u32 off, u32 n, u32 cmd)
  * after it are additions: U-Boot relies on the controller for both) */
 static int dma_program(u32 off, u32 n)
 {
-    if (!nor_range_ok(off, n) || nor_page_chunk(off, n) != n)
+    if (!unit_ok(off, n) || nor_page_chunk(off, n) != n)
         return NOR_EARG;
     int r = wren();
     if (r || (r = wait_bit(CTRL, CTRL_BUSY, 0, HW_TMO)))
@@ -406,25 +454,17 @@ static void xip_fresh(u32 off, u32 len)
     (void)*(volatile u32 *)(NOR_XIP + 0x10000u);
 }
 
-int nor_erase(unsigned off, unsigned len)
+/* the erase / program loops; the caller has checked the span, run write_ok and cleared the protection. Every erase unit
+ * and every page is checked again (unit_ok). */
+static int erase_span(u32 off, u32 len)
 {
-    if ((off | len) & (NOR_SECTOR - 1) || !nor_range_ok(off, len))
-        return NOR_EARG;
-    int r = write_ok();
-    if (r)
-        return r;
-    if ((r = wp_clear())) {
-        wp_restore();
-        return r;
-    }
+    int r = 0;
     while (len && !r) {
         int blk = !(off & (NOR_BLOCK - 1)) && len >= NOR_BLOCK;
         u32 n = blk ? NOR_BLOCK : NOR_SECTOR;
         stage = blk ? "erase64" : "erase";
-        if (!nor_range_ok(off, n)) {   /* cannot happen: the whole span was checked; fail closed anyway */
-            r = NOR_EARG;
-            break;
-        }
+        if (!unit_ok(off, n))   /* cannot happen: the whole span was checked; fail closed anyway */
+            return NOR_EARG;
         begin();
         r = wren();
         if (!r)
@@ -436,6 +476,40 @@ int nor_erase(unsigned off, unsigned len)
         end();
         off += n, len -= n;
     }
+    return r;
+}
+
+static int program_span(u32 off, const u8 *s, u32 len, int skip_ff)   /* skip_ff: leave all-0xFF pages alone */
+{
+    int r = 0;
+    while (len && !r) {
+        u32 n = nor_page_chunk(off, len), ff = 1;
+        stage = "program";
+        for (u32 i = 0; i < n; i++)
+            ff &= (dbuf[i] = s[i]) == 0xff;
+        if (!(skip_ff && ff)) {
+            dc((u32)dbuf, n, 1, 0);
+            begin();
+            r = dma_program(off, n);
+            end();
+        }
+        s += n, off += n, len -= n;
+    }
+    return r;
+}
+
+int nor_erase(unsigned off, unsigned len)
+{
+    if ((off | len) & (NOR_SECTOR - 1) || !nor_range_ok(off, len))
+        return NOR_EARG;
+    int r = write_ok();
+    if (r)
+        return r;
+    if ((r = wp_clear())) {
+        wp_restore();
+        return r;
+    }
+    r = erase_span(off, len);
     int r2 = wp_restore();
     return r ? r : r2;
 }
@@ -451,20 +525,107 @@ int nor_program(unsigned off, const void *src, unsigned len)
         wp_restore();
         return r;
     }
-    const u8 *s = src;
-    while (len && !r) {
-        u32 n = nor_page_chunk(off, len);
-        stage = "program";
-        for (u32 i = 0; i < n; i++)
-            dbuf[i] = s[i];
-        dc((u32)dbuf, n, 1, 0);
-        begin();
-        r = dma_program(off, n);
-        end();
-        s += n, off += n, len -= n;
-    }
+    r = program_span(off, src, len, 0);
     int r2 = wp_restore();
     return r ? r : r2;
+}
+
+static u8 cbuf[DMA_MAX];
+
+/* non-0xFF bytes in [off, off + len) through the controller (*bad_c) and through the XIP window (*bad_x) */
+int nor_blank(unsigned off, unsigned len, unsigned *bad_c, unsigned *bad_x)
+{
+    if (off >= NOR_SIZE || len > NOR_SIZE - off)
+        return NOR_EARG;
+    xip_fresh(off, len);
+    *bad_c = *bad_x = 0;
+    for (u32 done = 0; done < len;) {
+        u32 n = len - done < DMA_MAX ? len - done : DMA_MAX;
+        int r = nor_read(off + done, cbuf, n, NOR_RD);
+        if (r)
+            return r;
+        const volatile u8 *x = (const volatile u8 *)(NOR_XIP + off + done);
+        for (u32 i = 0; i < n; i++)
+            *bad_c += cbuf[i] != 0xff, *bad_x += x[i] != 0xff;
+        done += n;
+    }
+    return 0;
+}
+
+/* bytes of [off, off + len) that differ from ram, through the controller (*bad_c) and through the XIP window (*bad_x) */
+int nor_verify(unsigned off, const void *ram, unsigned len, unsigned *bad_c, unsigned *bad_x)
+{
+    if (off >= NOR_SIZE || len > NOR_SIZE - off)
+        return NOR_EARG;
+    const u8 *m = ram;
+    xip_fresh(off, len);
+    *bad_c = *bad_x = 0;
+    for (u32 done = 0; done < len;) {
+        u32 n = len - done < DMA_MAX ? len - done : DMA_MAX;
+        int r = nor_read(off + done, cbuf, n, NOR_RD);
+        if (r)
+            return r;
+        const volatile u8 *x = (const volatile u8 *)(NOR_XIP + off + done);
+        for (u32 i = 0; i < n; i++)
+            *bad_c += cbuf[i] != m[done + i], *bad_x += x[i] != m[done + i];
+        done += n;
+    }
+    return 0;
+}
+
+/* Stage 1 of the install: rewrite one boot block. The block must be one nor_boot_block_ok accepts, and the live block (a
+ * fresh controller read, not the plan's copy) must either still have the CRC the plan saw, with the new block differing
+ * from it only where nor_boot_diff_ok allows, or consist of nothing but 0xFF and bytes of the new block: what an
+ * earlier, interrupted write of this same plan leaves (a retry; the plan's diff was checked against the original).
+ * A block that already equals the new one is left alone. Page 0 (the script's uImage header) is programmed last, so an
+ * interrupted script write never shows a valid header. While it runs, boot_blk lets exactly this block through
+ * unit_ok. */
+int nor_boot_write(unsigned off, const void *blk, unsigned live_crc, unsigned env_off, unsigned env_len, void *scratch)
+{
+    if (!nor_boot_block_ok(off, env_off, env_len) || !scratch)
+        return NOR_EARG;
+    int r = write_ok();
+    if (r)
+        return r;
+    u8 *live = scratch;
+    if ((r = nor_read(off, live, NOR_BLOCK, NOR_RD)))
+        return r;
+    const u8 *nb = blk;
+    u32 i = 0;
+    while (i < NOR_BLOCK && live[i] == nb[i])
+        i++;
+    if (i == NOR_BLOCK)
+        return 0;
+    if (crc32_le(live, NOR_BLOCK) == live_crc) {
+        if (!nor_boot_diff_ok(off, live, blk, env_off, env_len))
+            return NOR_EARG;
+    } else {
+        for (i = 0; i < NOR_BLOCK; i++)
+            if (live[i] != 0xff && live[i] != nb[i])
+                return NOR_ECHANGED;
+        if (off == NOR_SCRIPT_BLK && !nor_boot_diff_ok(off, live, blk, env_off, env_len))
+            return NOR_EARG;
+    }
+    if ((r = wp_clear())) {
+        wp_restore();
+        return r;
+    }
+    boot_blk = off;
+    r = erase_span(off, NOR_BLOCK);
+    if (!r)
+        r = program_span(off + NOR_PAGE, (const u8 *)blk + NOR_PAGE, NOR_BLOCK - NOR_PAGE, 1);
+    if (!r)
+        r = program_span(off, blk, NOR_PAGE, 1);
+    boot_blk = ~0u;
+    int r2 = wp_restore();
+    if (r)
+        return r;
+    u32 bc, bx;
+    if ((r = nor_verify(off, blk, NOR_BLOCK, &bc, &bx)))
+        return r;
+    if (bc || bx)
+        return NOR_EVERIFY;
+    return r2;
 }
 
 /* ---- HU1 op 29 ----
@@ -477,10 +638,10 @@ int nor_program(unsigned off, const void *src, unsigned len)
  * 4 erase    u32 magic, u32 off: one 4 KB sector, then a blank check (controller and XIP)
  * 5 erase64  u32 magic, u32 off: one 64 KB block, then a blank check
  * 6 program  u32 magic, u32 off, u32 src, u32 len: the target must read blank first; then verify (len <= 64 KB)
- * Writes need NOR_MAGIC, an address range nor_range_ok accepts and the JEDEC ID NOR_JEDEC. */
+ * Writes need NOR_MAGIC, an address range nor_range_ok accepts and the JEDEC ID NOR_JEDEC. Sub-ops 7 and 8 (whole-flash
+ * backup) live in net.c, 9..13 (install to flash, the only path to the boot blocks) in install.c. */
 static u32 le32(const u8 *p) { return p[0] | p[1] << 8 | p[2] << 16 | (u32)p[3] << 24; }
 static int ram_ok(u32 a, u32 n) { return a >= 0x00100000u && a < MM_DRAM_END && n <= MM_DRAM_END - a; }
-static u8 cbuf[DMA_MAX];
 
 /* controller read of [off, off + len) against RAM (ram != 0) and against the XIP window; counts and first mismatch */
 static int compare(u32 off, u32 len, const u8 *ram, u32 cmd, char *o, nor_fmt fmt)
@@ -514,24 +675,6 @@ static int compare(u32 off, u32 len, const u8 *ram, u32 cmd, char *o, nor_fmt fm
     if (bad_c || bad_x)
         k += fmt(o + k, " (controller %u bad from %06x, xip %u bad from %06x)", bad_c, first_c, bad_x, first_x);
     return k;
-}
-
-/* non-0xFF bytes in [off, off + len) through the controller (*bad_c) and through the XIP window (*bad_x) */
-static int blank(u32 off, u32 len, u32 *bad_c, u32 *bad_x)
-{
-    xip_fresh(off, len);
-    *bad_c = *bad_x = 0;
-    for (u32 done = 0; done < len;) {
-        u32 n = len - done < DMA_MAX ? len - done : DMA_MAX;
-        int r = nor_read(off + done, cbuf, n, NOR_RD);
-        if (r)
-            return r;
-        const volatile u8 *x = (const volatile u8 *)(NOR_XIP + off + done);
-        for (u32 i = 0; i < n; i++)
-            *bad_c += cbuf[i] != 0xff, *bad_x += x[i] != 0xff;
-        done += n;
-    }
-    return 0;
 }
 
 int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt)
@@ -591,7 +734,7 @@ int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt)
             o += fmt(o, "nor erase %06x+%x: %s, %u ms", off, len, nor_strerror(r), (u32)((clk_us() - t) / 1000));
             u32 bc, bx;
             if (r == 0 || r == NOR_EWP) {   /* the erase itself finished: look at the result */
-                int b = blank(off, len, &bc, &bx);
+                int b = nor_blank(off, len, &bc, &bx);
                 o += b ? fmt(o, "; blank check: %s", nor_strerror(b))
                        : fmt(o, "; blank check: controller %u, xip %u non-FF bytes%s", bc, bx, bc || bx ? "" : " (BLANK)");
             }
@@ -601,7 +744,7 @@ int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt)
         if (n < 17 || !nor_range_ok(off, len) || len > NOR_BLOCK || !ram_ok(src, len))
             return fmt(o, "ERR nor program %06x+%x: inside the allowed range, len <= 64 KB, src in DRAM", off, len);
         u32 bc, bx;
-        int b = blank(off, len, &bc, &bx);
+        int b = nor_blank(off, len, &bc, &bx);
         if (b || bc || bx)
             return fmt(o, "ERR nor program %06x+%x: target not blank (read %s, controller %u, xip %u non-FF bytes)", off,
                        len, nor_strerror(b), bc, bx);
@@ -613,6 +756,7 @@ int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt)
             return o - out;
         return o - out + compare(off, len, (const u8 *)src, NOR_RD, o, fmt);
     }
-    return fmt(o, "ERR nor sub-op: 0 status, 1 compare, 2 read, 3 verify, 4 erase, 5 erase64, 6 program");
+    return fmt(o, "ERR nor sub-op: 0 status, 1 compare, 2 read, 3 verify, 4 erase, 5 erase64, 6 program, 7 dump, "
+                  "8 dump status, 9..13 install");
 }
 #endif

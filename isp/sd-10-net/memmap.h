@@ -63,6 +63,8 @@
 #define MM_LVGL_HEAP_SZ   0x00100000u
 #define MM_LVGL_DRAW      0x02B00000u   /* LVGL partial draw buffer, 1024 x 120 x 4 */
 #define MM_LVGL_DRAW_SZ   0x00078000u
+#define MM_INSTALL        0x02B80000u   /* install to flash (install.c): the image being copied, then the plan's blocks */
+#define MM_INSTALL_SZ     0x00380000u
 #define MM_TRAMP          0x02F00000u   /* EXEC trampoline (tramp.ld), argv at +0xF000 */
 #define MM_TRAMP_SZ       0x00010000u
 #define MM_UPLOAD         0x03000000u   /* hu.py uploads (EXEC images up to 0x180000, tools/fb.py to 0x032F0080) */

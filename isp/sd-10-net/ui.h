@@ -43,6 +43,7 @@ void plat_ui_log(const char *s);                /* a line into the payload's log
 void plat_ui_wifi_set(const char *ssid, const char *psk);   /* rewrite WIFI.TXT's ssid=/psk= and restart */
 void plat_ui_nor_dump(void);                     /* back up the whole flash to NORDUMP.BIN on the card */
 int plat_ui_nor_dump_status(char *out, int max); /* one line: idle, progress or the result */
-int plat_ui_install_status(char *out, int max);  /* is the NOR boot script (SD BOOT.BIN at power-on) installed */
+int plat_ui_install_status(char *out, int max);  /* one line: boot order installed, install progress or result */
+void plat_ui_install(int stage);                 /* 1 the boot path (SD, flash copy, stock), 2 this firmware to flash */
 
 #endif

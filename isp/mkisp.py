@@ -75,12 +75,13 @@ def check_stock_uboot(img):
     return None
 
 
-def mkscript(text, name):
+def mkscript(text, name, stamp=None):
+    """Legacy script uImage; stamp = header time (default now; install.c's built-in script uses 0)."""
     data = text.encode('ascii')
     if not data.endswith(b'\n'):
         data += b'\n'
     payload = struct.pack('>II', len(data), 0) + data
-    hdr = bytearray(struct.pack('>7I4B32s', IH_MAGIC, 0, int(time.time()), len(payload), 0, 0,
+    hdr = bytearray(struct.pack('>7I4B32s', IH_MAGIC, 0, int(time.time()) if stamp is None else stamp, len(payload), 0, 0,
                                 zlib.crc32(payload) & 0xFFFFFFFF, 5, IH_ARCH_NDS32, IH_TYPE_SCRIPT, 0,
                                 name.encode()[:31]))
     struct.pack_into('>I', hdr, 4, zlib.crc32(bytes(hdr)) & 0xFFFFFFFF)

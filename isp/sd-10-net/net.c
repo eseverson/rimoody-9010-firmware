@@ -110,6 +110,7 @@ typedef int (*bulk_fn)(void *dev, u32 pipe, void *data, int len, int *actual, in
 #include "fatfs/ff.h"
 #include "audio.h"
 #include "nor.h"
+#include "install.h"
 
 /* ---- time budget, in ub_ms(0) (which starts ~3 s after U-Boot itself; the unit resets ~150 s after U-Boot) ---- */
 #define EHCI_BULK_MS   5000    /* ehci_submit_async gives up on a bulk TD after 5000 ms, others after 1000 (0xf7e562) */
@@ -3602,27 +3603,15 @@ void plat_ui_settings_save(const char *kv)
 void plat_ui_video_hide(void) { ui_req_hide = 1; }
 void plat_ui_log(const char *m) { log_s(m); }
 
-/* the NOR boot-script install (tools/flash_bootcmd.py): a U-Boot script image named "nor boot script" at flash
- * 0xE00000 and "source 98e00000" in U-Boot's default environment block at 0x920000 (flash is mapped at 0x98000000) */
-int plat_ui_install_status(char *out, int max)
+/* Install to flash (install.c): Settings > System queues the request, the net task runs it */
+int plat_ui_install_status(char *out, int max) { return install_line(out, max); }
+void plat_ui_install(int stage) { install_request(stage); }
+int plat_load_file(const char *name, void *dst, unsigned max, unsigned *len)
 {
-    const volatile u8 *sc = (const volatile u8 *)0x98e00000u, *env = (const volatile u8 *)0x98920000u;
-    int script = sc[0] == 0x27 && sc[1] == 0x05 && sc[2] == 0x19 && sc[3] == 0x56;
-    static const char nm[] = "nor boot script", want[] = "source 98e00000";
-    for (int i = 0; script && nm[i]; i++)
-        script = sc[0x20 + i] == (u8)nm[i];
-    int envok = 0;
-    for (u32 i = 0; i < 0x10000 - 16 && !envok; i++) {
-        int j = 0;
-        while (want[j] && env[i + j] == (u8)want[j])
-            j++;
-        envok = !want[j];
-    }
-    (void)max;
-    if (script && envok)
-        return vfmt_n(out, "Installed: the SD card's BOOT.BIN starts at power-on");
-    return vfmt_n(out, "Not installed (script %s, bootcmd %s): run tools/flash_bootcmd.py", script ? "ok" : "missing",
-                  envok ? "ok" : "stock");
+    u32 n = 0;
+    int r = fs_load(name, dst, max, &n);
+    *len = n;
+    return r;
 }
 static char ui_wifi_ssid[33], ui_wifi_psk[64];
 static volatile int ui_req_wifi;
@@ -4127,7 +4116,11 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         return vfmt_n(t, "ap: starting on channel %d as '%s' after this reply; this network connection ends", ch, ap_req_ssid);
     }
     case 29:   /* NOR (nor.c): 0 status, 1 compare, 2 read, 3 verify (read-only); 4 erase, 5 erase64, 6 program (magic);
-                * 7 dump the whole flash to NORDUMP.BIN, 8 dump status (net.c) */
+                * 7 dump the whole flash to NORDUMP.BIN, 8 dump status (net.c); 9..13 install to flash (install.c) */
+        if (n >= 1 && p[0] >= 9 && p[0] <= 13)
+            return install_op(p, n, t, vfmt_n);
+        if (n >= 1 && p[0] >= 4 && p[0] <= 6 && install_busy())
+            return vfmt_n(t, "ERR nor: an install is writing the flash");
         if (n >= 1 && p[0] == 7) {
             int r = nor_dump_start();
             return r == -1 ? vfmt_n(t, "ERR nor dump: already running") : nor_dump_status(t);
@@ -4773,6 +4766,7 @@ static void net_loop(void)
         aud_poll();
         mic_rec_poll();
         nor_dump_poll();
+        install_poll();
         if (ui_req_dump) {
             ui_req_dump = 0;
             nor_dump_start();
@@ -5093,6 +5087,8 @@ int payload_entry(int argc, char *const argv[])
     report_cpu();
     if (check_uboot())
         return 2;   /* log stays in RAM at 0x1a00000; calling U-Boot now is unsafe */
+    /* what the NOR boot script (version 2) loaded at power-on; the version 1 script and EXEC leave no hu_src */
+    install_set_boot_src(run("test \"$hu_src\" = nor") == 0 ? 2 : run("test \"$hu_src\" = sd") == 0 ? 1 : 0);
     {   /* Settings > Boot stock: a one-shot flag; U-Boot's own bootsp starts the stock eCos */
         static u8 f[8];
         u32 n;

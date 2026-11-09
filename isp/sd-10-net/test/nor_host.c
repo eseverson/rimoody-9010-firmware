@@ -103,9 +103,55 @@ static void wp_decode(void)
     CHECK(nor_wp_range(0x40, 0x00, &lo, &hi) == 0);
 }
 
+static void boot_guard(void)
+{
+    static unsigned char live[NOR_BLOCK], blk[NOR_BLOCK];
+    unsigned env = 0x92F09B;   /* where the original dump keeps U-Boot's default environment */
+    CHECK(nor_boot_block_ok(NOR_SCRIPT_BLK, env, 44));
+    CHECK(nor_boot_block_ok(0x8A0000, env, 44));        /* the uImage header's block */
+    CHECK(nor_boot_block_ok(0x920000, env, 44));        /* the environment's block */
+    CHECK(!nor_boot_block_ok(0x930000, env, 44));
+    CHECK(nor_boot_block_ok(0x930000, 0x92FFF0, 44));   /* an environment across a block boundary: both blocks */
+    CHECK(nor_boot_block_ok(0x920000, 0x92FFF0, 44));
+    CHECK(!nor_boot_block_ok(0x920001, env, 44));
+    CHECK(!nor_boot_block_ok(0x000000, env, 44));       /* xboot */
+    CHECK(!nor_boot_block_ok(0xFC0000, env, 44));       /* eCos settings */
+    CHECK(!nor_boot_block_ok(0xC70000, 0xC70000, 44));  /* an "environment" outside U-Boot's largest extent */
+    CHECK(!nor_boot_block_ok(0x8A0000, NOR_UBOOT_HDR, 44));   /* inside the header, not the body */
+    CHECK(!nor_boot_block_ok(0x920000, env, 0) && !nor_boot_block_ok(0x920000, env, 65));
+    /* every block of the flash: only the three */
+    int n = 0;
+    for (unsigned a = 0; a < NOR_SIZE; a += NOR_BLOCK)
+        n += nor_boot_block_ok(a, env, 44);
+    CHECK(n == 3);
+    /* the diff rule: environment bytes and the two sum words only */
+    for (unsigned i = 0; i < NOR_BLOCK; i++)
+        live[i] = blk[i] = (unsigned char)(i * 7);
+    CHECK(nor_boot_diff_ok(0x920000, live, blk, env, 44));
+    blk[env - 0x920000] ^= 1, blk[env + 43 - 0x920000] ^= 1;
+    CHECK(nor_boot_diff_ok(0x920000, live, blk, env, 44));
+    blk[env + 44 - 0x920000] ^= 1;
+    CHECK(!nor_boot_diff_ok(0x920000, live, blk, env, 44));
+    for (unsigned i = 0; i < NOR_BLOCK; i++)
+        blk[i] = live[i];
+    unsigned h = NOR_UBOOT_HDR - 0x8A0000;
+    blk[h + 4] ^= 1, blk[h + 7] ^= 1, blk[h + 24] ^= 1, blk[h + 27] ^= 1;
+    CHECK(nor_boot_diff_ok(0x8A0000, live, blk, env, 44));
+    blk[h + 12] ^= 1;   /* the size word: never */
+    CHECK(!nor_boot_diff_ok(0x8A0000, live, blk, env, 44));
+    blk[h + 12] ^= 1, blk[h + 3] ^= 1;
+    CHECK(!nor_boot_diff_ok(0x8A0000, live, blk, env, 44));
+    blk[0] = 0x27, blk[1] = 0x05, blk[2] = 0x19, blk[3] = 0x56;   /* the script block: a uImage */
+    CHECK(nor_boot_diff_ok(NOR_SCRIPT_BLK, live, blk, env, 44));
+    blk[0] = 0xff;
+    CHECK(!nor_boot_diff_ok(NOR_SCRIPT_BLK, live, blk, env, 44));
+    CHECK(!nor_boot_diff_ok(0xC70000, live, live, env, 44));
+}
+
 int main(void)
 {
     range_guard();
+    boot_guard();
     page_split();
     wp_decode();
     CHECK(nor_strerror(NOR_EARG)[0] != '?' && nor_strerror(12345)[0] == '?');

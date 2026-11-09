@@ -21,6 +21,15 @@
 #define NOR_ESTATE   -7   /* controller state other than the one the U-Boot sequence was taken from */
 #define NOR_EVERIFY  -8   /* read back differs */
 #define NOR_ENOTBLANK -9  /* program target is not erased */
+#define NOR_ECHANGED  -10 /* a boot block no longer holds what the install plan read */
+
+/* Boot blocks (install.c, stage 1; notes/nor_install.md): outside the free region, the only blocks that may ever be
+ * rewritten are the NOR boot script block, the block holding the U-Boot uImage header (its two xboot word sums) and the
+ * block(s) holding U-Boot's default environment string, and only through nor_boot_write(). */
+#define NOR_UBOOT_HDR  0x008A40E0u   /* xboot loads U-Boot's legacy uImage from here (isp/mkisp.py FLASH_UBOOT_HDR) */
+#define NOR_UBOOT_MAX  0x001FFFC0u   /* xboot's largest U-Boot body ("image is too big") */
+#define NOR_SCRIPT_BLK 0x00E00000u   /* the NOR boot script (`bootcmd=source 98e00000;bootsp`) */
+#define NOR_ENV_MAX    64u           /* longest environment span stage 1 may change */
 
 /* pure helpers (host-tested by test/nor_host.c) */
 int nor_range_ok(unsigned off, unsigned len);      /* 1 if [off, off + len) lies inside one allowed write range */
@@ -28,6 +37,10 @@ unsigned nor_page_chunk(unsigned off, unsigned len);   /* bytes from off to the 
 int nor_wp_range(unsigned sr1, unsigned sr2, unsigned *lo, unsigned *hi);   /* protected [lo, hi): 0 none, 1 range,
                                                                               * -1 not decoded (SEC = 1) */
 const char *nor_strerror(int e);
+int nor_boot_block_ok(unsigned off, unsigned env_off, unsigned env_len);   /* 1: off is one of the boot blocks above
+                                                                            * for an environment at env_off */
+int nor_boot_diff_ok(unsigned off, const unsigned char *live, const unsigned char *blk, unsigned env_off,
+                     unsigned env_len);   /* 1: the new block changes only the bytes stage 1 may change */
 
 /* the driver */
 int nor_jedec(unsigned *id);                        /* 0x9F: manufacturer << 16 | type << 8 | capacity */
@@ -36,6 +49,13 @@ int nor_read(unsigned off, void *dst, unsigned len, unsigned cmd);   /* controll
 int nor_erase(unsigned off, unsigned len);          /* 4 KB aligned; 64 KB blocks where aligned, sectors elsewhere */
 int nor_program(unsigned off, const void *src, unsigned len);   /* split on page boundaries; the caller makes
                                                                  * sure the target is erased (the HU1 op checks) */
+
+int nor_blank(unsigned off, unsigned len, unsigned *bad_c, unsigned *bad_x);   /* non-0xFF bytes: controller, XIP */
+int nor_verify(unsigned off, const void *ram, unsigned len, unsigned *bad_c, unsigned *bad_x);   /* mismatches vs RAM */
+int nor_boot_write(unsigned off, const void *blk, unsigned live_crc, unsigned env_off, unsigned env_len,
+                   void *scratch);   /* rewrite one boot block (64 KB): fresh read of the live block (into scratch, 64 KB)
+                                      * must have crc live_crc and differ from blk only where nor_boot_diff_ok allows;
+                                      * erase, program (page 0 last), verify through the controller and XIP */
 
 typedef int (*nor_fmt)(char *, const char *, ...);
 int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt);   /* HU1 op 29, see nor.c */
