@@ -738,7 +738,13 @@ static void show_page(int i)
     }
 }
 
-static void nav_cb(lv_event_t *e) { show_page((int)(intptr_t)lv_event_get_user_data(e)); }
+static void nav_cb(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    show_page(i);
+    if (i == 4)
+        plat_ui_install(3);   /* System: refresh the install status line (reads the flash, so only on demand) */
+}
 
 static lv_obj_t *page(lv_obj_t *parent, int i, const char *name, lv_obj_t *nav)
 {

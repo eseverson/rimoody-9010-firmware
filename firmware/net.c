@@ -5087,8 +5087,9 @@ int payload_entry(int argc, char *const argv[])
     report_cpu();
     if (check_uboot())
         return 2;   /* log stays in RAM at 0x1a00000; calling U-Boot now is unsafe */
-    /* what the NOR boot script (version 2) loaded at power-on; the version 1 script and EXEC leave no hu_src */
-    install_set_boot_src(run("test \"$hu_src\" = nor") == 0 ? 2 : run("test \"$hu_src\" = sd") == 0 ? 1 : 0);
+    /* Not asked at boot: running U-Boot's `test "$hu_src" = ...` here made every cold boot lose AA's first picture
+     * (decoder timeout, then "list modification names a missing frame" until the next IDR); with the two calls removed
+     * the same build decodes cleanly. `hu.py cmd 'printenv hu_src'` shows the boot source instead. */
     {   /* Settings > Boot stock: a one-shot flag; U-Boot's own bootsp starts the stock eCos */
         static u8 f[8];
         u32 n;

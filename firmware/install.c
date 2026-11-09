@@ -786,7 +786,6 @@ static void step_copy(void)
 
 void install_poll(void)
 {
-    static int first = 1;
     if (job == 1) {
         step_boot();
         return;
@@ -795,12 +794,10 @@ void install_poll(void)
         step_copy();
         return;
     }
-    int r = req;
-    if (first && !r && clk_ms() > 20000)   /* the Settings status line, once after boot */
-        r = 3;
+    int r = req;   /* no refresh at boot: its flash reads hold the net task long enough to cost AA its first picture */
     if (!r)
         return;
-    req = 0, first = 0;
+    req = 0;
     char t[200];
     if (r == 1)
         start_boot(t, plat_fmt);
