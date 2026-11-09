@@ -12,12 +12,12 @@ Working on the unit today:
 - LVGL v9 UI on the OSD0 layer: home screen with dock, settings (Wi-Fi, display brightness and theme, audio EQ, Android Auto), text console view, GT911 touch and the five front touch buttons.
 - Audio: bare-metal DSP bring-up, mixer for AA media / guidance / system audio, 10-band EQ.
 - Hardware H.264 decoding (MFD) shown full rate through the VPP0 video layer.
-- Wireless Android Auto end to end with a real phone: Bluetooth RFCOMM handshake through the AC6965A, Wi-Fi either via the home network or the unit's own "car network" access point, TLS, video, audio and touch.
+- Wireless Android Auto end to end with a real phone: Bluetooth RFCOMM handshake through the AC6965A, Wi-Fi either via the home network or the unit's own "car network" access point, TLS, video, audio and touch, and the microphone for the assistant (front pinhole mic through the DSP's hands-free uplink).
 - Bluetooth: name sent at boot, reconnect to the last phone after power-up with `ac 30` (awaiting validation in the car).
 
 AA video throughput: TLS decryption in software (own AES-GCM in `gcm_alt.c`), delayed TCP ACKs, queued USB transmits and background decoding take a 720p stream to 81-87 fps with AES-128-GCM (103-108 fps with ChaCha20-Poly1305), well above the phone's 30-60 fps.
 
-In progress: occasional audio skips during AA (`notes/android_auto.md`, "Stutter hunt"), VPP0 tearing and downscaling, and Wi-Fi join reliability. Not built yet: the microphone (AA voice), Bluetooth hands-free calls, steering-wheel buttons, reverse camera, FM radio, AUX and wired AA.
+In progress: occasional audio skips during AA (`notes/android_auto.md`, "Stutter hunt"), VPP0 tearing and downscaling, and Wi-Fi join reliability. Not built yet: Bluetooth hands-free calls, steering-wheel buttons, reverse camera, FM radio, AUX and wired AA.
 
 ## Hardware
 
