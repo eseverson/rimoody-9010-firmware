@@ -595,9 +595,21 @@ static int mic_start_seq(void)
     return 0;
 }
 
+/* Mic preamp boost, 0x1F58 bits 23:21 / 26:24 (code 0 = +40 dB, 1 = +30, 2 = +27.5, 3 = +21, 4 = +12, 5 = +9, 6 = 0,
+ * 7 = off), written with 0x1E18 bit 30 set around it as stock does. Boot leaves 0 dB; stock CarPlay and CarLife set
+ * +30 dB before recording (stock AA does not, and the front pinhole then reaches only about -54 dBFS for loud speech). */
+static void mic_boost(u32 code)
+{
+    u32 r = REG(0x1e18);
+    REG(0x1e18) = r | 0x40000000u;
+    REG(0x1f58) = (REG(0x1f58) & ~0x07e00000u) | code << 24 | code << 21;
+    REG(0x1e18) = r & ~0x40000000u;
+}
+
 int aud_mic_start(void)
 {
     mic_on = 0;
+    mic_boost(1);
     int r = mic_start_seq();
     if (!r) {
         mic_on = 1;
@@ -619,6 +631,7 @@ void aud_mic_stop(void)   /* uplink_stop (AUDIF_Set(0x43, 0)), then clear: W and
     if (mic_on)
         mic_ms = (u32)((clk_us() - mic_t0) / 1000);
     mic_on = 0;
+    mic_boost(6);
     if (state(6) != 0 && state(6) != 2) {
         send_cmd(0, 6, 2, 0);
         wait_state(6, 2);
