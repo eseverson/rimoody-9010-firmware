@@ -158,3 +158,8 @@ Nothing about U-Boot's internals is hard-coded except the header address 0x8A40E
 - With BOOT.BIN missing, `isp_dev` stays 0 when the NOR copy boots, even if the card sits in slot 1. The payload's U-Boot-side card access (`fatload`/`fatwrite $isp_if $isp_dev`) then points at slot 0; its own SD driver is not affected.
 - The magic word is programmed into a page that was already programmed (partial page program). Standard for SPI NOR; the on-unit read-back confirms it on this part.
 - Program speed for 64 KB through the driver is not measured yet; the step sizes assume well under a second per chunk.
+
+## On-unit results
+
+- 2026-11-09, build 20261109-143623 (EXEC'd): `install status` as expected (env patched at 92f09b, script v1, region blank); `install script` rebuilt identical; dry run `sd` → `go` + `hu_ok=1 hu_src=sd`, `nor` (before stage 2) → magic mismatch, no `go`. Stage 1 (`install boot --write`): one block, 316 ms, verified, script block now "nor boot script v2". The next boot (an unrelated reset of the EXEC'd build) and a later power cycle both came up through the v2 script from the SD card (`hu_src=sd`).
+- Build 20261109-151530 (cold boot from the card): stage 2 (`install firmware --write`) wrote copy #1, 1192144 bytes, CRC 5a6cfaba, region status "CRC ok: boots". Dry run `nor` after stage 2: all three `cmp.l` same, `go` + `hu_ok=1 hu_src=nor`, and the image copied to 0x03100000 has CRC 5a6cfaba, the card's BOOT.BIN. Not yet done: a real power-on with no BOOT.BIN on the card.
