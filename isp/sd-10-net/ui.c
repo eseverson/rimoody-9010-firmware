@@ -38,6 +38,7 @@ static int volume = 20, muted, dark = 1;
  * (dark while the headlights are on) */
 static int bright_day = 100, bright_night = 40, theme_mode = 1;
 static int lights;   /* debounced headlight input */
+static int card_log = CARD_LOG_DEFAULT;   /* UI.TXT cardlog=: crash, shutdown and car logs on the SD card */
 static int boot_console = 1;   /* UI.TXT boot=1: power up into the text console (Home goes to the home screen) */
 /* equalizer: 10 octave bands (audio.c), -12..+12 dB each; presets are ours, not stock's */
 #define EQ_N 10
@@ -341,19 +342,21 @@ static void settings_load(void)
     wifi_mode = kv_int(settings_text, "wifimode", wifi_mode, 0, 1);
     volume = kv_int(settings_text, "vol", volume, 0, VOL_MAX);
     boot_console = kv_int(settings_text, "boot", boot_console, 0, 1);
+    card_log = kv_int(settings_text, "cardlog", card_log, 0, 1);
     kv_list(settings_text, "eq", eq_db, EQ_N, -12, 12);
     plat_ui_aa_enable(aa_enabled);
     plat_ui_aa_dpi(aa_dpi);
     plat_ui_bt_name(bt_name);
     plat_ui_wifi_mode(wifi_mode);
+    plat_ui_card_log(card_log);
 }
 
 static void settings_save(void)
 {
     char t[256];
-    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nbtname=%s\nwifimode=%d\nvol=%d\nboot=%d\neq=",
+    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nbtname=%s\nwifimode=%d\nvol=%d\nboot=%d\ncardlog=%d\neq=",
                         bright_day, bright_night, theme_mode, aa_enabled, aa_dpi, bt_name, wifi_mode, volume,
-                        boot_console);
+                        boot_console, card_log);
     for (int i = 0; i < EQ_N; i++)
         k += lv_snprintf(t + k, sizeof t - (unsigned)k, "%d%s", eq_db[i], i < EQ_N - 1 ? "," : "\n");
     plat_ui_settings_save(t);
@@ -453,6 +456,13 @@ static void wifi_mode_cb(lv_event_t *e)
     }
     wifi_mode = (int)i;
     plat_ui_wifi_mode(wifi_mode);
+    settings_save();
+}
+
+static void card_log_cb(lv_event_t *e)
+{
+    card_log = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    plat_ui_card_log(card_log);
     settings_save();
 }
 
@@ -929,6 +939,11 @@ static void build_settings(void)
     lv_obj_set_size(bt, 360, 64);
     lv_obj_set_style_pad_all(bt, 4, 0);
     lv_obj_add_event_cb(bt, boot_cb, LV_EVENT_VALUE_CHANGED, 0);
+    r = row(p, "Save logs to the SD card");
+    lv_obj_t *ls = lv_switch_create(r);
+    if (card_log)
+        lv_obj_add_state(ls, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(ls, card_log_cb, LV_EVENT_VALUE_CHANGED, 0);
     r = row(p, "Log console");
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Open");

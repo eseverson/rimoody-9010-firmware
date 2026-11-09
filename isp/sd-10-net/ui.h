@@ -17,6 +17,10 @@ void ui_aa_session(int active);                 /* a phone's video started (1) o
 int ui_aa_visible(void);                        /* the AA view is up: show its video, send it the touches */
 
 /* hooks the UI calls (net.c); run on the UI task, so they must only queue work for the net task */
+#ifndef CARD_LOG_DEFAULT
+#define CARD_LOG_DEFAULT 1
+#endif
+void plat_ui_card_log(int on);                  /* write log files to the SD card (UI.TXT cardlog=) */
 void plat_ui_mute(int on);                      /* MCU system mute and the DSP master mute */
 void plat_ui_volume(int index);
 void plat_ui_eq(int band, int db);             /* equalizer band 0..9, -12..+12 dB (audio.c) */                 /* 0..40 (audio.c) */

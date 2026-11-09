@@ -427,8 +427,17 @@ static int fs_persist(const char *name, const void *src, u32 len, char *o)
                   got_len, c, clk_ms() - t0);
 }
 
+/* log files on the SD card (save_log, P*.TXT, CARLOG.TXT): the build default, then UI.TXT cardlog= (read at boot, before
+ * anything is saved), then the Settings switch. The RAM log behind `hu.py log` and the console is always kept. */
+static volatile int card_log = CARD_LOG_DEFAULT;
+void plat_ui_card_log(int on) { card_log = !!on; }
+
 static void save_log(const char *name)
 {
+    if (!card_log) {
+        lprintf("--- not saving the log as %s: card logs are off\n", name);
+        return;
+    }
     hb_tick();
     lprintf("--- saving the log as %s t=%u\n", name, ub_ms(0));
     u32 len = log_len, start = len > MM_LOG_BOUNCE_SZ ? len - MM_LOG_BOUNCE_SZ : 0;
@@ -4508,7 +4517,7 @@ static void car_stats_tick(void)
         lprintf("car: wifi station %d replay=%u/%u rxovf=%u decfail=%u rx=%u; aa audio frames %u silent %u splices %u\n", sta_st,
                 replays, replays_new, rxff_ovf, dec_fail, rx_frames, am_frames, am_silent, am_splice);
     }
-    if (now - save_at >= 60000) {
+    if (card_log && now - save_at >= 60000) {
         save_at = now;
         u32 len = log_len, start = len > 0xC000 ? len - 0xC000 : 0;
         u32 t0 = ub_ms(0);
@@ -4803,7 +4812,7 @@ static void net_task(void *arg)
         char name[16];
         vfmt_n(name, "C%07x.TXT", crc32_le((const u8 *)LOG_BUF, (int)log_len) & 0xfffffff);
         save_log(name);
-        if (prev_log_len) {   /* and the crashed run's own log, as P<same id>.TXT */
+        if (prev_log_len && card_log) {   /* and the crashed run's own log, as P<same id>.TXT */
             name[0] = 'P';
             lprintf("--- saving the previous run's log (%u bytes) as %s\n", prev_log_len, name);
             int fr = fs_save(name, PREV_LOG, prev_log_len);
@@ -5026,6 +5035,14 @@ int payload_entry(int argc, char *const argv[])
         if (fs_load("UI.TXT", ui_settings_in, sizeof ui_settings_in - 1, &k))
             k = 0;
         ui_settings_in[k] = 0;
+        for (const char *s = ui_settings_in; *s; s++) {   /* cardlog= now, for the crash logs saved before the UI runs */
+            static const char key[] = "cardlog=";
+            int i = 0;
+            while (key[i] && s[i] == key[i])
+                i++;
+            if (!key[i] && (s == ui_settings_in || s[-1] == '\n'))
+                card_log = s[i] == '1';
+        }
         ui_start(FB_ADDR, ui_settings_in);   /* LVGL on OSD0 (ui.c); the text console stops drawing once it runs */
     }
     vTaskStartScheduler();   /* returns when net_task ends the scheduler */

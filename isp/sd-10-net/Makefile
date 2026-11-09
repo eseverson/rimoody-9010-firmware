@@ -12,6 +12,9 @@ CFLAGS  := -march=v3 -mcpu=n9 -mcmodel=large -mno-ext-perf2 -mno-fp-as-gp -Os -f
 LDFLAGS := -nostdlib -nostartfiles -Wl,--no-relax -Wl,--no-warn-rwx-segments
 LIBS    := -lgcc
 BUILD_ID := $(shell date +%Y%m%d-%H%M%S)
+# log files on the SD card (crash, shutdown and car logs) by default; UI.TXT cardlog= overrides. Published builds: CARD_LOG=0
+CARD_LOG ?= 1
+CFLAGS  += -DCARD_LOG_DEFAULT=$(CARD_LOG)
 RTOS    := freertos/tasks.c freertos/list.c freertos/queue.c freertos/timers.c freertos/heap_4.c freertos/port/port.c
 MBEDTLS_SRC := $(wildcard mbedtls/library/*.c)
 # mbedtls is built at -O2 into its own archive: the payload decrypts the whole AA video stream in software
