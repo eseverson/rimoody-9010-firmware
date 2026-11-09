@@ -1152,8 +1152,12 @@ static void ui_task(void *arg)
                 was_down = 1;
             else if (was_down)
                 was_down = 0, leave_console();
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
+            else if (seen != aa_session_seen && aa_session && aa_enabled)
+                leave_console();   /* a phone connecting takes the panel, as stock does */
+            if (console_on) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
         }
         if (seen != aa_session_seen) {   /* a phone came or went */
             seen = aa_session_seen;
