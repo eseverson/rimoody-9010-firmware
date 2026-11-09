@@ -71,7 +71,7 @@ Format: 16 kHz, mono, signed 16-bit (proven from the parameter checks). Byte ord
 
 Rings 7 and 8 (W 0x1898 / R 0x189C and W 0x18E0 / R 0x18E4, 0x16800 bytes each) are not the mic: no record code touches them. In the live stock dump both W pointers sit at 0x16200 and do not move over 2 s, with ENC1 in state 1 (ready) and ENC2 in state 0, so they belong to the idle general-purpose encoders ENC1/ENC2 (inferred). In the same dump HF_ENC is in state 1 and ring 6's pointers are 0, as expected with no phone session.
 
-Mic gain and processing: `gainadc` and `getmicp` exist in the shell; which register holds the ADC0 gain is unknown (0x1F54 bits 15:8 = 0x4F, 0x1E18 = 0x4F064F00 are candidates). The processing flags (RISC 0xA1 bits 0..6) are presumably echo cancellation / noise reduction enables; stock AA leaves them off, CarPlay telephony turns three on.
+Mic gain and processing: the analog mic preamp boost is 0x1F58 bits 23:21 / 26:24 (shell `gainop`), a 3-bit code from 0 dB to +40 dB. Boot leaves it at 0 dB; stock CarPlay and CarLife set +30 dB before recording; stock AA never sets it. The shell's `gainadc` is a separate ADC PGA (−24..+6 dB in 1 dB steps). The DSP uplink has a digital gain at RISC 0xB5 (0 dB by default, up to +24 dB) that only CarLife touches, and then only to 0 dB. No mic-bias control exists in eCos. The processing flags (RISC 0xA1 bits 0..6) are presumably echo cancellation / noise reduction enables; stock AA leaves them off, CarPlay telephony turns three on. Details, and the register writes to try, are in section 5.
 
 ## 3. The AA protocol side
 
@@ -125,9 +125,78 @@ No `ac` frames are needed for any step below.
 - **No mic fitted or connected, or the mic wired only to the AC6965A.** Then step 2 captures silence. The fallback (BT chip mic looped to its DAC into ADC1 input 2) needs an unknown MCU command: owner approval, and banned if it is an `ac` frame outside the allowed set.
 - **Routing interplay:** the route function 0x3AE338 stops HF_DEC and HF_ENC when both are playing; our stream-1 start must not re-route while the mic is open, or capture must restart after it.
 - **DSP load:** HF_ENC plus the PCM decoder plus the EQ at once; stock does the same during AA voice, but watch underruns (`hu.py audio status`) during the first tests.
-- **Unknowns in the sequence:** the meaning of cmd 0/0xA, RISC 0xA1 bit 6 and the coefficient set; ring 6 byte order; the ADC0 gain register; whether the top-6 KB "AEC parameters" block must hold anything. Each shows up in the step-2 checks as a stuck state, a stopped 0x18C0, or silent/garbled samples.
+- **Unknowns in the sequence:** the meaning of cmd 0/0xA, RISC 0xA1 bit 6 and the coefficient set; ring 6 byte order; which preamp channel carries the pinhole mic (section 5); whether the top-6 KB "AEC parameters" block must hold anything. Each shows up in the step-2 checks as a stuck state, a stopped 0x18C0, or silent/garbled samples.
 - **Echo:** stock AA runs with echo cancellation off and relies on the phone pausing media while listening; nav prompts during a query could leak into the capture.
 - **Protocol details from memory** (message ids 0x8005/0x8006, response field meaning, packet size, setup handling): the host test checks our side only; the first real check is the phone (adb `logcat` CAR.*/GH.* tags show rejects).
+
+## 5. Mic gain
+
+Static analysis of `ecos.bin` on 2026-11-09; nothing was run on the unit. Why: the payload's capture puts loud speech at 10 cm from the pinhole at about −54 dBFS RMS over a −70 dBFS floor. The speech is clearly there, but it is 30-40 dB too quiet. Every eCos load/store into the codec block (0x9C001E00..0x9C001FFF) was enumerated from a full disassembly, so the lists of writers below are complete for direct accesses.
+
+### Analog mic preamp boost: 0x1F58 bits 23:21 and 26:24 (shell `gainop`)
+
+- Shell `gainop <dB>` (0x3B9220): `strtod` → float → `0x3ABD20(6, 0xFFFF, &f)` (case 6 of that gain dispatcher, jump table 0x3ABD44) → setter **0x3B3E6E(ch, f)**. Proven.
+- The setter maps the float to a 3-bit code by exact comparison. The getter (0x3B4980, table 0x3B49D8) maps codes back. Proven:
+
+| Code | Setter input | Getter output |
+|---|---|---|
+| 0 | any positive value not listed below | +40 dB |
+| 1 | 30.0 | +30 dB |
+| 2 | 27.5 | +27.5 dB |
+| 3 | 21.0 | +21 dB |
+| 4 | 12.0 | +12 dB |
+| 5 | 9.0 | +9 dB |
+| 6 | 0.0 | 0 dB |
+| 7 | any negative value | −1.0 (sentinel; off or mute, inferred) |
+
+- Fields: ch 1 → **0x1F58 bits 23:21**, ch 2 → **bits 26:24**, ch 0xFFFF → both. Write sequence (0x3B3F14..0x3B3F80): `r = R(0x1E18); W(0x1E18, r | 0x40000000); W(0x1F58, new); W(0x1E18, r & ~0x40000000)`. Stock holds 0x1E18 bit 30 set while it changes the boost; the codec init also clears that bit. Its purpose is inferred: probably a mute against the switching click.
+- Boot value: codec init writes 0x1F58 = 0x06C60606, so both codes are 6 (0 dB). This matches the live stock dump (notes/audio_trace/ecos_audio_regs_run5.txt). Our `codec_init` writes the same value.
+- Who sets it (proven): case 6 has exactly three callers. (1) The CarPlay session entry 0x395286 (`carplay_mw.c`), which the projection-mode switch 0x31C57A runs for device types 4/5: 30.0 on both channels. (2) CarLife's `RecordaudioPlayerStart` 0x3A2354: 30.0 on both channels, before it creates its "carlife mic" uplink record. (3) The shell. `AndroidAutoMain` 0x3908AE (device types 10/11) and the AA recorder ops never call it, and nothing ever sets it back to 0 dB. So stock CarPlay and CarLife record with +30 dB. Stock AA gets whatever the last session left: 0 dB after a boot with only AA, or +30 dB if CarPlay or CarLife ran since boot (inferred from the code paths). Our payload records at 0 dB. That explains the 30-40 dB shortfall (inferred, strong).
+- The name ("op" = op-amp) and the 0..+40 dB steps fit a microphone preamp. The ADC PGA below is a separate ±dB trim.
+
+### ADC PGA: shell `gainadc`
+
+- `gainadc <dB> [adc] [ch]` (0x3B9284): dB goes through `strtod` and is truncated to int; adc defaults to 0, ch to 0xFFFF (both). It calls `0x3ABD20(4, {adc, ch, dB})` → **0x3B3B7A(adc, ch, dB)**. Code = 6 − dB for dB in −24..+6 (5-bit field, 1 dB per step). +7 and above clamp to code 0 (+6 dB); below −24 gives code 31. Proven.
+
+| adc | ch 1 | ch 2 |
+|---|---|---|
+| 0 | 0x1E18 bits 4:0 | 0x1F58 bits 4:0 |
+| 1 | 0x1E18 bits 20:16 | 0x1F58 bits 12:8 |
+| 2 | 0x1F54 bits 4:0 | 0x1F58 bits 20:16 |
+
+- Boot sets every field to code 6 (0 dB): 0x1E18 `&= 0xFFE0FFE0; |= 0x00060006`, and 0x1F58 = 0x06C60606. 0x1F54 bits 4:0 read 0x10 only because bit 4 belongs to the ADC0 input mux (0x1F54 bits 7:4, `src << 6 | src << 4`). An adc 2 / ch 1 write would clobber the mux, so either that ADC does not exist on this chip or the path is a stock bug (inferred). Do not write it.
+- No product code calls case 4; only the shell does. The PGA reaches at most +6 dB, so it can only trim. Which adc number carries the mic is not visible in code.
+
+### Mic bias
+
+- eCos has no mic-bias string ("bias", "vref", "micbias"; the one "ebias" belongs to the Wi-Fi driver), and no `AUDIF_Set` id or shell command touches a bias. Besides the boot codec init (0x3BF564), the post-boot writes, the DAC GPIO bits (0x1E14 bits 31:30), the I2S-in switch (0x3B2FBA: 0x1FFC bits 6/7/9 with 0x1E20/0x1E10/0x1F40), the ADC mux, the PGA and the boost, nothing writes the codec block. 0x1F50 is never written (it reads 0x800 live). Proven.
+- So stock has no separate mic-bias step for AA, CarPlay or CarLife. Whatever bias exists comes from the codec init, which our payload repeats verbatim. Init fields of unknown meaning that could include a bias enable: 0x1F54 bits 29:24 = 0x3F, 0x1F54 bits 21:16 = 0x04, 0x1E18 bits 14/30 and 11:10 cleared, 0x1F64 bits 4:0 = 0x1F. The capture shows speech +15-20 dB above the floor in the 50-1000 Hz bands, with strong envelope modulation, which an unbiased electret would hardly give, so bias is not the first suspect (inferred).
+- Stock's live 0x1E18 is 0x83060306, and our `codec_init` + `post_boot` should produce the same. A reading of 0x4F064F00 would mean the later init writes did not land, leaving bits 30, 27:26, 14 and 11:10 set and the adc 0 / ch 1 PGA at code 0 (+6 dB). Re-read it before the boost test.
+
+### DSP digital gain on the uplink: RISC 0xB5
+
+- `AUDIF_Record_SetVolume` 0x3A6392 converts a volume to dB (0x3A6924: 100 = 0 dB, 101..124 = +1..+24 dB, below 2 = −103.5 dB, a log curve otherwise). It then calls the uplink driver's op 0x3A9964 (ops table 0x6C05F8, slot 4) → `0x3ABD20(0x10, &dB)` → **0x3B3F8C**, which clamps to +24 dB (anything ≤ −66 dB gives 0) and sets **RISC 0xB5 = (u16)(2048 · 10^(dB/20))** (Q5.11, so 0x0800 = 0 dB), then sends cmd 5/2. Proven.
+- Default: param init stores raw 0x0008 at RISC byte 0x16A (0x3BD5AE), i.e. logical 0x0800 = 0 dB. Our `params_init` has the same entry.
+- Callers: only CarLife (`SetVolume(100)`, 0 dB). AA and CarPlay never call it, so stock applies no extra digital gain to the uplink. The DSP-side effect on ring 6 is inferred from the driver op, not observed.
+- Processing flags (`uplink_init` → 0x3B2938): RISC 0xA1 bits 0..5 = create params +0x14, +0x18, +0x1C, +0x20, +0x24, +0x28; bit 6 = always 1; bits 15:11 = a level `min(n, 30)` that `uplink_init` always passes as 0. CarPlay stream type 8 turns on bits 0..2. Which bit is AEC, NR or AGC is unknown, and none is a fixed gain stage on the CPU side. Trying them is a later experiment, not the gain fix: they change the DSP processing, and AEC without a reference may misbehave.
+- Level readout: shell `getmicp` = `AUDIF_Set(0x4E)` → 0x3AF11A reads DSP info halfword 0xE8 (byte 0x1D0 of the info table at data + 0x280, byte-swapped, i.e. `info(0x1D0)` in `audio.c`). `getauxp` reads halfword 0xE9 (0x1D2). This is probably a DSP-measured mic peak or level (inferred from the name), useful as a second meter during the test.
+
+### What to try on the unit
+
+1. **Boost +30 dB on both channels**, the value stock CarPlay and CarLife use in production:
+
+```c
+u32 r = REG(0x1e18);
+REG(0x1e18) = r | 0x40000000u;                                 /* stock's bracket */
+REG(0x1f58) = (REG(0x1f58) & ~0x07e00000u) | 0x01200000u;     /* bits 26:24 = 1, 23:21 = 1: +30 dB */
+REG(0x1e18) = r & ~0x40000000u;
+```
+
+   From the stock 0x06C60606 this gives 0x01260606. Expect loud speech at 10 cm to land near −24 dBFS RMS. Noise that enters before the preamp rises with it; ADC noise does not.
+2. **Other steps** (same bracket; values for both channels, mask 0x07E00000): code 3 (+21 dB) = 0x03600000, code 2 (+27.5) = 0x02400000, code 1 (+30) = 0x01200000, code 0 (+40) = 0x00000000. Any code from 6 down to 0 is safe to try: each is a state the stock shell can set. Back off to code 3 or 2 if speech peaks clip at 10 cm.
+3. **Which channel is the mic:** set only bits 23:21 (ch 1: `& ~0x00e00000 | 0x00200000`) or only bits 26:24 (ch 2: `& ~0x07000000 | 0x01000000`) and compare levels. The ring is mono, so this shows which preamp input feeds the capture.
+4. **Fine trim, only after the analog boost:** RISC 0xB5 digital gain via `dsp_set(RISC, 0xb5, v); send_cmd(5, 2, 0, 0);` with v = 0x0FF6 (+6 dB), 0x168C (+9), 0x1FD9 (+12), at most 0x7ECB (+24). It raises noise and signal alike. Undo with 0x0800. The ADC PGA adds at most +6 dB more (code 0 in the fields above); leave it alone unless needed.
+5. **Undo the boost:** the same bracket with `(REG(0x1f58) & ~0x07e00000u) | 0x06c00000u`, which restores the stock 0x06C60606.
 
 ## Owner items
 
