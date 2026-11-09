@@ -18,6 +18,7 @@ struct aa_platform {
     int hd;           /* 1: 1280 x 720 with margins for a 1024 x 600 panel; 0: 800 x 480 */
     int touch_w, touch_h;   /* touchscreen size we declare (0: the video size) */
     int audio_mask;   /* audio sinks offered: bit 0 media, 1 speech, 2 system; bit 7 = also a microphone source; 0 = none */
+    void (*mic)(int open);   /* the phone opened (1) or closed (0) the microphone; may be NULL */
 };
 
 struct aa_status {
@@ -36,6 +37,8 @@ struct aa_status {
     unsigned int a_jumps, a_jump_max_us, a_ts_n;
     unsigned long long a_ts_first[3], a_ts_last;
     int a_jump_last_us;
+    /* microphone: opens by the phone, frames sent, frames the phone acked, frames refused (closed or window full) */
+    unsigned int mic_opens, mic_frames, mic_acks, mic_drops;
 };
 
 int aa_start(const struct aa_platform *p);   /* sends the version request */
@@ -44,5 +47,8 @@ void aa_closed(void);                        /* the transport went away */
 int aa_touch(int action, int x, int y);      /* 0 down, 1 up, 2 move; the phone UI's coordinates (no margins) */
 void aa_set_night(int on);                    /* headlights: the night-mode sensor (sent now if AA runs, else at sensor start) */
 int aa_send_key(int keycode, int down);          /* 3 HOME, 4 BACK (the keys declared in service discovery) */
+/* 16 kHz mono s16le PCM to the phone, sent with a microsecond timestamp; n bytes sent, 0 if refused (not running, mic
+ * closed or max_unacked frames in flight: counted in mic_drops), <0 on a send error */
+int aa_send_mic(const unsigned char *pcm, int n);
 const struct aa_status *aa_status(void);
 #endif

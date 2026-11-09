@@ -11,7 +11,8 @@
  * (11/12), navigation focus (13/14), shutdown (15/16), audio focus (18/19).
  * Media channels: setup 0x8000 -> 0x8003, start 0x8001, stop 0x8002, data 0x0000 (u64 timestamp + payload) or 0x0001
  * (codec config, no timestamp), ack 0x8004, video focus 0x8007 -> 0x8008. Input: binding 0x8002 -> 0x8003, events
- * 0x8001. Sensors: start 0x8001 -> 0x8002, events 0x8003. */
+ * 0x8001. Sensors: start 0x8001 -> 0x8002, events 0x8003. Microphone (we send): MicrophoneRequest 0x8005 -> 0x8006,
+ * data 0x0000 from us, ack 0x8004 from the phone. */
 #include "aa.h"
 #include "aa_tls.h"
 #include <string.h>
@@ -104,7 +105,8 @@ static int send_msg(int ch, int ctrl, int encrypt, u16 id, const u8 *body, int n
     msg[1] = (u8)id;
     if (n > (int)sizeof msg - 2)
         return -1;
-    memcpy(msg + 2, body, (size_t)n);
+    if (body != msg + 2)   /* aa_send_mic builds its body in place */
+        memcpy(msg + 2, body, (size_t)n);
     n += 2;
     int flags = (ctrl ? F_CONTROL : 0);
     if (!encrypt)
@@ -210,6 +212,34 @@ static int send_service_discovery(void)
     pb_s(&b, 10, "1.0");
     pb_u(&b, 11, 0);
     return send_pb(CH_CONTROL, 0, 6, &b, buf);
+}
+
+/* ---- microphone: the phone opens it for a voice query and acks our frames; at most mic_window unacked in flight ---- */
+static int mic_open, mic_window = 1, mic_unacked;
+
+static void mic_reset(void)
+{
+    if (mic_open && pf && pf->mic)
+        pf->mic(0);
+    mic_open = 0, mic_window = 1, mic_unacked = 0;
+}
+
+int aa_send_mic(const unsigned char *pcm, int n)
+{
+    if (st.state != AA_RUNNING || !mic_open || mic_unacked >= mic_window || n <= 0 || n > (int)sizeof msg - 10) {
+        st.mic_drops++;
+        return 0;
+    }
+    u64 ts = pf->now_us ? pf->now_us() : 0;
+    for (int i = 0; i < 8; i++)   /* body: u64be timestamp (microseconds), then the PCM */
+        msg[2 + i] = (u8)(ts >> (56 - 8 * i));
+    memcpy(msg + 10, pcm, (size_t)n);
+    int r = send_msg(CH_MIC, 0, 1, 0x0000, msg + 2, 8 + n);
+    if (r < 0)
+        return r;
+    mic_unacked++;
+    st.mic_frames++;
+    return n;
 }
 
 /* ---- receiving ---- */
@@ -397,6 +427,47 @@ static void on_channel(int ch, int ctrl, const u8 *m, int n)
         }
         return;
     }
+    if (ch == CH_MIC) {
+        if (id == 0x8005) {   /* MicrophoneRequest {1 open, 2 anc, 3 ec, 4 max_unacked} -> 0x8006 {1 status 0, 2 0} */
+            u64 open = 0, max_unacked = 0;
+            pb_get(body, bn, 1, &open);
+            pb_get(body, bn, 4, &max_unacked);
+            if (open) {
+                mic_unacked = 0;
+                mic_window = max_unacked ? (int)(max_unacked < 64 ? max_unacked : 64) : 1;
+                if (!mic_open) {
+                    mic_open = 1;
+                    st.mic_opens++;
+                    log_s("aa: microphone open\n");
+                    if (pf->mic)
+                        pf->mic(1);
+                }
+            } else if (mic_open) {
+                mic_open = 0;
+                log_s("aa: microphone closed\n");
+                if (pf->mic)
+                    pf->mic(0);
+            }
+            pb_u(&b, 1, 0);
+            pb_u(&b, 2, 0);
+            send_pb(ch, 0, 0x8006, &b, buf);
+        } else if (id == 0x8004) {   /* ack {1 session, 2 frames acked} */
+            u64 k = 1;
+            pb_get(body, bn, 2, &k);
+            if (!k)
+                k = 1;
+            st.mic_acks += (u32)k;
+            mic_unacked = k >= (u64)mic_unacked ? 0 : mic_unacked - (int)k;
+        } else if (id == 0x8000) {   /* setup -> ready, 1 frame in flight, config 0 */
+            pb_u(&b, 1, 2);
+            pb_u(&b, 2, 1);
+            pb_u(&b, 3, 0);
+            send_pb(ch, 0, 0x8003, &b, buf);
+        } else {
+            st.unknown++;
+        }
+        return;
+    }
     if (ch == CH_INPUT && id == 0x8002) {   /* binding request -> ok */
         pb_u(&b, 1, 0);
         send_pb(ch, 0, 0x8003, &b, buf);
@@ -579,6 +650,7 @@ void aa_rx(const u8 *p, int n)
 
 int aa_start(const struct aa_platform *p)
 {
+    mic_reset();   /* stops a capture the previous session left open */
     pf = p;
     memset(&st, 0, sizeof st);
     memset(ch_open, 0, sizeof ch_open);
@@ -598,7 +670,11 @@ int aa_start(const struct aa_platform *p)
     return send_msg(CH_CONTROL, 0, 0, 1, ver, 4);
 }
 
-void aa_closed(void) { st.state = AA_CLOSED; }
+void aa_closed(void)
+{
+    st.state = AA_CLOSED;
+    mic_reset();
+}
 
 int aa_touch(int action, int x, int y)
 {
