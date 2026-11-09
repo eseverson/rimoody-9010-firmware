@@ -298,7 +298,7 @@ def main():
     p.add_argument('--peak', type=int, default=256, help='tone: peak level of 32767 (256 = -42 dBFS)')
     p.add_argument('--ms', type=int, default=2000, help='tone: stops by itself after this many ms (max 10000)')
     p = sub.add_parser('nor', help='SPI NOR flash through the controller (nor.c): status | compare OFF LEN | read OFF LEN -o FILE | verify OFF FILE | erase OFF | erase64 OFF | program OFF FILE; erase/erase64/program need --write and only touch 0xC50000..0xC5FFFF, 0xC70000..0xDFFFFF, 0xE10000..0xFBFFFF')
-    p.add_argument('what', choices=['status', 'compare', 'read', 'verify', 'erase', 'erase64', 'program']); p.add_argument('args', nargs='*')
+    p.add_argument('what', choices=['status', 'compare', 'read', 'verify', 'erase', 'erase64', 'program', 'dump']); p.add_argument('args', nargs='*')
     p.add_argument('-o', '--out', help='read: save the bytes to FILE'); p.add_argument('--cmd', default='0b', choices=['03', '0b'], help='controller read command (0b = fast read, 8 dummy cycles)')
     p.add_argument('--write', action='store_true', help='required for erase, erase64 and program')
     p = sub.add_parser('op', help='raw platform op: op N [HEXPAYLOAD] (e.g. op 20 = CCMP benchmark)')
@@ -522,7 +522,7 @@ def do_nor(u, a):
     into the upload area, fetched and CRC-checked), verify (a local file against flash, both paths). Writes (erase one
     4 KB sector, erase64 one 64 KB block, program a file of up to 64 KB onto blank flash) need --write; the payload
     also refuses anything outside the free region and any part other than the XM25QH128C."""
-    need = {'status': 0, 'compare': 2, 'read': 2, 'verify': 2, 'erase': 1, 'erase64': 1, 'program': 2}[a.what]
+    need = {'status': 0, 'compare': 2, 'read': 2, 'verify': 2, 'erase': 1, 'erase64': 1, 'program': 2, 'dump': 0}[a.what]
     if len(a.args) != need:
         sys.exit('usage: nor status | compare OFF LEN | read OFF LEN -o FILE | verify OFF FILE | erase OFF | erase64 OFF'
                  ' | program OFF FILE')
@@ -538,6 +538,14 @@ def do_nor(u, a):
 
     if a.what == 'status':
         return show(u.call(OP_NOR, bytes([0])).decode(errors='replace'))
+    if a.what == 'dump':   # whole flash to NORDUMP.BIN on the card (read-only on the flash); waits for the read-back check
+        r = u.call(OP_NOR, bytes([7])).decode(errors='replace')
+        print(r)
+        while 'writing' in r or 'verifying' in r:
+            time.sleep(2)
+            r = u.call(OP_NOR, bytes([8])).decode(errors='replace')
+            print(r)
+        return 0 if 'read back ok' in r else 1
     if a.what == 'compare':
         return show(u.call(OP_NOR, struct.pack('<BIIB', 1, args[0], args[1], cmd)).decode(errors='replace'))
     if a.what == 'read':

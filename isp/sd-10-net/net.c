@@ -351,9 +351,12 @@ static void flush(const char *why)
  * re-reads the volume, so nothing cached goes stale if U-Boot wrote the card in between (HU1 CMD fatwrite). ---- */
 static FATFS fatfs;
 static int fs_mounted;
+static int fs_hold;   /* a file stays open across net-loop passes (the flash dump): a remount would invalidate it */
 
 static int fs_mount(void)
 {
+    if (fs_hold && fs_mounted)
+        return 0;
     fs_mounted = f_mount(&fatfs, "", 1) == FR_OK;
     return fs_mounted ? 0 : -1;
 }
@@ -3940,6 +3943,97 @@ static int mic_rec_status(char *o)
     return vfmt_n(o, "rec: idle");
 }
 
+/* Whole-flash backup to the card (NOR sub-op 7 start, 8 status; Settings > System): the 16 MB XIP window copied to
+ * NORDUMP.BIN 8 KB per net-loop pass (the SD writes run at ~220 KB/s, so a pass is ~40 ms) so AA, the heartbeat and the watchdogs keep running, then read back the same
+ * way and CRC-checked, with a summary in NORDUMP.TXT. Read-only on the flash. */
+#define DUMP_CHUNK 0x2000u
+static FIL dump_f;
+static u8 dump_buf[DUMP_CHUNK] __attribute__((aligned(32)));
+static int dump_state, dump_result;   /* 0 idle, 1 writing, 2 verifying, 3 done; result 0 ok or an error code */
+static u32 dump_pos, dump_crc, dump_crc2, dump_t0, dump_ms, dump_id;
+
+static int nor_dump_start(void)
+{
+    if (dump_state == 1 || dump_state == 2)
+        return -1;
+    if (fs_mount())
+        return dump_result = -2, dump_state = 3, -2;
+    if (f_open(&dump_f, "NORDUMP.BIN", FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+        return dump_result = -3, dump_state = 3, -3;
+    nor_jedec(&dump_id);
+    fs_hold = 1;
+    dump_pos = dump_crc = dump_crc2 = 0, dump_result = 0, dump_t0 = clk_ms(), dump_state = 1;
+    lprintf("nor: dumping the flash (jedec %06x) to NORDUMP.BIN\n", dump_id);
+    return 0;
+}
+
+static void nor_dump_end(int r)
+{
+    fs_hold = 0;
+    dump_result = r, dump_ms = clk_ms() - dump_t0, dump_state = 3;
+    char t[160];
+    int k = vfmt_n(t, "NORDUMP.BIN: %u bytes of flash (jedec %06x), crc32 %08x, read back %s, build %s, %u ms\n", dump_pos,
+                   dump_id, dump_crc, r ? "FAILED" : "ok", hu_build_id, dump_ms);
+    if (!r)
+        fs_save("NORDUMP.TXT", t, (u32)k);
+    lprintf("nor: %s", t);
+    if (r)
+        lprintf("nor: dump failed (%d)\n", r);
+}
+
+static void nor_dump_poll(void)
+{
+    UINT n = 0;
+    if (dump_state == 1) {
+        const volatile u8 *x = (const volatile u8 *)(NOR_XIP + dump_pos);
+        for (u32 i = 0; i < DUMP_CHUNK; i++)
+            dump_buf[i] = x[i];
+        dump_crc = crc32_update(dump_crc, dump_buf, DUMP_CHUNK);
+        FRESULT fr = f_write(&dump_f, dump_buf, DUMP_CHUNK, &n);
+        if (fr != FR_OK || n != DUMP_CHUNK) {   /* -100 - FRESULT, or -4 for a short write (card full) */
+            f_close(&dump_f);
+            return nor_dump_end(fr ? -100 - (int)fr : -4);
+        }
+        dump_pos += DUMP_CHUNK;
+        if (dump_pos < NOR_SIZE)
+            return;
+        if (f_close(&dump_f) != FR_OK)
+            return nor_dump_end(-5);
+        if (f_open(&dump_f, "NORDUMP.BIN", FA_READ) != FR_OK)
+            return nor_dump_end(-6);
+        dump_state = 2, dump_pos = 0;
+        return;
+    }
+    if (dump_state == 2) {
+        FRESULT fr = f_read(&dump_f, dump_buf, DUMP_CHUNK, &n);
+        if (fr != FR_OK || n != DUMP_CHUNK) {
+            f_close(&dump_f);
+            return nor_dump_end(fr ? -200 - (int)fr : -7);
+        }
+        dump_crc2 = crc32_update(dump_crc2, dump_buf, DUMP_CHUNK);
+        dump_pos += DUMP_CHUNK;
+        if (dump_pos < NOR_SIZE)
+            return;
+        f_close(&dump_f);
+        nor_dump_end(dump_crc2 == dump_crc ? 0 : -8);
+    }
+}
+
+static int nor_dump_status(char *o)
+{
+    if (dump_state == 1 || dump_state == 2)
+        return vfmt_n(o, "nor dump: %s %u of %u KB, %u ms", dump_state == 1 ? "writing" : "verifying", dump_pos >> 10,
+                      NOR_SIZE >> 10, clk_ms() - dump_t0);
+    if (dump_state == 3)
+        return dump_result ? vfmt_n(o, "nor dump: FAILED (%d)", dump_result)
+                           : vfmt_n(o, "nor dump: NORDUMP.BIN %u bytes, jedec %06x, crc32 %08x, read back ok, %u ms",
+                                    NOR_SIZE, dump_id, dump_crc, dump_ms);
+    return vfmt_n(o, "nor dump: idle");
+}
+int plat_ui_nor_dump_status(char *out, int max) { (void)max; return nor_dump_status(out); }
+static volatile int ui_req_dump;
+void plat_ui_nor_dump(void) { ui_req_dump = 1; }
+
 int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
 {
     char *t = (char *)out;
@@ -4032,7 +4126,14 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         ap_start_ch = ch, ap_start_pending = 1, deferred_at = ub_ms(0) + 300;
         return vfmt_n(t, "ap: starting on channel %d as '%s' after this reply; this network connection ends", ch, ap_req_ssid);
     }
-    case 29:   /* NOR (nor.c): 0 status, 1 compare, 2 read, 3 verify (read-only); 4 erase, 5 erase64, 6 program (magic) */
+    case 29:   /* NOR (nor.c): 0 status, 1 compare, 2 read, 3 verify (read-only); 4 erase, 5 erase64, 6 program (magic);
+                * 7 dump the whole flash to NORDUMP.BIN, 8 dump status (net.c) */
+        if (n >= 1 && p[0] == 7) {
+            int r = nor_dump_start();
+            return r == -1 ? vfmt_n(t, "ERR nor dump: already running") : nor_dump_status(t);
+        }
+        if (n >= 1 && p[0] == 8)
+            return nor_dump_status(t);
         return nor_op(p, n, t, vfmt_n);
     case 28: {   /* WIFI: status; [u8 1] = avoid the current BSS for 10 min and rescan, after this reply (issue #8 test) */
         char m[20];
@@ -4671,6 +4772,11 @@ static void net_loop(void)
         }
         aud_poll();
         mic_rec_poll();
+        nor_dump_poll();
+        if (ui_req_dump) {
+            ui_req_dump = 0;
+            nor_dump_start();
+        }
         if (aa_listening || aa_tcp_connected()) {
             aa_touch_poll();
             aa_tcp_poll();

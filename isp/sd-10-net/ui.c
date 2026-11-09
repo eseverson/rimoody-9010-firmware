@@ -836,6 +836,13 @@ static void build_eq(lv_obj_t *p)
     eq_preset_mark();
 }
 
+static lv_obj_t *dump_label;
+static void dump_cb(lv_event_t *e)
+{
+    (void)e;
+    plat_ui_nor_dump();
+}
+
 static void build_settings(void)
 {
     scr_settings = screen(0);
@@ -952,6 +959,13 @@ static void build_settings(void)
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Boot stock");
     lv_obj_add_event_cb(b, sys_cb, LV_EVENT_CLICKED, (void *)1);
+    r = row(p, "Back up the flash to the SD card");
+    dump_label = lv_label_create(r);
+    lv_label_set_text(dump_label, "");
+    lv_obj_set_style_pad_right(dump_label, 16, 0);
+    b = lv_button_create(r);
+    lv_label_set_text(lv_label_create(b), "Back up");
+    lv_obj_add_event_cb(b, dump_cb, LV_EVENT_CLICKED, 0);
     static char inst[120];
     plat_ui_install_status(inst, sizeof inst);
     r = row(p, inst);
@@ -968,8 +982,11 @@ static void status_timer(lv_timer_t *t)
     if (lv_screen_active() == scr_settings) {
         plat_ui_status(buf, sizeof buf);
         lv_label_set_text(status_label, buf);
+        plat_ui_nor_dump_status(buf, sizeof buf);
+        lv_label_set_text(dump_label, buf + 10);   /* without the "nor dump: " prefix */
     }
 }
+
 
 /* ---- volume overlay on the top layer: over every screen, including the video ---- */
 
