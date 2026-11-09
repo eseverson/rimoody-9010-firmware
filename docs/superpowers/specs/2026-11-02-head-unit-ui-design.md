@@ -33,7 +33,7 @@ The unit lives in Android Auto: the owner uses maps and audio control there almo
 
 ## How it gets made *(my call; owner doesn't mind)*
 
-- **LVGL v9.2.2**, vendored into `isp/sd-10-net/lvgl/` (src only) and built into its own archive like mbedtls.
+- **LVGL v9.2.2**, vendored into `firmware/lvgl/` (src only) and built into its own archive like mbedtls.
 - **Display:** LVGL renders ARGB8888 directly into the OSD0 framebuffer (0x03400000, 1024x600x4, region header 0x03660000, as `fb_enable`), `LV_DISPLAY_RENDER_MODE_DIRECT`; the flush callback writes back the D-cache for the dirty area. OSD0 is the top layer over VPP0; transparent/translucent pixels show the AA video underneath (per-pixel alpha in the OSD region; to be verified on hardware).
 - **Tasks:** a `ui` FreeRTOS task runs `lv_timer_handler`; it replaces the console's drawing while the UI is on. The text console stays available as a debug screen.
 - **Input:** the GT911 touch task feeds a pointer input device (panel area x < 1024); presses in the button strip (x 1054..1061, y 141/211/322/404/508) become button events handled by the UI (short/long press). While AA is shown, panel touches keep going to the phone.

@@ -202,7 +202,7 @@ RiscApp halfwords 10c .. 10c+9 per channel c (mask 1/2/4/8/0x10/0x20 → c = 0..
 
 ## 6. Reproduce in our firmware
 
-Preconditions: DSP running as in `audio_dsp.md`, `data` and the info table at data + 0x280 known. Written against the helpers already in `isp/sd-10-net/audio.c` (`data`, `info()`, `dc_wb()`), which access DSP memory through the cache (eCos uses the uncached alias instead).
+Preconditions: DSP running as in `audio_dsp.md`, `data` and the info table at data + 0x280 known. Written against the helpers already in `firmware/audio.c` (`data`, `info()`, `dc_wb()`), which access DSP memory through the cache (eCos uses the uncached alias instead).
 
 ```c
 // eCos "App" area (id 0x27): 0x280 halfwords, stored byte-swapped (DSP is big-endian)

@@ -22,7 +22,7 @@ static const u8 env_old[INST_ENV_LEN] = "bootcmd=bootsp\0bootdelay=0\0baudrate=9
 static const u8 env_new[INST_ENV_LEN] = "bootcmd=source 98e00000;bootsp\0bootdelay=0\0";
 _Static_assert(sizeof "bootcmd=bootsp\0bootdelay=0\0baudrate=921600\0" == INST_ENV_LEN, "stock env is 44 bytes");
 
-/* The version 2 boot script. Lines 1-4, the card loop and the last line are the SD-only script (isp/sd-11-bootcmd/
+/* The version 2 boot script. Lines 1-4, the card loop and the last line are the SD-only script (isp/bootcmd/
  * boot.txt) unchanged, plus `setenv hu_src sd`. The NOR copy is taken only if the SD card gave no BOOT.BIN, its header
  * word is "HUNC" (programmed last), the CRC of the whole region past the header (image, then 0xFF) matches the header,
  * and the RAM copy has the same CRC. `crc32 addr len dst` stores the CRC as a native word (U-Boot 0xF0C870, `swi`), and

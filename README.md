@@ -1,10 +1,10 @@
 # Rimoody 9" 9010 head unit: custom firmware
 
-Reverse engineering and replacement firmware for the **Rimoody 9" single-DIN car stereo, model 9010** (printed on the front bezel), sold as "Rimoody 9'' Single Din Car Stereo Wireless CarPlay Android Auto Detachable". It runs on a Sunplus SPHE8268K SoC with stock eCos firmware. This one is installed in the owner's Miata. The stock firmware stays in NOR flash; a patched U-Boot boot script loads our own bare-metal payload (`isp/sd-10-net`) from the SD card instead. The payload runs FreeRTOS on its own NDS32 port with our own USB, Wi-Fi, SD/FAT, display, touch, audio and H.264 drivers, shows an LVGL UI, runs wireless Android Auto, and is driven from a PC over Wi-Fi with `tools/hu.py`. Linux is not an option: the CPU has an MPU, not a paging MMU (`notes/linux_feasibility.md`).
+Reverse engineering and replacement firmware for the **Rimoody 9" single-DIN car stereo, model 9010** (printed on the front bezel), sold as "Rimoody 9'' Single Din Car Stereo Wireless CarPlay Android Auto Detachable". It runs on a Sunplus SPHE8268K SoC with stock eCos firmware. This one is installed in the owner's Miata. The stock firmware stays in NOR flash; a patched U-Boot boot script loads our own bare-metal payload (`firmware`) from the SD card instead. The payload runs FreeRTOS on its own NDS32 port with our own USB, Wi-Fi, SD/FAT, display, touch, audio and H.264 drivers, shows an LVGL UI, runs wireless Android Auto, and is driven from a PC over Wi-Fi with `tools/hu.py`. Linux is not an option: the CPU has an MPU, not a paging MMU (`notes/linux_feasibility.md`).
 
 Working on the unit today:
 
-- Boot: power-on runs the NOR boot script (flash 0xE00000), which loads `/BOOT.BIN` from the card to 0x01800000 and jumps to it; with no `BOOT.BIN` it falls through to stock eCos (`isp/sd-11-bootcmd/boot.txt`).
+- Boot: power-on runs the NOR boot script (flash 0xE00000), which loads `/BOOT.BIN` from the card to 0x01800000 and jumps to it; with no `BOOT.BIN` it falls through to stock eCos (`isp/bootcmd/boot.txt`).
 - FreeRTOS V11.1.0 with our NDS32 port, own EHCI host and USB enumeration, RTL8188F Wi-Fi driver with WPA2 (CCMP in the chip's hardware for unicast data, software for group traffic), lwIP, own access point mode and DHCP server.
 - HU1 control protocol over UDP: live payload replacement (`hu.py exec`), persisting to the card, logs, register access, test ops.
 - Robustness: hardware watchdog, crash records reported by the next boot, config handoff and probation across EXEC, failure resets with backoff.
@@ -31,7 +31,7 @@ Identifying marks, for matching other units (the same board likely ships under o
 |---|---|
 | Sunplus SPHE8268K ("gemini") | AndesCore N13 (AndeStar V3, NDS32), 270 MHz, 8 KiB I/D caches, MPU only, no FPU; 64 MB in-package DRAM (0x04000000..0x07FFFFFF alias low memory, above that hangs the bus); H.264 decoder, audio DSP, multi-layer display (OSD0 + VPP0), two EHCI hosts, SD controller; register map largely SP7021-compatible. Details: [docs/SPHE8268K-datasheet.md](docs/SPHE8268K-datasheet.md), [block diagram](docs/sphe8268k-block-diagram.png). |
 | Serial NOR flash (16 MB) | xboot, U-Boot 2014.04 (vendor), stock eCos. Default env patched to `bootcmd=source 98e00000;bootsp` (`tools/patch_uboot.py`, `tools/flash_bootcmd.py`). Full dumps are kept locally (`dump*.bin`, gitignored). |
-| Realtek RTL8188FTV | USB Wi-Fi dongle on EHCI1 (0bda:f179); firmware `isp/sd-10-net/rtl8188fufw.bin`. |
+| Realtek RTL8188FTV | USB Wi-Fi dongle on EHCI1 (0bda:f179); firmware `firmware/rtl8188fufw.bin`. |
 | Jieli AC6965A | The "MCU": Bluetooth plus ACC, backlight, mute and RTC, over UART1 at 115200 (`ff aa` frames, `tools/mcuframe.py`). It cuts SoC power if the heartbeat stops. Notes: [notes/audio.md](notes/audio.md), [notes/android_auto.md](notes/android_auto.md). |
 | Panel and touch | 1024x600 TTL panel; Goodix GT911 on bit-banged I2C (GPIO90-93), as the stock firmware does it (its hardware I2C masters serve only the FM tuner); the five front buttons are touch areas right of the display. [notes/display_touch.md](notes/display_touch.md). |
 
@@ -39,17 +39,16 @@ Identifying marks, for matching other units (the same board likely ships under o
 
 | Path | Contents |
 |---|---|
-| `isp/sd-10-net/` | The payload (main code; the name is historical). Built into `NET.BIN`. |
-| `isp/sd-1-probe` .. `isp/sd-12-boot`, `isp/0-reset`, `isp/1-probe`, `isp/2-nordump` | Earlier SD-card ISP rounds (U-Boot scripts run through the update path) used before the Wi-Fi loop existed: probing, NOR dumps, first Wi-Fi, MCU, boot command. Mostly history. |
-| `isp/sd-11-bootcmd/boot.txt` | The NOR boot script that loads `/BOOT.BIN` (version 1, SD card only). Version 2 (SD card, then a payload copy in NOR, then stock) is built into the payload and installed from Settings > System or `hu.py nor install` ([notes/nor_install.md](notes/nor_install.md)). |
-| `isp/mkisp.py` | Builds an `ISP_UPDT.BIN` from the stock dump plus a U-Boot script. |
-| `isp/ecos-snap/` | Hooks that boot stock eCos and snapshot registers or log calls (`tools/ecos_snap.py`). |
+| `firmware/` | The payload (main code). Built into `NET.BIN`. |
+| `isp/bootcmd/boot.txt` | The NOR boot script that loads `/BOOT.BIN` (version 1, SD card only). Version 2 (SD card, then a payload copy in NOR, then stock) is built into the payload and installed from Settings > System or `hu.py nor install` ([notes/nor_install.md](notes/nor_install.md)). |
+| `isp/mkisp.py` | Builds an `ISP_UPDT.BIN` (the stock SD-card update path) from the stock dump plus a U-Boot script: the recovery route if the NOR boot script is lost. The early ISP rounds that used it (probing, NOR dumps, first Wi-Fi, MCU) are in git history before the move to `firmware/`. |
+| `tools/ecos-snap/` | Hooks that boot stock eCos and snapshot registers or log calls (`tools/ecos_snap.py`). |
 | `tools/` | PC-side tools, see below. |
 | `notes/` | Reverse-engineering notes and status logs, see the index below. |
 | `docs/` | SoC datasheet (written from our findings) and the UI design spec (`docs/superpowers/specs/`). |
 | `miata.svg` | Logo source for `tools/mklogo.py`. |
 
-Important files in `isp/sd-10-net/`:
+Important files in `firmware/`:
 
 | File | Purpose |
 |---|---|
@@ -76,12 +75,12 @@ Important files in `isp/sd-10-net/`:
 The payload is cross-compiled with an NDS32 little-endian bare-metal toolchain (`nds32le-elf-`, gcc 14 with newlib). The Makefile looks for it at `$(HOME)/nds32/bin/nds32le-elf-`; point `CROSS` elsewhere if yours lives somewhere else:
 
 ```sh
-make -C isp/sd-10-net CROSS=/path/to/nds32/bin/nds32le-elf-
+make -C firmware CROSS=/path/to/nds32/bin/nds32le-elf-
 ```
 
 `make` produces `NET.BIN` (plus `net.dis`, `net.map`, `TRAMP.BIN`); mbedtls and LVGL build into their own `-O2` archives, so the first build takes a while. Every build carries a timestamp build id (`BUILD_ID`), shown by `hu.py ping` and the hello broadcast. Build outputs are gitignored. `make CARD_LOG=0` builds with log files on the SD card off by default (for published builds); Settings > System > "Save logs to the SD card" or `cardlog=` in `UI.TXT` overrides it. The in-memory log behind `hu.py log` and the console is always kept.
 
-Host tests run on the PC with plain gcc, python3 (with the `cryptography` package) and openssl: `make -C isp/sd-10-net test`. They cover crypto, WPA, IP, MCU frames, the console, the H.264 parser, lwIP TCP, the wireless AA handshake, AP mode, DHCP, osdvid de-tiling, TLS and the AA stack over TCP against a scripted phone.
+Host tests run on the PC with plain gcc, python3 (with the `cryptography` package) and openssl: `make -C firmware test`. They cover crypto, WPA, IP, MCU frames, the console, the H.264 parser, lwIP TCP, the wireless AA handshake, AP mode, DHCP, osdvid de-tiling, TLS and the AA stack over TCP against a scripted phone.
 
 ## Running and day-to-day
 
@@ -91,8 +90,8 @@ The card holds `/BOOT.BIN` (the payload) and `/WIFI.TXT`, plus files the payload
 export HU_TOKEN=...              # the token= line of WIFI.TXT
 tools/hu.py listen               # wait for the hello, shows the unit and its build
 tools/hu.py ping
-tools/hu.py exec isp/sd-10-net/NET.BIN     # replace the running payload over Wi-Fi, wait for the new build's hello
-tools/hu.py persist isp/sd-10-net/NET.BIN  # make it the card's /BOOT.BIN (read back and CRC-checked)
+tools/hu.py exec firmware/NET.BIN     # replace the running payload over Wi-Fi, wait for the new build's hello
+tools/hu.py persist firmware/NET.BIN  # make it the card's /BOOT.BIN (read back and CRC-checked)
 tools/hu.py fs put FILE [NAME]   # write a file to the card, both CRCs checked
 tools/hu.py fs ls
 tools/hu.py log                  # the run log
@@ -108,7 +107,7 @@ Other tools, one line each:
 - `aa_phone.py`: stands in for the phone in wireless AA (TLS server, streams an H.264 file as AA video).
 - `adc.py`: samples the SoC SAR ADC channels over Wi-Fi.
 - `card.py`: loads and saves the SD card for ISP rounds; `card.py wifi` writes `WIFI.TXT`.
-- `ecos_snap.py`: boots stock eCos with a register-snapshot hook (`isp/ecos-snap`).
+- `ecos_snap.py`: boots stock eCos with a register-snapshot hook (`tools/ecos-snap`).
 - `fb.py`: drives the OSD0 framebuffer directly.
 - `flash_bootcmd.py`, `flash_script.py`, `patch_uboot.py`, `patch_card_uboot.py`: NOR U-Boot env and boot script patching (done; recovery is a CH341A and the original dump).
 - `gt9.py`: early bit-banged GT9xx experiment from the PC (superseded by `gt9.c`; see its warning).

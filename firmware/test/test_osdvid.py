@@ -2,7 +2,7 @@
 checked bit-exact against the hardware in both scan types), converted by osdvid_host, and compared with the same window
 of the NV12 picture as YUY2 (Y0 U Y1 V, each line taking chroma line y / 2). 800x480 shows whole; 1280x720 shows its 1024x600 center (osdvid_frame)."""
 import os, subprocess, sys, tempfile
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 import mfd_detile
 
 HOST = sys.argv[1]

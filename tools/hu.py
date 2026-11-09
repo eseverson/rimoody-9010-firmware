@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Talk to the head unit's U-Boot-side command server (isp/sd-10-net) over the LAN.
+"""Talk to the head unit's U-Boot-side command server (firmware/) over the LAN.
 
 The payload joins the home Wi-Fi, takes a DHCP address, broadcasts `HU1 hello ...` to UDP 5152 every 2 s and serves
 UDP 5151. Requests carry the shared token from WIFI.TXT on the card (`--token` or $HU_TOKEN).

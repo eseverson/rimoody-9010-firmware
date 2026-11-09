@@ -226,7 +226,7 @@ New op `hu.py vpp fresh FLAGS WHERE PITCH [ADDR:MASK:VAL ...]` (vpp.c c == 12) r
 - The CPU's register polling stalls at the first fetch: the frame-1 wrap is seen at line 14..61 instead of line 1 (the loop runs ~23 polls per line otherwise), so DDFCH's first reads hold the bus for up to ~1 ms. The unit hung (Wi-Fi up, no DHCP) right after the 0x790 = 0x12 test was started (18:07), needing a power cycle.
 - Open question raised by all of this: eCos never reads or clears 0x7EC, and nothing shows that the stock firmware ever displays video through VPP0 on this unit. If DDFCH's AXI path is unusable on this board, the OSD path (osdvid.c, working) is the way to show video.
 
-## eCos register snapshot (2026-11-01 18:3x..19:1x, isp/ecos-snap, tools/ecos_snap.py)
+## eCos register snapshot (2026-11-01 18:3x..19:1x, tools/ecos-snap, tools/ecos_snap.py)
 
 How: `tools/ecos_snap.py run ECOS.BIN` uploads the decompressed stock eCos (flash 0x95CF40 is an lzop container, method 3; decompressed it is byte-identical to `ecos.bin`, 0x3D6038 bytes, loaded at 0x301040, entry 0x301040, entered with r0 = r1 = r2 = 0 as U-Boot's `bootsp ecos nor` does) with two call sites patched, plus a hook, then EXECs `LAUNCH.BIN` (stops the EHCI controller, arms the hardware watchdog ~13 s, redoes bootsp's SetBootDev pinmux writes, cache maintenance, jump). `entry.S` (64 bytes, in the unused uImage header slot 0x301000) takes eCos's clock-tick call of the empty `hal_clock_reset` (0x64b436, 1 kHz) and the display-1 dispatcher call (0x511628), turns PSW IT/DT off, calls `hook.c` at 0x02F40000, which pets the watchdog, keeps a DDFCH history and takes register snapshots ~3 s / 10 s / 25 s in, then resets the unit; `ecos_snap.py collect` reads it back after the payload boots again.
 

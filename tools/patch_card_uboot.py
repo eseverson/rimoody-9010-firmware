@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Over Wi-Fi, swap the U-Boot inside the card's ISP_UPDT.BIN for the patched one (isp/sd-11-bootcmd dry run).
+"""Over Wi-Fi, swap the U-Boot inside the card's ISP_UPDT.BIN for the patched one (isp/bootcmd dry run).
 
 Loads /ISP_UPDT.BIN into RAM on the unit, applies the word differences between the card's file and the dry-run file
 inside the U-Boot region (0x10000-0xFFFFF), checks the CRC32 in RAM against the expected value, writes the file back,

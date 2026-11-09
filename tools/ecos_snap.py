@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run the stock eCos with a register-snapshot hook and collect what it saw (notes/vpp0_display.md, "eCos register
-snapshot"; code in isp/ecos-snap/).
+snapshot"; code in tools/ecos-snap/).
 
   ecos_snap.py run ECOS.BIN      patch the decompressed eCos image (flash 0x95CF40, LZO; bootsp loads it to 0x301040),
                                  upload it, HOOK.BIN and the launcher's parameters, then EXEC LAUNCH.BIN. eCos boots,
@@ -22,7 +22,7 @@ snapshot"; code in isp/ecos-snap/).
 import os, struct, subprocess, sys, time, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SNAPDIR = os.path.join(HERE, '..', 'isp', 'ecos-snap')
+SNAPDIR = os.path.join(HERE, 'ecos-snap')
 ECOS_BASE = 0x00301040
 HOOK_ADDR, PARAM, SNAP, SNAP_END = 0x02F40000, 0x02F47F00, 0x02F48000, 0x02F88000
 NHIST = 2048
@@ -252,7 +252,7 @@ def fmt_print(fmt, args, ecos, flash):
 
 def show_audio(path):
     data = open(path, 'rb').read()
-    ecos = open(os.path.join(HERE, '..', 'isp', 'ecos-snap', 'ecos_patched.bin'), 'rb').read()
+    ecos = open(os.path.join(HERE, 'ecos-snap', 'ecos_patched.bin'), 'rb').read()
     flash = open(os.path.join(HERE, '..', 'dump1.bin'), 'rb').read()
     h = struct.unpack_from('<21I', data, 0)
     print('hook: magic %x calls %d done %d snaps %s' % (h[0], h[2], h[3], [hex(x) for x in h[8:11]]))
@@ -288,7 +288,7 @@ def show_audio(path):
 
 def show_bt(path):
     data = open(path, 'rb').read()
-    ecos = open(os.path.join(HERE, '..', 'isp', 'ecos-snap', 'ecos_patched.bin'), 'rb').read()
+    ecos = open(os.path.join(HERE, 'ecos-snap', 'ecos_patched.bin'), 'rb').read()
     flash = open(os.path.join(HERE, '..', 'dump1.bin'), 'rb').read()
     h = struct.unpack_from('<21I', data, 0)
     trig = struct.unpack_from('<I', data, 0xF4)[0]

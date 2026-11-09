@@ -123,7 +123,7 @@ eCos driver block 0x5161D2..0x516F4E, all software I2C on GPIOs:
 
 ### Live touch (working, 2026-10-31, build 20261031-182509)
 
-`isp/sd-10-net/gt9.c` drives the bus open-drain from the payload (HU1 op 14; `hu.py touch pins|probe|id|read|poll|watch|reset|release`). No reset was needed: with RST high as U-Boot leaves it, `touch probe` got an ACK at 0x5D (nack at 0x14) and the ID read gave `'911' fw 1060 x 1070 y 600 vendor 03`. The config block (0x8047, 186 bytes) reads version 0x48, X max 0x042E (1070), Y max 0x0258 (600), 5 touches, module switch 0x0D; touch-key registers 0x8093..0x8096 are 0. We never write the config.
+`firmware/gt9.c` drives the bus open-drain from the payload (HU1 op 14; `hu.py touch pins|probe|id|read|poll|watch|reset|release`). No reset was needed: with RST high as U-Boot leaves it, `touch probe` got an ACK at 0x5D (nack at 0x14) and the ID read gave `'911' fw 1060 x 1070 y 600 vendor 03`. The config block (0x8047, 186 bytes) reads version 0x48, X max 0x042E (1070), Y max 0x0258 (600), 5 touches, module switch 0x0D; touch-key registers 0x8093..0x8096 are 0. We never write the config.
 
 Polling (status 0x814E, records from 0x814F, 8 bytes `[id, xL, xH, yL, yH, sizeL, sizeH, rsvd]`, then write 0 to 0x814E) works. Raw coordinates are already in display orientation, no swap or flip needed. Corners as touched by the owner: top-left (45, 12), top-right (979, 48), bottom-left (56, 540), bottom-right (979, 587), center (553, 305).
 

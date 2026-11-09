@@ -56,7 +56,7 @@ Consequences for the plan: the USB phone port and AOA work is dropped (`test/aa_
 
 ## Progress
 
-- TLS: Mbed TLS 3.6.2 vendored (`isp/sd-10-net/mbedtls/`, config `aa_tls_config.h`); every library file cross-compiles for NDS32, about 127 KB of code before gc-sections. Not linked yet.
+- TLS: Mbed TLS 3.6.2 vendored (`firmware/mbedtls/`, config `aa_tls_config.h`); every library file cross-compiles for NDS32, about 127 KB of code before gc-sections. Not linked yet.
 
 ## eCos maps (Haiku passes over ecos.ann.dis, 2026-10-31; addresses are eCos load addresses; not yet checked by hand)
 
@@ -87,7 +87,7 @@ Consequences for the plan: the USB phone port and AOA work is dropped (`test/aa_
 ## Waiting on hardware (2026-10-31 evening)
 - Unit offline since the SD test build (needs a power cycle).
 - Decoder bring-up: `source tools/hu.env && tools/vdec_probe.py` (step 1, read-only), then steps 2..6 of notes/h264_decoder.md section 6.
-- AA protocol: an Android phone on the PC: `cd isp/sd-10-net/test && gcc ... aa_host` (build line in the aa_host.c header comment) then `./aa_host any <cert> <key> 60 out.h264`.
+- AA protocol: an Android phone on the PC: `cd firmware/test && gcc ... aa_host` (build line in the aa_host.c header comment) then `./aa_host any <cert> <key> 60 out.h264`.
 - Phone port: phone plugged into the unit, read PORTSC of EHCI0 (0x9C102164) and EHCI1.
 
 ## Bluetooth RFCOMM through the AC6965A (Haiku map of eCos, 2026-10-31, unverified)

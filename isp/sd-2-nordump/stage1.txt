@@ -1,5 +1,0 @@
-setexpr.l reg_entry *0x9c00317c
-mw.l 0x9c00317c 0 1
-setexpr.l reg_cleared *0x9c00317c
-setenv isp_all_or_update_done 1
-fatload $isp_if $isp_dev 0x1100000 /ISPBOOOT.BIN 0x2000 0x110000 && source 0x1100000

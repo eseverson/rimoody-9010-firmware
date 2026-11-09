@@ -10,7 +10,7 @@ Needs dump1.bin (the original 16 MB flash, kept out of git) at the repository ro
 import os, random, struct, subprocess, sys, tempfile, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..', '..', '..'))
+ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 sys.path.insert(0, os.path.join(ROOT, 'isp'))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 from mkisp import FLASH_UBOOT_HDR, check_script, check_stock_uboot, mkscript, xboot_dsum, xboot_hsum, be32  # noqa: E402
@@ -109,7 +109,7 @@ def script_checks():
     img = open(path('s.img'), 'rb').read()
     check(img == mkscript(text, 'nor boot script v2', stamp=0), 'C script image != mkisp.mkscript(stamp=0)')
     check(check_script(img) is None, 'script image fails U-Boot image_source checks')
-    v1 = open(os.path.join(ROOT, 'isp', 'sd-11-bootcmd', 'boot.txt')).read().splitlines()
+    v1 = open(os.path.join(ROOT, 'isp', 'bootcmd', 'boot.txt')).read().splitlines()
     lines = text.splitlines()
     check(lines[:4] == v1[:4] and lines[-1] == v1[-1], 'v2 script changed the SD-only lines 1-4 or the go line')
     card = [l for l in lines if l.startswith('if fatload')]
@@ -137,7 +137,7 @@ def main():
     # fresh unit, and the cross-check against tools/patch_uboot.py
     fresh = boot_ok('fresh', dump, [SCRIPT, 0x920000, 0x8A0000], eo)
     import patch_uboot
-    v1txt = os.path.join(ROOT, 'isp', 'sd-11-bootcmd', 'boot.txt')
+    v1txt = os.path.join(ROOT, 'isp', 'bootcmd', 'boot.txt')
     sys.argv = ['patch_uboot.py', DUMP, v1txt, path('pu.bin')]
     import contextlib, io
     with contextlib.redirect_stdout(io.StringIO()):

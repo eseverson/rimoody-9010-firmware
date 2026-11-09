@@ -8,13 +8,13 @@
 *.elf
 *.map
 *.dis
-isp/sd-11-bootcmd/flash_bootcmd.bin
-isp/sd-10-net/test/*_host
+isp/bootcmd/flash_bootcmd.bin
+firmware/test/*_host
 results*/
 *.bin
 !rtl8188fufw.bin
 
-# secrets: the HU1 token and Wi-Fi config (examples: isp/sd-10-net/WIFI.TXT.example)
+# secrets: the HU1 token and Wi-Fi config (examples: firmware/WIFI.TXT.example)
 tools/hu.env
 tools/WIFI.TXT.template
 WIFI.TXT
@@ -23,8 +23,8 @@ __pycache__/
 *.nv12
 
 # mbedtls archive built at -O2
-isp/sd-10-net/obj/
-isp/sd-10-net/mbedtls.a
+firmware/obj/
+firmware/mbedtls.a
 
 # brainstorming mockups
 .superpowers/

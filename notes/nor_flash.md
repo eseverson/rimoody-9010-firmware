@@ -1,6 +1,6 @@
 # SPI NOR flash: part, controller, driver
 
-Status 2026-11-09: driver (`isp/sd-10-net/nor.c`), HU1 op 29 and `hu.py nor` written and host-tested. Nothing has run on the unit yet. Sources: vendor U-Boot's `sfsp` driver (disassembly of the U-Boot image in the NOR dump; addresses below are U-Boot load addresses), the flash-part table inside that U-Boot, the CH341A detection of the chip, and the original dump (`dump1.bin`). Labels: **proven** = read from code or tables, **inferred** = a reading that the on-unit test still has to confirm, **memory** = recalled from the part family's datasheets, not checked against the XMC datasheet in this pass.
+Status 2026-11-09: driver (`firmware/nor.c`), HU1 op 29 and `hu.py nor` written and host-tested. Nothing has run on the unit yet. Sources: vendor U-Boot's `sfsp` driver (disassembly of the U-Boot image in the NOR dump; addresses below are U-Boot load addresses), the flash-part table inside that U-Boot, the CH341A detection of the chip, and the original dump (`dump1.bin`). Labels: **proven** = read from code or tables, **inferred** = a reading that the on-unit test still has to confirm, **memory** = recalled from the part family's datasheets, not checked against the XMC datasheet in this pass.
 
 Goal: let the payload keep a known-good copy of itself in the unused part of the 16 MB NOR. Boot order would later become SD card `BOOT.BIN`, then the NOR copy, then stock eCos. This note covers the driver and its test surface only, not the install feature or the boot-script change.
 

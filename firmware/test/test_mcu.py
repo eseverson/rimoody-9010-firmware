@@ -5,7 +5,7 @@ Usage: test_mcu.py path/to/mcu_host. Exit status = failures."""
 import importlib.util, os, subprocess, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location('mcuframe', os.path.join(here, '../../../tools/mcuframe.py'))
+spec = importlib.util.spec_from_file_location('mcuframe', os.path.join(here, '../../tools/mcuframe.py'))
 mf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mf)
 

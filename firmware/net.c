@@ -1,4 +1,4 @@
-/* Wi-Fi client, round 10 (sd-10-net). Runs from U-Boot `go` on the SPHE8268K head unit, borrowing the stock U-Boot
+/* The head-unit firmware (started as SD-card ISP round 10, "sd-10-net"). Runs from U-Boot `go` on the SPHE8268K head unit, borrowing the stock U-Boot
  * 2014.04 (May 05 2024), gd in $r10. U-Boot is linked at 0xF00040 but relocates itself to the top of the 128 MB RAM;
  * every U-Boot address below is the link address plus `reloc`, taken from the $gp that U-Boot's `go` leaves us.
  *
@@ -4987,7 +4987,7 @@ static void mem_boot_check(void)
 }
 
 __attribute__((section(".text.entry"), used))
-/* One-shot boot of the stock eCos with the snapshot hook (isp/ecos-snap, tools/ecos_snap.py card): if /ECOSRUN.FLG is
+/* One-shot boot of the stock eCos with the snapshot hook (tools/ecos-snap, tools/ecos_snap.py card): if /ECOSRUN.FLG is
  * on the card, delete it, load /ECOSP.BIN (the decompressed eCos with the hook call sites patched) to 0x00301040,
  * /ENTRY.BIN to 0x00301000 and /HOOK.BIN to 0x02F40000, and enter eCos the way U-Boot's `bootsp ecos nor` does. This
  * runs first thing in a cold boot, before the payload touches the MCU, USB or interrupts, so eCos sees the fresh MCU
@@ -5036,7 +5036,7 @@ static void ecos_boot_check(void)
     for (volatile u32 *z = (volatile u32 *)0x02F48000u; z < (volatile u32 *)0x02F88000u; z++)
         *z = 0;
     prm[3] = 0x544f4f42u;   /* "BOOT": started from the card at power-on */
-    /* hardware watchdog ~13 s, routed to reset; the hook pets it every tick (isp/ecos-snap/launch.c) */
+    /* hardware watchdog ~13 s, routed to reset; the hook pets it every tick (tools/ecos-snap/launch.c) */
     IOREG(0x9c000630) = 0x3877, IOREG(0x9c000630) = 0xab00, IOREG(0x9c000634) = 0xffff, IOREG(0x9c000630) = 0xab01;
     IOREG(0x9c000630) = 0x7482, IOREG(0x9c0000f4) = 0x00120012, IOREG(0x9c000630) = 0x4a4b;
     IOREG(0x9c000084) = 0x60000000u | 1u << 13;   /* bootsp's SetBootDev(SPI_NOR, 1) */

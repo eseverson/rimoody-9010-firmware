@@ -2,7 +2,7 @@
 
 The unit has **64 MB** of DRAM. CPU addresses 0x04000000..0x07FFFFFF are aliases of 0x00000000..0x03FFFFFF (a write at 0x02F80000 reads back at 0x06F80000), and 0x08000000 up (below the registers at 0x9C000000) hangs the bus (notes/vpp0_display.md). U-Boot was built for 128 MB and runs from the alias: "relocated to 0x07CC3000" is physically 0x03CC3000. DMA masters (H.264 decoder, DDFCH, the audio DSP) are not covered by the alias, so they must be given addresses below 0x04000000.
 
-The source of truth is `isp/sd-10-net/memmap.h`. `memmap_check.c` asserts at compile time that the regions below are in address order, do not overlap and end below U-Boot, and that `configTOTAL_HEAP_SIZE` and `LV_MEM_ADR`/`LV_MEM_SIZE` match their slots. `payload.ld` asserts the payload + .bss, .bigbss, vectors and RTOS heap sizes.
+The source of truth is `firmware/memmap.h`. `memmap_check.c` asserts at compile time that the regions below are in address order, do not overlap and end below U-Boot, and that `configTOTAL_HEAP_SIZE` and `LV_MEM_ADR`/`LV_MEM_SIZE` match their slots. `payload.ld` asserts the payload + .bss, .bigbss, vectors and RTOS heap sizes.
 
 | Physical | Size | What | Owner |
 |---|---|---|---|
@@ -38,4 +38,4 @@ U-Boot's part, measured at boot (build 20261102-114400, `mem:` line in the log):
 
 HU1 READ/WRITE (`plat_mem_ok`): refuses 0x08000000..0x9BFFFFFF (bus hang). Alias addresses stay readable and writable (U-Boot's own pointers are 0x07xxxxxx), but writes are checked against the protected regions (payload, log, HU1 reply buffer) by physical address.
 
-The stock eCos snapshot boot (`ecos_boot_check`, isp/ecos-snap) loads ENTRY.BIN to 0x00301000 and HOOK.BIN to 0x02F40000 and hands the machine to eCos; it runs before any of the above is in use and does not come back.
+The stock eCos snapshot boot (`ecos_boot_check`, tools/ecos-snap) loads ENTRY.BIN to 0x00301000 and HOOK.BIN to 0x02F40000 and hands the machine to eCos; it runs before any of the above is in use and does not come back.

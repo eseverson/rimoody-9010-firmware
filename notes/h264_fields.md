@@ -3,7 +3,7 @@
 
 Source: `ecos.ann.dis`, parser state machine 0x43b394..0x43ebc8 (each state stores the next state function at ctx+8), command builder `H264_SpmpProgramStoreReg` 0x43a602. NDS32 note: `slt/slti` are **unsigned**, `slts/sltsi` signed; `lhi/lbi/lb/lh` zero-extend (so every 16-bit command carries the low 16 bits, two's complement for negatives).
 
-Test stream values checked against `isp/sd-10-net/test/h264/{grey,bars}.h264` with `ffmpeg -bsf:v trace_headers`: profile 66, nal_ref_idc 3, nal_unit_type 5, slice_type 7, first_mb 0, frame_num 0, idr_pic_id 0, slice_qp_delta -18, pic_init_qp_minus26 -3, chroma_qp_index_offset -2, no transform_8x8/second offset in PPS (so second = first), num_ref_idx_l0/l1_default_active_minus1 0, entropy 0, constrained_intra_pred 0, deblocking_filter_control_present 1, disable_deblocking_filter_idc 0, offsets 0, max_num_ref_frames 0, 50x30 MBs, frame_mbs_only 1.
+Test stream values checked against `firmware/test/h264/{grey,bars}.h264` with `ffmpeg -bsf:v trace_headers`: profile 66, nal_ref_idc 3, nal_unit_type 5, slice_type 7, first_mb 0, frame_num 0, idr_pic_id 0, slice_qp_delta -18, pic_init_qp_minus26 -3, chroma_qp_index_offset -2, no transform_8x8/second offset in PPS (so second = first), num_ref_idx_l0/l1_default_active_minus1 0, entropy 0, constrained_intra_pred 0, deblocking_filter_control_present 1, disable_deblocking_filter_idc 0, offsets 0, max_num_ref_frames 0, 50x30 MBs, frame_mbs_only 1.
 
 ## What the structs are
 

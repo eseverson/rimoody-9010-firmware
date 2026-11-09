@@ -1,6 +1,6 @@
 # Interrupts, timer tick and exceptions on the SPHE8268K
 
-Status as of 2026-10-31 (updated for build `20261031-173828`: tick on by default, non-blocking ISR heartbeat, crash record v2). Static analysis of the Sunplus eCos image and the stock U-Boot (disassembly references are to `isp-re/ecos.ann.dis` and `uboot-re/uboot.ann.dis` in the earlier session's scratchpad, see memory `head-unit-context`), the upstream SP7021 interrupt controller driver, and live tests on the unit with payload build `20261031-170042` (`isp/sd-10-net`, files `irq.S`, `irq.c`, `irq.h`). Related notes: [linux_feasibility.md](linux_feasibility.md).
+Status as of 2026-10-31 (updated for build `20261031-173828`: tick on by default, non-blocking ISR heartbeat, crash record v2). Static analysis of the Sunplus eCos image and the stock U-Boot (disassembly references are to `isp-re/ecos.ann.dis` and `uboot-re/uboot.ann.dis` in the earlier session's scratchpad, see memory `head-unit-context`), the upstream SP7021 interrupt controller driver, and live tests on the unit with payload build `20261031-170042` (`firmware`, files `irq.S`, `irq.c`, `irq.h`). Related notes: [linux_feasibility.md](linux_feasibility.md).
 
 ## Summary
 

@@ -4,7 +4,7 @@
 #   tools/vdec_regress.sh [OUTDIR]
 set -u
 cd "$(dirname "$0")/.." && source tools/hu.env
-T=isp/sd-10-net/test/h264
+T=firmware/test/h264
 O=${1:-$(mktemp -d)}; mkdir -p "$O"
 hu() { python3 tools/hu.py "$@" 2>&1 | grep -v "HU1 hello"; }
 hu vdec init >/dev/null

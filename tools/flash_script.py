@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import hu
 from mkisp import check_script, mkscript
 
-SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'isp', 'sd-11-bootcmd', 'boot.txt')
+SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'isp', 'bootcmd', 'boot.txt')
 BLOCK, BLK = 0xE00000, 0x10000
 STAGE, READBACK, DRY = 0x03000000, 0x03100000, 0x03080000
 PINS = 'mw.l 0x9c00008c 0x00f00050;mw.l 0x9c000100 0x00fc00fc;mw.l 0x9c00010c 0x00fc00fc'

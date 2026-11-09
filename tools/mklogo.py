@@ -2,7 +2,7 @@
 """Rasterize miata.svg into an LVGL A8 image (an alpha mask: the logo's black strokes become opaque, the white
 background transparent), so the UI can draw it in any colour, white on black for the home screen.
 
-  mklogo.py [--width 640] [--svg miata.svg] [--out isp/sd-10-net/ui_logo.c]
+  mklogo.py [--width 640] [--svg miata.svg] [--out firmware/ui_logo.c]
 
 Needs ImageMagick (`magick`). Regenerate after changing the SVG; the output is committed."""
 import argparse, os, subprocess, sys
@@ -13,7 +13,7 @@ ROOT = os.path.join(HERE, '..')
 ap = argparse.ArgumentParser()
 ap.add_argument('--width', type=int, default=640)
 ap.add_argument('--svg', default=os.path.join(ROOT, 'miata.svg'))
-ap.add_argument('--out', default=os.path.join(ROOT, 'isp', 'sd-10-net', 'ui_logo.c'))
+ap.add_argument('--out', default=os.path.join(ROOT, 'firmware', 'ui_logo.c'))
 a = ap.parse_args()
 
 # render big, trim the white margin, scale to the target height, 8-bit grey

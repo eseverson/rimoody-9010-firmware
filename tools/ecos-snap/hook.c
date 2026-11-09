@@ -31,7 +31,7 @@ static void crumb(u32 v)
     __asm__ volatile("cctl l1d_wball, alevel\n\tmsync all" ::: "memory");
 }
 
-static u32 now_us(void)   /* the 1 MHz counter U-Boot and our payload use (isp/sd-10-net/clk.c) */
+static u32 now_us(void)   /* the 1 MHz counter U-Boot and our payload use (firmware/clk.c) */
 {
     R(0x9c0031e8) = 0x1234;
     return (R(0x9c0031e4) & 0xffff) << 16 | (R(0x9c0031e0) & 0xffff);

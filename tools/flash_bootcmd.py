@@ -18,8 +18,8 @@ import hu
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GOLDEN = os.path.join(HERE, '..', 'dump1.bin')
-TARGET = os.path.join(HERE, '..', 'isp', 'sd-11-bootcmd', 'flash_bootcmd.bin')
-SCRIPT = os.path.join(HERE, '..', 'isp', 'sd-11-bootcmd', 'boot.txt')
+TARGET = os.path.join(HERE, '..', 'isp', 'bootcmd', 'flash_bootcmd.bin')
+SCRIPT = os.path.join(HERE, '..', 'isp', 'bootcmd', 'boot.txt')
 BLOCKS = (0xE00000, 0x920000, 0x8A0000)
 BLK = 0x10000
 STAGE = 0x03000000     # staging buffers, one per block

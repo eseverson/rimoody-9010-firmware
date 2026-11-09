@@ -1,6 +1,6 @@
 # Framebuffer text console
 
-Status as of 2026-10-31, payload build `20261031-173828` (`isp/sd-10-net`: `console.c`, `console.h`, `font8x16.h`, `gen_font.py`, the "framebuffer console" section of `net.c`). Display facts come from [display_touch.md](display_touch.md); the owner confirmed earlier that OSD0 reads ARGB8888 from little-endian words.
+Status as of 2026-10-31, payload build `20261031-173828` (`firmware`: `console.c`, `console.h`, `font8x16.h`, `gen_font.py`, the "framebuffer console" section of `net.c`). Display facts come from [display_touch.md](display_touch.md); the owner confirmed earlier that OSD0 reads ARGB8888 from little-endian words.
 
 ## What it shows
 

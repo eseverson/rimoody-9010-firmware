@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A stand-in for the phone in wireless Android Auto, to test the head unit's AA stack (isp/sd-10-net/aa.c over TCP)
+"""A stand-in for the phone in wireless Android Auto, to test the head unit's AA stack (firmware/aa.c over TCP)
 without a phone: connects to the unit's AA port, answers the version request, runs the TLS handshake as the server
 (the head unit is the TLS client), asks for service discovery, opens the video channel, sets it up and starts it, then
 sends an H.264 Annex-B file as AA video messages, one access unit each, fragmented into 16 KB frames that are each
