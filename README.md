@@ -5,7 +5,7 @@ Reverse engineering and replacement firmware for the **Rimoody 9" single-DIN car
 Working on the unit today:
 
 - Boot: power-on runs the NOR boot script (flash 0xE00000), which loads `/BOOT.BIN` from the card to 0x01800000 and jumps to it; with no `BOOT.BIN` it falls through to stock eCos (`isp/sd-11-bootcmd/boot.txt`).
-- FreeRTOS V11.1.0 with our NDS32 port, own EHCI host and USB enumeration, RTL8188F Wi-Fi driver with WPA2 (software CCMP), lwIP, own access point mode and DHCP server.
+- FreeRTOS V11.1.0 with our NDS32 port, own EHCI host and USB enumeration, RTL8188F Wi-Fi driver with WPA2 (CCMP in the chip's hardware for unicast data, software for group traffic), lwIP, own access point mode and DHCP server.
 - HU1 control protocol over UDP: live payload replacement (`hu.py exec`), persisting to the card, logs, register access, test ops.
 - Robustness: hardware watchdog, crash records reported by the next boot, config handoff and probation across EXEC, failure resets with backoff.
 - Own SD driver and FatFs (verified writes, `hu.py fs put`, `hu.py persist`).
@@ -15,7 +15,9 @@ Working on the unit today:
 - Wireless Android Auto end to end with a real phone: Bluetooth RFCOMM handshake through the AC6965A, Wi-Fi either via the home network or the unit's own "car network" access point, TLS, video, audio and touch.
 - Bluetooth: name sent at boot, reconnect to the last phone after power-up with `ac 30` (awaiting validation in the car).
 
-In progress: occasional audio skips during AA (`notes/android_auto.md`, "Stutter hunt"), VPP0 tearing and downscaling, AES-GCM throughput limiting AA video, and Wi-Fi join reliability.
+AA video throughput: TLS decryption in software (own AES-GCM in `gcm_alt.c`), delayed TCP ACKs, queued USB transmits and background decoding take a 720p stream to 81-87 fps with AES-128-GCM (103-108 fps with ChaCha20-Poly1305), well above the phone's 30-60 fps.
+
+In progress: occasional audio skips during AA (`notes/android_auto.md`, "Stutter hunt"), VPP0 tearing and downscaling, and Wi-Fi join reliability. Not built yet: the microphone (AA voice), Bluetooth hands-free calls, steering-wheel buttons, reverse camera, FM radio, AUX and wired AA.
 
 ## Hardware
 
