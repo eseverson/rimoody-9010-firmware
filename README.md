@@ -79,7 +79,7 @@ The payload is cross-compiled with an NDS32 little-endian bare-metal toolchain (
 make -C isp/sd-10-net CROSS=/path/to/nds32/bin/nds32le-elf-
 ```
 
-`make` produces `NET.BIN` (plus `net.dis`, `net.map`, `TRAMP.BIN`); mbedtls and LVGL build into their own `-O2` archives, so the first build takes a while. Every build carries a timestamp build id (`BUILD_ID`), shown by `hu.py ping` and the hello broadcast. Build outputs are gitignored.
+`make` produces `NET.BIN` (plus `net.dis`, `net.map`, `TRAMP.BIN`); mbedtls and LVGL build into their own `-O2` archives, so the first build takes a while. Every build carries a timestamp build id (`BUILD_ID`), shown by `hu.py ping` and the hello broadcast. Build outputs are gitignored. `make CARD_LOG=0` builds with log files on the SD card off by default (for published builds); Settings > System > "Save logs to the SD card" or `cardlog=` in `UI.TXT` overrides it. The in-memory log behind `hu.py log` and the console is always kept.
 
 Host tests run on the PC with plain gcc, python3 (with the `cryptography` package) and openssl: `make -C isp/sd-10-net test`. They cover crypto, WPA, IP, MCU frames, the console, the H.264 parser, lwIP TCP, the wireless AA handshake, AP mode, DHCP, osdvid de-tiling, TLS and the AA stack over TCP against a scripted phone.
 
