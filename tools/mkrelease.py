@@ -213,6 +213,21 @@ def check_script_text(text):
                 sys.exit('installer script: %r can write the flash' % cmd)
 
 
+NOTICES = '''Third-party parts of this release
+================================
+
+BOOT.BIN, the firmware, is this project's code (MIT, above) built with FreeRTOS (MIT), lwIP (BSD 3-clause),
+Mbed TLS (Apache 2.0), LVGL (MIT), FatFs (BSD 1-clause style) and the LZMA SDK decoder (public domain); their license
+texts are in the project's source tree under firmware/. It also carries Realtek's RTL8188F Wi-Fi firmware, under the
+Realtek license below.
+
+ISP_UPDT.BIN and ISPBOOOT.BIN, the SD-card installer, contain the head unit's own stock boot loaders, copied
+unmodified from its flash: xboot, and U-Boot 2014.04 as built by the unit's maker. U-Boot is free software under the
+GNU General Public License, version 2. The maker has not published the source of its build; the upstream source of
+U-Boot 2014.04 is at https://source.denx.de/u-boot/u-boot (tag v2014.04). Only the installer's own boot script, which
+starts BOOT.BIN from the card, is this project's.'''
+
+
 def build_isp(xboot, uimg, script_img):
     out = bytearray(OFF_HDR + 0x1000)
     out[0:len(xboot)] = xboot        # not read on the SD path; kept for parity with Sunplus ISPBOOOT.BIN
@@ -271,6 +286,10 @@ def main():
     files.update({n: isp for n in ISP_NAMES})
     files['INSTALL.txt'] = install.replace('\n', '\r\n').encode('ascii')   # CRLF: opened on Windows by most users
     files['WIFI.TXT.example'] = WIFI_EXAMPLE.encode('ascii')
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+    lic = open(os.path.join(root, 'LICENSE'), 'rb').read() + b'\n\n' + NOTICES.encode('ascii') + b'\n\n' + \
+        open(os.path.join(root, 'firmware', 'LICENCE.rtlwifi_firmware.txt'), 'rb').read()
+    files['LICENSE.txt'] = lic.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
     assert not set(files) & set(ECOS_NAMES)
     files['SHA256SUMS'] = ''.join('%s  %s\n' % (sha256(files[n]), n) for n in sorted(files)).encode()
 
@@ -284,7 +303,7 @@ def main():
             f.write(b)
     zpath = os.path.join(a.out, name + '.zip')
     with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        for n in ('ISP_UPDT.BIN', 'ISPBOOOT.BIN', 'BOOT.BIN', 'WIFI.TXT.example', 'INSTALL.txt', 'SHA256SUMS'):
+        for n in ('ISP_UPDT.BIN', 'ISPBOOOT.BIN', 'BOOT.BIN', 'WIFI.TXT.example', 'INSTALL.txt', 'LICENSE.txt', 'SHA256SUMS'):
             zi = zipfile.ZipInfo(n, zip_date(build))
             zi.compress_type = zipfile.ZIP_DEFLATED
             zi.external_attr = 0o644 << 16
