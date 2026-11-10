@@ -3252,12 +3252,14 @@ static u32 aa_verr_logged;
 
 /* vdec_done_hook: a picture of the AA stream is decoded (ok) or timed out */
 static unsigned long long aa_show_us;
+static void aa_video_recover(const char *why);
 static void aa_video_show(int ok)
 {
     unsigned long long t_show = clk_us();
     if (!ok) {
         if (aa_verr_logged++ < 8)
             lprintf("aa: video: picture timed out, decoder reset\n");
+        aa_video_recover("decoder timeout");
         return;
     }
     {
@@ -3284,6 +3286,30 @@ static void aa_video_show(int ok)
     aa_show_us += clk_us() - t_show;
 }
 
+/* After a decoder timeout or a picture whose references are gone, every P picture fails until the phone's next IDR,
+ * which may not come for the whole session (garbage on the panel). Ask for one: video focus native, then projected
+ * 300 ms later, at most every 3 s. */
+static unsigned long long aa_refocus_at, aa_refocus_last;
+static int aa_refocus_count;
+static void aa_video_recover(const char *why)
+{
+    unsigned long long now = clk_us();
+    if (aa_refocus_at || (aa_refocus_last && now - aa_refocus_last < 3000000))
+        return;
+    if (aa_video_focus(2) >= 0) {
+        aa_refocus_at = now + 300000, aa_refocus_last = now, aa_refocus_count++;
+        lprintf("aa: video: %s; asking the phone for a new IDR (focus native, then projected), #%d\n", why,
+                aa_refocus_count);
+    }
+}
+static void aa_refocus_poll(void)
+{
+    if (aa_refocus_at && clk_us() >= aa_refocus_at) {
+        aa_refocus_at = 0;
+        aa_video_focus(1);
+    }
+}
+
 static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
 {
     (void)ts;
@@ -3294,6 +3320,7 @@ static void aa_video_cb(const unsigned char *p, int n, unsigned long long ts)
             aa_vmsg[i] = m[i];
         if (aa_verr_logged++ < 8)
             lprintf("aa: video: %s\n", aa_vmsg);
+        aa_video_recover("a picture failed");
     }
 }
 static void aa_log_cb(const char *m) { log_s(m); }
@@ -3416,7 +3443,8 @@ static void audio_boot(void)
 void plat_ui_reboot(void) { ui_req_reboot = 1; }
 void plat_ui_boot_stock(void) { ui_req_stock = 1; }
 void plat_ui_aa_key(int keycode) { ui_req_key = keycode; }
-void plat_ui_aa_enable(int on) { ui_aa_enabled = on; }
+static volatile int ui_aa_dirty;
+void plat_ui_aa_enable(int on) { ui_aa_enabled = on, ui_aa_dirty = 1; }
 static int ui_aa_dpi = 160;
 void plat_ui_aa_dpi(int dpi) { ui_aa_dpi = dpi; }
 /* Bluetooth name: the AC6965A keeps its radio off (not connectable, not discoverable) until the host sends the name,
@@ -3503,9 +3531,14 @@ static int bt_rfcomm_send(const unsigned char *p, int n)
 }
 
 static int aa_op(int c, const u8 *p, int n, char *t);
+static int bt_aa_pending = -1;   /* an AA channel opened before the home network gave us an address: offered once it has */
 static void bt_aa_open(int handle, cu32 now)
 {
     static char reply[600];
+    if (!ui_aa_enabled) {   /* Settings > Android Auto > Enabled is off: do not offer the phone a Wi-Fi network */
+        lprintf("bt: AA channel open ignored: Android Auto is switched off in Settings\n");
+        return;
+    }
     if (flash_busy()) {   /* the phone tries again; AA's certificate load and TLS must not run between flash writes */
         lprintf("bt: AA channel %d open ignored: the flash is being written\n", handle);
         return;
@@ -3514,6 +3547,13 @@ static void bt_aa_open(int handle, cu32 now)
         lprintf("bt: AA channel %d open ignored: no home network and the car network is not up yet\n", handle);
         return;
     }
+    if (jstate != J_AP && !ip_addr()) {   /* offering 0.0.0.0 leaves the phone with nowhere to connect */
+        if (bt_aa_pending != handle)
+            lprintf("bt: AA channel %d open: waiting for an address on the home network before offering it\n", handle);
+        bt_aa_pending = handle;
+        return;
+    }
+    bt_aa_pending = -1;
     if (!aa_listening) {   /* the phone will connect over TCP: listen first */
         u8 st[3] = { 1, 5288 & 0xff, 5288 >> 8 };
         aa_op(1, st, 3, reply);
@@ -3954,6 +3994,10 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         for (unsigned i = n0; i < a->vlog_n; i++)
             k += vfmt_n(t + k, "%u %u %u\n", a->vlog_t[i % 64], a->vlog_b[i % 64], a->vlog_dec[i % 64]);
         return k;
+    }
+    if (c == 9) {   /* test: forget the decoder's stream state (SPS, PPS, references) as a lost IDR would */
+        vdec_stream_reset();
+        return vfmt_n(t, "aa: decoder stream state dropped; the next pictures fail until the phone sends an IDR");
     }
     if (c == 3) {   /* stop: close the session (the listener stays) */
         int was = aa_tcp_connected();
@@ -4911,6 +4955,13 @@ static void net_loop(void)
                 ui_req_hide = 0;
                 vpp_hide();
             }
+            if (ui_aa_dirty) {   /* switched off: end a running session now (the phone is not offered a new one) */
+                ui_aa_dirty = 0;
+                if (!ui_aa_enabled && aa_tcp_connected()) {
+                    aa_tcp_close();
+                    lprintf("aa: switched off in Settings: session closed\n");
+                }
+            }
             if (key_dirty) {
                 key_dirty = 0;
                 key_apply();
@@ -4963,6 +5014,8 @@ static void net_loop(void)
         }
         aud_poll();
         mic_rec_poll();
+        if (bt_aa_pending >= 0 && (jstate == J_AP || ip_addr()))
+            bt_aa_open(bt_aa_pending, ub_ms(0));
         if (!install_busy())   /* a running dump pauses while an install step writes */
             nor_dump_poll();
         install_poll();
@@ -4973,6 +5026,7 @@ static void net_loop(void)
         if (aa_listening || aa_tcp_connected()) {
             aa_touch_poll();
             aa_tcp_poll();
+            aa_refocus_poll();
             aa_mic_poll();
         }
         if (vdec_busy())   /* the AA picture the hardware is decoding: finish and show it once done */

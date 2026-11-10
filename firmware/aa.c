@@ -341,6 +341,19 @@ void aa_set_night(int on)
         send_night();
 }
 
+/* VideoFocusNotification (0x8008) unsolicited: 1 projected, 2 native. Native then projected makes the phone stop and
+ * restart its encoder, which starts again with SPS/PPS and an IDR: the way back after the decoder lost a reference. */
+int aa_video_focus(int mode)
+{
+    static u8 fb[24];
+    if (st.state != AA_RUNNING)
+        return -1;
+    struct pb f = { fb, fb + sizeof fb };
+    pb_u(&f, 1, (u64)mode);
+    pb_u(&f, 2, 1);
+    return send_pb(CH_VIDEO, 0, 0x8008, &f, fb);
+}
+
 static void on_channel(int ch, int ctrl, const u8 *m, int n)
 {
     u16 id = (u16)(m[0] << 8 | m[1]);

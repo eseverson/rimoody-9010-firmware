@@ -45,6 +45,7 @@ int aa_start(const struct aa_platform *p);   /* sends the version request */
 void aa_rx(const unsigned char *p, int n);   /* bytes from the phone's bulk IN, any chunking */
 void aa_closed(void);                        /* the transport went away */
 int aa_touch(int action, int x, int y);      /* 0 down, 1 up, 2 move; the phone UI's coordinates (no margins) */
+int aa_video_focus(int mode);                  /* video focus notification, unsolicited: 1 projected, 2 native; < 0 not sent */
 void aa_set_night(int on);                    /* headlights: the night-mode sensor (sent now if AA runs, else at sensor start) */
 int aa_send_key(int keycode, int down);          /* 3 HOME, 4 BACK (the keys declared in service discovery) */
 /* 16 kHz mono s16le PCM to the phone, sent with a microsecond timestamp; n bytes sent, 0 if refused (not running, mic
