@@ -61,6 +61,7 @@ typedef signed char s8;
 #include "memmap.h"
 
 static char crash_brief[64];
+static char crash_rep[1024];   /* the previous run's crash report, when there is one */
 static int pending_crash_save;   /* "vec7/itype..@ipc" of a crash record found at start, for PING */
 static int crash_pings;
 static unsigned int crash_until;
@@ -349,6 +350,9 @@ static u32 prev_log_len;
 static void hb_tick(void);
 
 static int installer_boot;
+static u32 installer_tries;
+extern volatile u32 irq_reset_mode;
+extern u32 irq_boot_mask[7];
 static void save_log(const char *name);
 /* On the installer boot (a demo with nothing else to go on when it fails) every milestone also saves the log so far to
  * the card as Snn.TXT, through U-Boot's fatwrite on the update path's card: the last file shows where it stopped. */
@@ -361,8 +365,7 @@ static void isp_mark(const char *why)
     name[0] = 'S', name[1] = (char)('0' + n / 10), name[2] = (char)('0' + n % 10), name[3] = '.', name[4] = 'T',
     name[5] = 'X', name[6] = 'T', name[7] = 0;
     n++;
-    lprintf("--- installer step %s: %s\n", name, why);
-    save_log(name);
+    lprintf("--- installer step %s: %s\n", name, why);   /* log only: card writes through U-Boot this early stopped the boot */
 }
 static void flush(const char *why)
 {
@@ -472,19 +475,9 @@ static void save_log(const char *name)
     len -= start;
     for (u32 i = 0; i < len; i++)
         LOG_BOUNCE[i] = LOG_BUF[start + i];
-    char cmd[96];
-    char *p = cmd;
-    const char *a = "fatwrite $isp_if $isp_dev 1b00000 ";
-    while (*a)
-        *p++ = *a++;
-    while (*name)
-        *p++ = *name++;
-    *p++ = ' ';
-    p = fmt_num(p, len, 16, 0, ' ', 0);
-    *p = 0;
-    set_note(cmd);
-    ub_run(cmd);
-    set_note(0);
+    int fr = fs_save(name, LOG_BOUNCE, len);   /* our own FAT writer; U-Boot's card code is not used */
+    if (fr)
+        lprintf("--- %s: card write failed (%d)\n", name, fr);
 }
 
 static void hexdump(const u8 *b, int n, u32 base)
@@ -1743,6 +1736,7 @@ static int handoff_take(void)
     return ok;
 }
 
+static void installer_fail(const char *why);
 /* A failure that would otherwise end the payload (and with it the MCU heartbeat: the MCU then cuts power). Test
  * builds and a first failure reset (the card's build retries); a second failure in a row stays up without the
  * network so the unit keeps power and the screen shows why. */
@@ -1766,11 +1760,14 @@ static void fail_count_set(u32 n)
     __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(0x01F0F040u) : "memory");
 }
 
+static void installer_fail(const char *why);
 /* A failure that would otherwise end the payload (and with it the MCU heartbeat: the MCU then cuts power). Never
  * stays offline for good (2026-11-01: a unit that stayed up without the network all night could only be reached by
  * hand): reset at once the first time, then wait 1, 2, 4 .. 30 minutes with the error on screen before each retry. */
 static void fail_or_stay(unsigned int vec, const char *why)
 {
+    if (installer_boot)
+        installer_fail(why);   /* a reset here would end the demo in the original firmware: stay up and say why */
     u32 n = fail_count();
     u32 wait_s = exec_trial || n == 0 ? 0 : (60u << (n - 1 > 5 ? 5 : n - 1));
     if (wait_s > 1800)
@@ -1802,8 +1799,10 @@ static int load_config(void)
     for (int i = 0; i < 4096; i++)
         WIFI_TXT[i] = 0;
     /* the stage-1 loads that work use no size argument; U-Boot's own ispsp code names files with a leading slash */
-    if (run("fatload $isp_if $isp_dev 2100000 WIFI.TXT") && run("fatload $isp_if $isp_dev 2100000 /WIFI.TXT") &&
-        run("fatload $isp_if $isp_dev 2100000 /WIFI.TXT fff")) {
+    /* our own card driver, never U-Boot's: on the installer boot U-Boot's mmc device list was unusable by now (a
+     * fault in its find_mmc_device, 0xf75610, on the first fatload) */
+    u32 wl = 0;
+    if (fs_load("WIFI.TXT", WIFI_TXT, 4095, &wl)) {
         log_s("config: no /WIFI.TXT (lines ssid=, psk=, token=, optional ip=): no home network, the car network only; "
               "HU1 commands off (no token)\n");
         return 0;
@@ -5026,6 +5025,7 @@ static void net_loop(void)
                     power_off();
                 }
                 flush("reboot");
+                *(volatile u32 *)0x9c00317cu = 0;   /* asked for: a normal boot, also from the installer's session */
                 run("reset");
             }
         }
@@ -5222,11 +5222,35 @@ static void installer_setup(void)
         hb_tick();
         vTaskDelay(pdMS_TO_TICKS(20));
     }
+    if (crash_brief[0]) {   /* this is a retry after a crash: show the crash, it is what matters now */
+        notice_set(2, -1, "Crashed on the last try", crash_rep);
+        return;
+    }
     notice_set(2, -1, "Trying this firmware",
                "It runs from the SD card and has changed nothing on the unit. In about two minutes the unit restarts "
                "by itself into its original firmware.\n\nTo keep this firmware: Settings > Flash > Set up, within the "
                "first 90 seconds. After that the unit starts it from the card at every power-on, and Remove on the same "
                "row undoes it. To try again later, copy ISP_UPDT.BIN and ISPBOOOT.BIN to the card again.");
+}
+
+/* The installer boot never resets on a failure: the reason and the end of the log go on screen, and the UI stays up
+ * until the unit's own restart. */
+static void installer_fail(const char *why)
+{
+    static char body[512];
+    u32 len = log_len, k = 0, tail = len > 380 ? len - 380 : 0;
+    for (const char *p = why; *p && k < 80; p++)
+        body[k++] = *p;
+    body[k++] = '\n';
+    for (u32 i = tail; i < len && k < sizeof body - 1; i++)
+        body[k++] = LOG_BUF[i];
+    body[k] = 0;
+    lprintf("installer boot: FAILURE: %s; staying up without the network\n", why);
+    notice_set(2, -1, "Problem starting", body);
+    for (;;) {
+        hb_tick();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 }
 
 /* Everything that calls U-Boot (USB for Wi-Fi, mmc/fat, commands, get_timer/udelay) stays in this one task: the old
@@ -5239,10 +5263,18 @@ static void net_task(void *arg)
     irq_watchdog(90);   /* a hang now reboots (crash=hang@pc) instead of needing a power cycle */
     irq_hw_watchdog(6);   /* and a dead tick (GIE off, bus stall) resets before the MCU cuts power (~9 s) */
     flush("hooked");
+    lprintf("intc: masks found at boot %x %x %x %x %x %x %x (all cleared, then the tick alone); installer try %u\n",
+            irq_boot_mask[0], irq_boot_mask[1], irq_boot_mask[2], irq_boot_mask[3], irq_boot_mask[4], irq_boot_mask[5],
+            irq_boot_mask[6], installer_tries);
     if (pending_crash_save) {   /* one file per crash, named after the report's CRC */
         char name[16];
         vfmt_n(name, "C%07x.TXT", crc32_le((const u8 *)LOG_BUF, (int)log_len) & 0xfffffff);
-        save_log(name);
+        if (installer_boot) {   /* our own FAT writer: U-Boot's is not trusted on the update path */
+            int fr = card_log ? fs_save(name, LOG_BUF, log_len) : 0;
+            lprintf("--- crash log %s: %d\n", name, fr);
+        } else {
+            save_log(name);
+        }
         if (prev_log_len && card_log) {   /* and the crashed run's own log, as P<same id>.TXT */
             name[0] = 'P';
             lprintf("--- saving the previous run's log (%u bytes) as %s\n", prev_log_len, name);
@@ -5337,7 +5369,7 @@ static void disp_boot(void)
         lprintf("disp: panel bin: %s; display left as it is\n", why);
         return;
     }
-    if (up && !installer_boot)
+    if (up)   /* measured on the installer boot: the timing is NOT set there, so our routine runs */
         return;
     u32 t0 = clk_ms();
     disp_init(&pan);
@@ -5430,6 +5462,22 @@ int payload_entry(int argc, char *const argv[])
         const char *a = argv[2];
         installer_boot = a[0] == 'i' && a[1] == 's' && a[2] == 'p' && !a[3];
     }
+    {   /* U-Boot's relocation offset, before anything calls into it (check_uboot verifies it further down) */
+        u32 gp;
+        __asm__ volatile("mov55 %0, $gp" : "=r"(gp));
+        reloc = gp - UB_GP_LINK;
+    }
+    if (installer_boot) {   /* a crash or watchdog reset comes back here, not to the original firmware: the next
+                             * run then shows the crash. At most three times; a power cycle always ends it. */
+        volatile u32 *c = (volatile u32 *)(MM_CRUMB + 0x60);
+        u32 n = c[0] == 0x52505349u && c[1] < 100 ? c[1] : 0;
+        c[0] = 0x52505349u, c[1] = n + 1;
+        __asm__ volatile("cctl %0, L1D_VA_WB\n\tmsync all" ::"r"(MM_CRUMB + 0x60) : "memory");
+        installer_tries = n + 1;
+        irq_reset_mode = n < 3 ? 0x54524151u : 0;   /* "QART": xboot starts from the card's update file again */
+        *(volatile u32 *)0x9c00317cu = irq_reset_mode;
+    }
+    isp_mark("entry");
     /* the previous run ended in a crash record: keep the tail of its log before ours overwrites it */
     prev_log_len = irq_prev_log_len();
     if (prev_log_len) {
@@ -5440,7 +5488,9 @@ int payload_entry(int argc, char *const argv[])
     }
     irq_log_len_ptr = (volatile unsigned int *)&log_len;
     ecos_boot_check();   /* returns unless /ECOSRUN.FLG asks for a stock eCos snapshot run */
+    isp_mark("ecos check");
     vdec_hw_reset();   /* a decoder left running by the previous run stops here */
+    isp_mark("decoder reset");
     lprintf("net main, build %s%s\n", hu_build_id, installer_boot ? ", installer boot (go ... main isp)" : "");
     isp_mark("main");
     mem_boot_check();
@@ -5480,7 +5530,7 @@ int payload_entry(int argc, char *const argv[])
         fb_enable();   /* text console on OSD0 from here on */
     isp_mark("console on");
     {
-        static char rep[1024];
+        char *rep = crash_rep;
         if (irq_crash_report(rep, crash_brief)) {
             prev_boot_failed = crash_brief[0] == 'f' && crash_brief[1] == 'a';   /* "fail": second failure stays up */
             crash_until = ub_ms(0) + 120000;

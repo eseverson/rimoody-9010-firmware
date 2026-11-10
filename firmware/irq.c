@@ -263,10 +263,11 @@ static void isr(u32 vec, u32 *frame)
 }
 
 /* ---- crash path ---- */
+volatile u32 irq_reset_mode;
 static void reset_unit(void)
 {
     REG(0x9c003104) |= 0x20;   /* U-Boot reset_cpu(0), 0xf0aa26 */
-    REG(0x9c00317c) = 0;
+    REG(0x9c00317c) = irq_reset_mode;   /* 0: a normal boot; the installer boot keeps xboot's card boot mode */
     for (volatile int i = 0; i < 200000; i++)
         ;
     REG(0x9c000054) = 0x10001;
@@ -385,6 +386,8 @@ void irq_init(void)
     installed = 1;
 }
 
+u32 irq_boot_mask[7];
+static int irq_boot_mask_seen;
 int irq_enable(u32 hz)
 {
     if (!installed || hz < 3 || hz > 1000)
@@ -397,6 +400,17 @@ int irq_enable(u32 hz)
     REG(TMR_PRESCALE) = d - 1;
     REG(TMR_RELOAD) = reload - 1;
     REG(TMR_COUNT) = reload - 1;
+    /* Only our tick may interrupt. A boot through the original firmware's update (a reset from the running OS) can
+     * leave its sources unmasked: any of them is a storm of interrupts the ISR does not serve, the storm guard then
+     * stops the tick and the hardware watchdog resets the unit seconds later. What was found is kept for the log. */
+    for (int g = 0; g < 7; g++) {
+        if (!irq_boot_mask_seen)
+            irq_boot_mask[g] = REG(INTC_MASK + 4 * g);
+        REG(INTC_MASK + 4 * g) = 0;
+        REG(INTC_CLEAR + 4 * g) = 0xffffffffu;
+    }
+    irq_boot_mask_seen = 1;
+    MSYNC();
     REG(INTC_TYPE + TGRP) |= TBIT;   /* edge (0x608176 with r1 = 0) */
     REG(INTC_POL + TGRP) &= ~TBIT;   /* rising (r2 = 1) */
     REG(INTC_PRI + TGRP) |= TBIT;    /* EXT_INT0, as eCos/Linux init all sources */
