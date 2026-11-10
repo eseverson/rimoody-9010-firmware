@@ -2,6 +2,10 @@
 
 Reverse engineering and replacement firmware for the **Rimoody 9" single-DIN car stereo, model 9010** (printed on the front bezel), sold as "Rimoody 9'' Single Din Car Stereo Wireless CarPlay Android Auto Detachable". It runs on a Sunplus SPHE8268K SoC with stock eCos firmware. This one is installed in the owner's Miata. The stock firmware stays in NOR flash; a patched U-Boot boot script loads our own bare-metal payload (`firmware`) from the SD card instead. The payload runs FreeRTOS on its own NDS32 port with our own USB, Wi-Fi, SD/FAT, display, touch, audio and H.264 drivers, shows an LVGL UI, runs wireless Android Auto, and is driven from a PC over Wi-Fi with `tools/hu.py`. Linux is not an option: the CPU has an MPU, not a paging MMU (`notes/linux_feasibility.md`).
 
+A one-minute tour of what is built (UI captures from the unit; the video slides use a synthetic test stream):
+
+https://github.com/user-attachments/assets/7f5d5dc7-6e97-40d7-84ee-3d8b79288821
+
 Working on the unit today:
 
 - Boot: power-on runs the NOR boot script (flash 0xE00000), which loads `/BOOT.BIN` from the card to 0x01800000 and jumps to it; with no `BOOT.BIN` it falls through to stock eCos (`isp/bootcmd/boot.txt`).
