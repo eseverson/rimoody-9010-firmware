@@ -530,7 +530,7 @@ static int row_text(int stage, char *label, int lmax, char *button, int bmax)
         else if (s1_resume >= 0)
             plat_fmt(t, "Boot path: the last change FAILED half way, retry it"), f = jb == &pu ? 2 : 1;
         else if (inst_stage1_done(&pb))
-            plat_fmt(t, "Boot from the SD card, else from flash: set up"), f = 2;
+            plat_fmt(t, "Boot from the SD card, else from flash: installed"), f = 2;
         else if (pb.refuse)
             plat_fmt(t, "Boot from the SD card, else from flash: not possible (%s)", pb.refuse);
         else
