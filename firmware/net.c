@@ -3152,8 +3152,10 @@ static int fb_status(char *t)
 void plat_mcu_write(const cu8 *f, int n) { uart_write(f, n); }
 
 /* ACC off: one log file with a fresh name (S + 7 hex digits from the uptime and the log length) */
+static void key_off(void);
 void plat_mcu_shutdown(void)
 {
+    key_off();
     char name[16];
     vfmt_n(name, "S%07x.TXT", (ub_ms(0) ^ (log_len << 12)) & 0xfffffff);
     save_log(name);
@@ -3621,6 +3623,37 @@ int plat_ui_lights(void)
 }
 static volatile int ui_req_night = -1;
 void plat_ui_night(int on) { ui_req_night = on; }
+
+/* Bezel button lights, as stock's Settings > System > Key Lights drives them (notes/display_touch.md): GPIO38 powers
+ * them, GPIO20/21/22 pick red/green/blue (on or off, no dimming). Masked GPIO writes (upper half = mask) to the
+ * first-function, output-enable and output registers; nothing to the MCU. Stock does not tie them to the headlights;
+ * mode 2 does. Net task only. */
+#define REG32(a) (*(volatile u32 *)(a))
+static volatile int key_mode = -1, key_rgb = 7, key_dirty;
+static int key_night;
+void plat_ui_keylight(int mode, int rgb) { key_mode = mode, key_rgb = rgb & 7, key_dirty = 1; }
+static void key_apply(void)
+{
+    static int inited;
+    if (key_mode < 0)
+        return;
+    if (!inited) {
+        inited = 1;
+        REG32(0x9C0032E4) |= 0x00700000u;   /* GPIO20..22 as GPIO */
+        REG32(0x9C0032E8) |= 0x00000040u;   /* GPIO38 as GPIO */
+        REG32(0x9C000304) = 0x00700070u, REG32(0x9C000324) = 0x00700070u;   /* master, output enable */
+        REG32(0x9C000308) = 0x00400040u, REG32(0x9C000328) = 0x00400040u;
+    }
+    int on = key_mode == 1 || (key_mode == 2 && key_night);
+    u32 rgb = on ? (u32)key_rgb : 0;
+    REG32(0x9C000344) = 0x00700000u | rgb << 4;   /* GPIO20 red, 21 green, 22 blue */
+    REG32(0x9C000348) = 0x00400000u | (on ? 0x40u : 0);   /* GPIO38 power */
+}
+static void key_off(void)   /* shutdown: colors first, then the power line, as stock */
+{
+    REG32(0x9C000344) = 0x00700000u;
+    REG32(0x9C000348) = 0x00400000u;
+}
 
 /* UI settings (UI.TXT on the card, key=value lines): read once before the UI starts, written by the net task */
 static char ui_settings_in[256], ui_settings_out[256];
@@ -4878,6 +4911,10 @@ static void net_loop(void)
                 ui_req_hide = 0;
                 vpp_hide();
             }
+            if (key_dirty) {
+                key_dirty = 0;
+                key_apply();
+            }
             if (ui_req_bright >= 0) {
                 int pc = ui_req_bright;
                 ui_req_bright = -1;
@@ -4887,6 +4924,7 @@ static void net_loop(void)
                 int on = ui_req_night;
                 ui_req_night = -1;
                 aa_set_night(on);
+                key_night = on, key_dirty = 1;
                 lprintf("ui: headlights %s\n", on ? "on (night)" : "off (day)");
             }
             if (ui_req_save) {

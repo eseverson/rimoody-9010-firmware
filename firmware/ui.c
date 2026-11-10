@@ -37,6 +37,10 @@ static int volume = 20, muted, dark = 1;
 /* display settings (UI.TXT): backlight in percent by day and with the headlights on; theme 0 light, 1 dark, 2 auto
  * (dark while the headlights are on) */
 static int bright_day = 100, bright_night = 40, theme_mode = 1;
+/* bezel button lights (UI.TXT keylight=, keycolor=): mode 0 off, 1 on, 2 only with the headlights on; color index into
+ * key_rgb, stock's Key Lights order */
+static int key_mode = 1, key_color = 6;
+static const unsigned char key_rgb[] = { 1, 2, 3, 4, 5, 6, 7 };   /* bit 0 red, 1 green, 2 blue */
 static int lights;   /* debounced headlight input */
 static int card_log = CARD_LOG_DEFAULT;   /* UI.TXT cardlog=: crash, shutdown and car logs on the SD card */
 static int boot_console = 1;   /* UI.TXT boot=1: power up into the text console (Home goes to the home screen) */
@@ -343,20 +347,23 @@ static void settings_load(void)
     volume = kv_int(settings_text, "vol", volume, 0, VOL_MAX);
     boot_console = kv_int(settings_text, "boot", boot_console, 0, 1);
     card_log = kv_int(settings_text, "cardlog", card_log, 0, 1);
+    key_mode = kv_int(settings_text, "keylight", key_mode, 0, 2);
+    key_color = kv_int(settings_text, "keycolor", key_color, 0, 6);
     kv_list(settings_text, "eq", eq_db, EQ_N, -12, 12);
     plat_ui_aa_enable(aa_enabled);
     plat_ui_aa_dpi(aa_dpi);
     plat_ui_bt_name(bt_name);
     plat_ui_wifi_mode(wifi_mode);
     plat_ui_card_log(card_log);
+    plat_ui_keylight(key_mode, key_rgb[key_color]);
 }
 
 static void settings_save(void)
 {
     char t[256];
-    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nbtname=%s\nwifimode=%d\nvol=%d\nboot=%d\ncardlog=%d\neq=",
+    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nbtname=%s\nwifimode=%d\nvol=%d\nboot=%d\ncardlog=%d\nkeylight=%d\nkeycolor=%d\neq=",
                         bright_day, bright_night, theme_mode, aa_enabled, aa_dpi, bt_name, wifi_mode, volume,
-                        boot_console, card_log);
+                        boot_console, card_log, key_mode, key_color);
     for (int i = 0; i < EQ_N; i++)
         k += lv_snprintf(t + k, sizeof t - (unsigned)k, "%d%s", eq_db[i], i < EQ_N - 1 ? "," : "\n");
     plat_ui_settings_save(t);
@@ -472,6 +479,23 @@ static void boot_cb(lv_event_t *e)
     if (i > 1)
         return;
     boot_console = (int)i;
+    settings_save();
+}
+
+static void keymode_cb(lv_event_t *e)
+{
+    uint32_t i = lv_buttonmatrix_get_selected_button(lv_event_get_target(e));
+    if (i > 2)
+        return;
+    key_mode = (int)i;
+    plat_ui_keylight(key_mode, key_rgb[key_color]);
+    settings_save();
+}
+
+static void keycolor_cb(lv_event_t *e)
+{
+    key_color = (int)lv_dropdown_get_selected(lv_event_get_target(e));
+    plat_ui_keylight(key_mode, key_rgb[key_color]);
     settings_save();
 }
 
@@ -999,6 +1023,22 @@ static void build_settings(void)
     lv_obj_set_size(bm, 330, 64);
     lv_obj_set_style_pad_all(bm, 4, 0);
     lv_obj_add_event_cb(bm, theme_cb, LV_EVENT_VALUE_CHANGED, 0);
+    r = row(p, "Button lights");
+    static const char *const key_map[] = { "Off", "On", "Headlights", "" };
+    lv_obj_t *km = lv_buttonmatrix_create(r);
+    lv_buttonmatrix_set_map(km, key_map);
+    lv_buttonmatrix_set_button_ctrl_all(km, LV_BUTTONMATRIX_CTRL_CHECKABLE);
+    lv_buttonmatrix_set_one_checked(km, true);
+    lv_buttonmatrix_set_button_ctrl(km, (uint32_t)key_mode, LV_BUTTONMATRIX_CTRL_CHECKED);
+    lv_obj_set_size(km, 400, 64);
+    lv_obj_set_style_pad_all(km, 4, 0);
+    lv_obj_add_event_cb(km, keymode_cb, LV_EVENT_VALUE_CHANGED, 0);
+    r = row(p, "Button light color");
+    lv_obj_t *kc = lv_dropdown_create(r);
+    lv_dropdown_set_options_static(kc, "Red\nGreen\nYellow\nBlue\nMagenta\nCyan\nWhite");
+    lv_dropdown_set_selected(kc, (uint32_t)key_color);
+    lv_obj_set_width(kc, 200);
+    lv_obj_add_event_cb(kc, keycolor_cb, LV_EVENT_VALUE_CHANGED, 0);
 
     p = page(scr_settings, 3, "Audio", nav);
     build_eq(p);

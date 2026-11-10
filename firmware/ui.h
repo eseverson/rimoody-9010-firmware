@@ -20,6 +20,7 @@ int ui_aa_visible(void);                        /* the AA view is up: show its v
 #ifndef CARD_LOG_DEFAULT
 #define CARD_LOG_DEFAULT 1
 #endif
+void plat_ui_keylight(int mode, int color);      /* bezel button lights: mode 0 off, 1 on, 2 with the headlights; color 1..7 (bit 0 red, 1 green, 2 blue) */
 void plat_ui_card_log(int on);                  /* write log files to the SD card (UI.TXT cardlog=) */
 void plat_ui_mute(int on);                      /* MCU system mute and the DSP master mute */
 void plat_ui_volume(int index);
