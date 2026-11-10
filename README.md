@@ -216,3 +216,7 @@ Other tools, one line each:
 - [session-state.md](notes/session-state.md): early session log (2026-10-31 to 11-01); outdated, kept for history.
 - [usb_host.md](notes/usb_host.md): U-Boot's USB PHY/EHCI init sequence.
 - [vpp0_display.md](notes/vpp0_display.md): VPP0 bring-up from first probes to live AA video at 30 fps.
+
+## License
+
+This project's own code, tools and notes are under the MIT License ([LICENSE](LICENSE)). Vendored components keep their own licenses, in their directories under `firmware/`: FreeRTOS (MIT), lwIP (BSD 3-clause), Mbed TLS (Apache 2.0), LVGL (MIT), FatFs (BSD 1-clause style) and the LZMA SDK decoder (public domain). `firmware/rtl8188fufw.bin` is Realtek's Wi-Fi firmware, redistributed under its linux-firmware license. The release's SD-card installer contains the unit's stock U-Boot and xboot; no stock eCos code, DSP microcode or certificate is in this repository: the firmware reads those from each unit's own flash.
