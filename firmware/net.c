@@ -57,6 +57,7 @@ typedef signed char s8;
 #include "semphr.h"
 #include "freertos/port/port_nds32.h"
 #include "console.h"
+#include "disp.h"
 #include "memmap.h"
 
 static char crash_brief[64];
@@ -5301,6 +5302,35 @@ static void mem_boot_check(void)
             low, MM_UBOOT, ok ? "ok" : "OVERLAP");
 }
 
+/* The display path at boot. A normal power-on has it from U-Boot's logo routine; the SD-card installer's boot skips that
+ * routine, so the panel stays black (disp.c). Logs what the timing generator holds, then runs our copy of the routine on
+ * the installer boot, or on any boot that finds the TGEN without the panel's timing. Register writes only, no U-Boot
+ * calls, before the decoder, VPP0 and OSD0 are used. */
+static void disp_boot(void)
+{
+    static struct disp_panel pan;
+    struct disp_state st;
+    const char *why;
+    int have = !disp_panel_find((const u8 *)DISP_FLASH, DISP_FLASH_SIZE, &pan, &why);
+    int up = disp_state(have ? &pan : 0, &st);
+    lprintf("disp: TGEN cfg %x rst %x total %ux%u active %u lines %u..%u, line %u -> %u (%s), TCON %x: %s\n", st.cfg,
+            st.rst, st.htotal, st.vtotal, st.hact, st.vstart, st.vend, st.line0, st.line1,
+            st.moving ? "running" : "stopped", st.tcon,
+            !have ? "panel bin unusable" : up ? "panel timing set" : "panel timing NOT set");
+    if (!have) {
+        lprintf("disp: panel bin: %s; display left as it is\n", why);
+        return;
+    }
+    if (up && !installer_boot)
+        return;
+    u32 t0 = clk_ms();
+    disp_init(&pan);
+    up = disp_state(&pan, &st);
+    lprintf("disp: panel init (%u entries, %s) in %u ms: total %ux%u, line %u -> %u (%s): %s\n", pan.n,
+            installer_boot ? "installer boot" : "TGEN was not set", clk_ms() - t0, st.htotal, st.vtotal, st.line0,
+            st.line1, st.moving ? "running" : "stopped", up ? "ok" : "FAILED");
+}
+
 __attribute__((section(".text.entry"), used))
 /* One-shot boot of the stock eCos with the snapshot hook (tools/ecos-snap, tools/ecos_snap.py card): if /ECOSRUN.FLG is
  * on the card, delete it, load /ECOSP.BIN (the decompressed eCos with the hook call sites patched) to 0x00301040,
@@ -5397,6 +5427,7 @@ int payload_entry(int argc, char *const argv[])
     vdec_hw_reset();   /* a decoder left running by the previous run stops here */
     lprintf("net main, build %s%s\n", hu_build_id, installer_boot ? ", installer boot (go ... main isp)" : "");
     mem_boot_check();
+    disp_boot();
     {
         static char crumb_msg[96];
         if (vdec_crumb_report(crumb_msg, vfmt_n))

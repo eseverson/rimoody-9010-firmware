@@ -123,6 +123,7 @@ Important files in `firmware/`:
 | `aa.c`, `aa_tls.c`, `aa_tcp.c`, `aa_wl.c` | Android Auto protocol, TLS (mbedtls), TCP transport, wireless handshake over RFCOMM. |
 | `vdec.c`, `h264p.c` | Hardware H.264 decoder and header parser. |
 | `vpp.c`, `osdvid.c` | Video on VPP0 (the goal) and through OSD0 (fallback). |
+| `disp.c` | Panel and display-path init for the SD-card installer's boot, which skips U-Boot's own ([notes/display_touch.md](notes/display_touch.md)). |
 | `audio.c` | DSP bring-up, mixer, EQ. |
 | `ui.c`, `ui_logo.c`, `lv_conf.h`, `console.c` | LVGL UI and the text console. |
 | `mcu.c`, `gt9.c` | AC6965A frames, GT911 touch. |
