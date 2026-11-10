@@ -25,7 +25,7 @@
 #define INST_COPY_VERSION 1u
 #define INST_COPY_BLOCKS  ((INST_COPY_END - INST_COPY_OFF) / 0x10000u)   /* 25 */
 /* header fields (little-endian u32 unless noted) */
-#define CH_MAGIC    0x00
+#define CH_MAGIC    0x00   /* "HUNC" = boots; 0xFFFFFFFF = not committed yet; 0 = being removed (zeroed first) */
 #define CH_VERSION  0x04
 #define CH_LEN      0x08   /* image bytes */
 #define CH_CRC      0x0C   /* CRC-32 of the image */
@@ -48,6 +48,7 @@ enum { INST_ENV_NONE, INST_ENV_STOCK, INST_ENV_PATCHED, INST_ENV_MANY };
 
 struct inst_boot {
     const char *refuse;           /* 0: the plan may be written (nblk may be 0: nothing to do) */
+    int undo;                     /* a plan of inst_plan_unboot: back to the stock boot */
     unsigned body, hsum, dsum;    /* U-Boot uImage body size and its word sums as found */
     int env_state;                /* INST_ENV_* */
     unsigned env_off;             /* flash offset of the (stock or patched) environment string */
@@ -80,9 +81,11 @@ const char *inst_script_text(void);
 unsigned inst_script_image(unsigned char *out);   /* the version 2 script as a legacy uImage (<= 4 KB); its length */
 int inst_script_class(const unsigned char *blk, const unsigned char *want, int *ver, unsigned *hcrc);
 int inst_plan_boot(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot *b);
+int inst_plan_unboot(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot *b);   /* undo stage 1 */
 int inst_region(inst_rd rd, void *ctx, unsigned char *scratch64k, struct inst_copy *c);
 int inst_image_ok(const unsigned char *img, unsigned len, char *build);   /* 0, or why the image is refused */
 int inst_plan_copy(const unsigned char *img, unsigned len, const struct inst_boot *b, struct inst_copy *c);
+int inst_plan_uncopy(struct inst_copy *c);   /* after inst_region: may the region be erased (ours only) */
 int inst_stage1_done(const struct inst_boot *b);   /* environment patched and a valid version >= 2 script */
 
 #ifndef INSTALL_HOST
@@ -90,10 +93,12 @@ int inst_stage1_done(const struct inst_boot *b);   /* environment patched and a 
 typedef int (*inst_fmt)(char *, const char *, ...);
 int install_op(const unsigned char *p, int n, char *out, inst_fmt fmt);   /* HU1 op 29 sub-ops 9..13 */
 void install_poll(void);              /* net loop: one bounded step of a running install */
-void install_request(int stage);      /* UI: 1 boot path, 2 this firmware (BOOT.BIN), 3 refresh the status line */
+void install_request(int what);       /* UI: 1 boot path, 2 this firmware (BOOT.BIN), 3 refresh the status,
+                                       * 4 remove the boot path, 5 remove the flash copy */
+int install_ui(int stage, char *label, int lmax, char *button, int bmax);   /* Settings > Flash row of stage 1 or 2:
+                                       * its text and main button text; returns 1 = main button, 2 = Remove, 3 = both */
 int install_busy(void);               /* a stage is being written */
 int install_line(char *out, int max); /* one line for Settings > System (any task) */
-void install_set_boot_src(int src);   /* what the boot script loaded at power-on: 0 unknown, 1 SD card, 2 NOR copy */
 int plat_load_file(const char *name, void *dst, unsigned max, unsigned *len);   /* net.c: card file into RAM */
 #endif
 #endif

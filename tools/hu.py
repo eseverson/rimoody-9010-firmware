@@ -30,6 +30,8 @@ UDP 5151. Requests carry the shared token from WIFI.TXT on the card (`--token` o
   hu.py nor install dryrun [nor|sd]  run the version 2 boot script from RAM with every side effect echoed
   hu.py nor install boot --write     stage 1: the boot path (SD card, flash copy, stock); notes/nor_install.md
   hu.py nor install firmware [FILE] --write   stage 2: FILE (or the card's BOOT.BIN = the running build) to flash
+  hu.py nor install remove-boot --write      undo stage 1: stock environment, script erased (only stock eCos starts)
+  hu.py nor install remove-firmware --write  undo stage 2: erase the flash copy
 
 The target IP comes from --ip, $HU_IP, or the first hello heard. Stdlib only.
 """
@@ -618,9 +620,9 @@ def do_install(u, a):
     sub = a.args[0] if a.args else 'status'
     rest = a.args[1:]
     u.sock.settimeout(max(a.timeout, 20.0))   # status reads ~3 MB of flash and BOOT.BIN; a retransmit gets the cache
-    if sub not in ('status', 'progress', 'dryrun', 'boot', 'firmware', 'script'):
+    if sub not in ('status', 'progress', 'dryrun', 'boot', 'firmware', 'script', 'remove-boot', 'remove-firmware'):
         sys.exit('usage: nor install status [FILE] | progress | script | dryrun [nor|sd] | boot --write | '
-                 'firmware [FILE] --write')
+                 'firmware [FILE] --write | remove-boot --write | remove-firmware --write')
 
     def upload(path):
         data = open(path, 'rb').read()
@@ -659,7 +661,7 @@ def do_install(u, a):
         print(u.call(OP_NOR, bytes([9]) + (upload(rest[0]) if sub == 'firmware' and rest else b'')).decode(
             errors='replace'), end='')
         sys.exit('nor install %s writes the flash: the status above is the dry run; add --write' % sub)
-    pl = struct.pack('<BI', 10 if sub == 'boot' else 11, NOR_MAGIC)
+    pl = struct.pack('<BI', {'boot': 10, 'firmware': 11, 'remove-boot': 14, 'remove-firmware': 15}[sub], NOR_MAGIC)
     if sub == 'firmware' and rest:
         pl += upload(rest[0])
     r = u.call(OP_NOR, pl).decode(errors='replace')

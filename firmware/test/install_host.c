@@ -3,6 +3,8 @@
  *   install_host boot FLASH [OUT]          plan stage 1; OUT = FLASH with the planned blocks written
  *   install_host copy FLASH IMAGE [OUT] [pending]   plan stage 2 (stage 1 plan and region scan first); OUT = the copy
  *                                          written (pending: without the magic word, as an interrupted install leaves it)
+ *   install_host unboot FLASH [OUT]        plan the stage 1 undo; OUT = FLASH with it written
+ *   install_host uncopy FLASH [OUT]        plan the stage 2 undo; OUT = the region as the device leaves it
  *   install_host region FLASH              classify the copy region
  *   install_host script | scriptimg OUT    the version 2 script text / uImage
  *
@@ -90,14 +92,25 @@ int main(int argc, char **argv)
         return fprintf(stderr, "%s: not a 16 MB flash image\n", argv[2]), 1;
     struct inst_boot b;
     struct inst_copy c;
-    if (!strcmp(argv[1], "region")) {
+    if (!strcmp(argv[1], "region") || !strcmp(argv[1], "uncopy")) {
         inst_region(rd_file, 0, buf, &c);
         print_region(&c);
-        return 0;
+        if (argv[1][0] == 'r')
+            return 0;
+        int rc = inst_plan_uncopy(&c);
+        printf("uncopy_refuse=%s\n", c.refuse ? c.refuse : "");
+        if (rc)
+            return 2;
+        memset(flash + INST_COPY_OFF, 0, 4);   /* the device's steps: zero the magic, erase the blocks with data */
+        for (unsigned k = 0; k < INST_COPY_BLOCKS; k++)
+            if (c.erase_mask >> k & 1)
+                memset(flash + INST_COPY_OFF + k * 0x10000, 0xff, 0x10000);
+        return argc >= 4 && save(argv[3], flash, NOR_SIZE) ? 1 : 0;
     }
-    int r = inst_plan_boot(rd_file, 0, work, &b);
+    int undo = !strcmp(argv[1], "unboot");
+    int r = undo ? inst_plan_unboot(rd_file, 0, work, &b) : inst_plan_boot(rd_file, 0, work, &b);
     print_boot(&b);
-    if (!strcmp(argv[1], "boot")) {
+    if (!strcmp(argv[1], "boot") || undo) {
         if (r)
             return 2;
         for (int k = 0; k < b.nblk; k++) {   /* the device writes these with nor_boot_write: check its rule too */

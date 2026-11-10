@@ -44,6 +44,9 @@ void plat_ui_wifi_set(const char *ssid, const char *psk);   /* rewrite WIFI.TXT'
 void plat_ui_nor_dump(void);                     /* back up the whole flash to NORDUMP.BIN on the card */
 int plat_ui_nor_dump_status(char *out, int max); /* one line: idle, progress or the result */
 int plat_ui_install_status(char *out, int max);  /* one line: boot order installed, install progress or result */
-void plat_ui_install(int stage);                 /* 1 the boot path (SD, flash copy, stock), 2 this firmware to flash */
+void plat_ui_install(int what);                  /* 1 set up the boot path (SD, flash copy, stock), 2 this firmware to
+                                                 * flash, 3 refresh the status, 4 remove the boot path, 5 remove the copy */
+int plat_ui_install_row(int stage, char *label, int lmax, char *button, int bmax);   /* a Settings > Flash row: its
+                                                 * text, main button text; 1 = main button, 2 = Remove, 3 = both */
 
 #endif

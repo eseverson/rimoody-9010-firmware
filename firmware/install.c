@@ -212,10 +212,14 @@ static int walk_uboot(inst_rd rd, void *ctx, u32 size, u8 *buf, struct uwalk *w)
     return 0;
 }
 
-int inst_plan_boot(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot *b)
+/* stage 1 and its undo share one planner: undo writes the stock environment back over the patched one (same 44 bytes,
+ * same place), recomputes the sums, and erases the script block. Install accepts either environment form; undo only
+ * the patched one, and only with our own script (version 1 or 2) in the script block. */
+static int plan_s1(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot *b, int undo)
 {
     u8 *rb = work + INST_MAX_BLK * BLK, h[64];
     fill((u8 *)b, 0, sizeof *b);
+    b->undo = undo;
     if (rd(ctx, NOR_UBOOT_HDR, h, 64))
         return b->refuse = "flash read failed", -1;
     const char *e = xboot_hdr(h);
@@ -235,14 +239,20 @@ int inst_plan_boot(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot 
     b->env_off = w.n_old ? w.at_old : w.at_new;
     if (!nor_boot_block_ok(blk_base(b->env_off), b->env_off, INST_ENV_LEN))
         return b->refuse = "U-Boot environment outside the blocks stage 1 may write", -1;
+    if (undo && b->env_state != INST_ENV_PATCHED)
+        return b->refuse = "nothing to remove: U-Boot's environment is stock", -1;
+    const u8 *from = undo ? env_new : env_old, *to = undo ? env_old : env_new;
 
     /* the script block: the new one in slot 0, the live one read fresh */
     u8 *ns = work;
     fill(ns, 0xff, BLK);
-    inst_script_image(ns);
+    if (!undo)
+        inst_script_image(ns);
     if (rd(ctx, NOR_SCRIPT_BLK, rb, BLK))
         return b->refuse = "flash read failed", -1;
-    b->scr_state = inst_script_class(rb, ns, &b->scr_ver, &b->scr_crc);
+    b->scr_state = inst_script_class(rb, undo ? 0 : ns, &b->scr_ver, &b->scr_crc);
+    if (undo && (b->scr_state != INST_SCR_OURS || b->scr_ver > (int)INST_SCRIPT_VER))
+        return b->refuse = "the boot script block does not hold our script (version 1 or 2)", -1;
     if (b->scr_state == INST_SCR_FOREIGN)
         return b->refuse = "the boot script block holds something that is not ours", -1;
     if (b->scr_state == INST_SCR_OURS && b->scr_ver > (int)INST_SCRIPT_VER)
@@ -257,13 +267,13 @@ int inst_plan_boot(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot 
     }
 
     b->new_hsum = b->hsum, b->new_dsum = b->dsum;
-    if (b->env_state == INST_ENV_STOCK) {
+    if (b->env_state == (undo ? INST_ENV_PATCHED : INST_ENV_STOCK)) {
         u32 eo = b->env_off, lo = NOR_UBOOT_HDR + 64, hb = blk_base(NOR_UBOOT_HDR);
         if (eo + INST_ENV_LEN > lo + (b->body & ~3u))
             return b->refuse = "U-Boot environment in the body's last partial word", -1;
         u32 d = b->dsum;
         for (u32 i = 0; i < INST_ENV_LEN; i++)
-            d += ((u32)env_new[i] - env_old[i]) << 8 * ((eo + i - lo) & 3);
+            d += ((u32)to[i] - from[i]) << 8 * ((eo + i - lo) & 3);
         u8 nh[64];
         copy(nh, h, 64);
         put_be32(nh + 24, d);
@@ -284,7 +294,7 @@ int inst_plan_boot(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot 
             b->blk_off[k] = off, b->blk_live_crc[k] = inst_crc(0, nb, BLK), b->blk[k] = nb;
             for (u32 i = 0; i < INST_ENV_LEN; i++)
                 if (eo + i >= off && eo + i < off + BLK)
-                    nb[eo + i - off] = env_new[i];
+                    nb[eo + i - off] = to[i];
             for (u32 i = 0; i < 64; i++)
                 if (NOR_UBOOT_HDR + i >= off && NOR_UBOOT_HDR + i < off + BLK)
                     nb[NOR_UBOOT_HDR + i - off] = nh[i];
@@ -301,12 +311,16 @@ int inst_plan_boot(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot 
         u8 rh[64];
         if (rd_overlay(&o, NOR_UBOOT_HDR, rh, 64) || walk_uboot(rd_overlay, &o, b->body, rb, &w))
             return b->refuse = "flash read failed", -1;
-        if (xboot_hdr(rh) || w.dsum != be32(rh + 24) || w.n_old || w.n_new != 1 || w.at_new != eo)
-            return b->refuse = "internal: the patched U-Boot would fail the xboot check", -1;
+        if (xboot_hdr(rh) || w.dsum != be32(rh + 24) || w.n_old + w.n_new != 1 || (undo ? w.at_old : w.at_new) != eo ||
+            (undo ? w.n_old : w.n_new) != 1)
+            return b->refuse = "internal: the rewritten U-Boot would fail the xboot check", -1;
     }
     b->nblk = k;
     return 0;
 }
+
+int inst_plan_boot(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot *b) { return plan_s1(rd, ctx, work, b, 0); }
+int inst_plan_unboot(inst_rd rd, void *ctx, unsigned char *work, struct inst_boot *b) { return plan_s1(rd, ctx, work, b, 1); }
 
 int inst_stage1_done(const struct inst_boot *b)
 {
@@ -317,7 +331,7 @@ int inst_stage1_done(const struct inst_boot *b)
 static int copy_hdr_ours(const u8 *h)
 {
     u32 m = le32(h + CH_MAGIC), len = le32(h + CH_LEN);
-    if ((m != INST_COPY_MAGIC && m != 0xffffffffu) || le32(h + CH_VERSION) != INST_COPY_VERSION ||
+    if ((m != INST_COPY_MAGIC && m != 0xffffffffu && m != 0) || le32(h + CH_VERSION) != INST_COPY_VERSION ||
         le32(h + CH_HDR_LEN) != INST_COPY_HDR || len < 0x100 || len > INST_COPY_MAX)
         return 0;
     if (inst_crc(0, h + 4, CH_HCRC - 4) != le32(h + CH_HCRC))
@@ -419,6 +433,13 @@ int inst_plan_copy(const unsigned char *img, unsigned len, const struct inst_boo
     return 0;
 }
 
+/* undo stage 2: only our own copy (committed, pending or half removed) is erased, never foreign data */
+int inst_plan_uncopy(struct inst_copy *c)
+{
+    c->refuse = c->state == INST_REG_BLANK ? "nothing to remove: the copy region is blank"
+              : c->state == INST_REG_FOREIGN ? "the copy region holds data that is not ours" : 0;
+    return c->refuse ? -1 : 0;
+}
 
 #ifndef INSTALL_HOST
 /* ---- device: runs in the net task ---- */
@@ -432,6 +453,8 @@ extern u8 __hu_data_start[], __hu_data_end[], __hu_image_end[];   /* payload.ld 
 #define IMG  ((u8 *)MM_INSTALL)                   /* the image being installed, INST_COPY_MAX */
 #define WORK ((u8 *)(MM_INSTALL + 0x190000u))     /* inst_plan_boot work: new blocks, then the read buffer */
 #define RBUF (WORK + INST_MAX_BLK * BLK)          /* 64 KB + 64: reads; nor_boot_write's live copy */
+#define WORKU ((u8 *)(MM_INSTALL + 0x1F0000u))    /* inst_plan_unboot work */
+_Static_assert(0x1F0000u >= 0x190000u + INST_WORK_SZ && 0x1F0000u + INST_WORK_SZ <= MM_INSTALL_SZ, "undo work area");
 _Static_assert(0x190000u >= INST_COPY_MAX && 0x190000u + INST_WORK_SZ <= MM_INSTALL_SZ, "MM_INSTALL layout");
 _Static_assert(INST_MAX_BLK * BLK + BLK + 64 <= INST_WORK_SZ, "work buffer");
 
@@ -442,20 +465,23 @@ static int rd_nor(void *ctx, unsigned off, void *dst, unsigned len)
     return nor_read(off, dst, len, 0x0b);   /* fast read: what the driver verifies with (notes/nor_flash.md) */
 }
 
-static struct inst_boot pb;   /* the last boot plan (status, or the one being written) */
-static struct inst_copy pc;   /* the last region scan, or the copy being written */
+static struct inst_boot pb;   /* the last stage 1 plan (status, or the one being written) */
+static struct inst_boot pu;   /* the last stage 1 undo plan */
+static struct inst_copy pc;   /* the last region scan, or the copy being written / removed */
 static int have_status;
-static int job;               /* 0 idle, 1 stage 1, 2 stage 2 */
+enum { J_IDLE, J_BOOT, J_COPY, J_UNBOOT, J_UNCOPY };
+static int job;
+static struct inst_boot *jb;  /* the stage 1 plan job J_BOOT / J_UNBOOT writes: &pb or &pu */
 static int jphase, jidx, jdone, jtotal, jres;   /* jres: 0 none yet, 1 ok, -1 failed */
-static int s1_resume = -1;    /* stage 1 failed at this step: pb (and its blocks in WORK) is kept for a retry */
+static int s1_resume = -1;    /* a stage 1 job (jb) failed at this step: the plan and its blocks are kept for a retry */
 static u32 jt0, jms, want_seq;
 static char jmsg[160];
-static int boot_src;
 static volatile int req;
 static char lines[2][128];
+static struct { char label[128], button[16]; int f; } rows[2][2];   /* [buffer][stage - 1] */
 static volatile int line_cur;
+static const char *const job_name[] = { "", "boot path install", "firmware copy", "boot path removal", "copy removal" };
 
-void install_set_boot_src(int src) { boot_src = src; }
 void install_request(int stage) { req = stage; }
 int install_busy(void) { return job != 0; }
 
@@ -477,12 +503,63 @@ static const char *scr_name(const struct inst_boot *b)
     return b->scr_ver == 1 ? "version 1 (SD card only)" : "ours";
 }
 
-static void refresh(void)   /* read-only: plan stage 1 (unless a retry holds the plan) and scan the copy region */
+static void set_line(void);
+
+static void refresh(void)   /* read-only: plan stage 1 and its undo (unless a retry holds a plan), scan the copy region */
 {
-    if (s1_resume < 0)
+    if (s1_resume < 0) {
         inst_plan_boot(rd_nor, 0, WORK, &pb);
+        inst_plan_unboot(rd_nor, 0, WORKU, &pu);
+    }
     inst_region(rd_nor, 0, RBUF, &pc);
     have_status = 1;
+    set_line();
+}
+
+/* a Settings > Flash row (net task, from set_line): the row text, the main button's text, and which buttons show
+ * (1 main, 2 Remove) */
+static int row_text(int stage, char *label, int lmax, char *button, int bmax)
+{
+    char t[128];
+    int f = 0;
+    const char *btn = "";
+    if (stage == 1) {
+        btn = "Set up";
+        if (job || !have_status)
+            plat_fmt(t, "Boot from the SD card, else from flash");
+        else if (s1_resume >= 0)
+            plat_fmt(t, "Boot path: the last change FAILED half way, retry it"), f = jb == &pu ? 2 : 1;
+        else if (inst_stage1_done(&pb))
+            plat_fmt(t, "Boot from the SD card, else from flash: set up"), f = 2;
+        else if (pb.refuse)
+            plat_fmt(t, "Boot from the SD card, else from flash: not possible (%s)", pb.refuse);
+        else
+            plat_fmt(t, "Boot from the SD card, else from flash"), f = 1;
+    } else {
+        int ours = pc.state == INST_REG_COPY || pc.state == INST_REG_PENDING;
+        int sameb = ours && pc.old_ok;
+        for (int i = 0; sameb && i < 56 && (pc.old_build[i] || hu_build_id[i]); i++)
+            sameb = pc.old_build[i] == hu_build_id[i];
+        btn = ours ? "Update" : "Install";
+        if (job || !have_status || s1_resume >= 0)
+            plat_fmt(t, "Install this firmware to flash");
+        else if (!inst_stage1_done(&pb))
+            plat_fmt(t, ours ? "Flash copy (build %s) unused: set up the boot path first" :
+                               "Install this firmware to flash (set up the boot path first)", pc.old_build), f = ours ? 2 : 0;
+        else if (pc.state == INST_REG_FOREIGN)
+            plat_fmt(t, "Install this firmware to flash: not possible (unknown data in the region)");
+        else if (sameb)
+            plat_fmt(t, "Installed (build %s)", pc.old_build), f = 2;
+        else if (ours && pc.old_ok)
+            plat_fmt(t, "Install this firmware to flash (installed: build %s)", pc.old_build), f = 3;
+        else if (ours)
+            plat_fmt(t, "Install this firmware to flash (the flash copy is incomplete)"), f = 3;
+        else
+            plat_fmt(t, "Install this firmware to flash"), f = 1;
+    }
+    text(label, t, lmax);
+    text(button, btn, bmax);
+    return f;
 }
 
 static void set_line(void)
@@ -490,10 +567,10 @@ static void set_line(void)
     char *l = lines[!line_cur];
     int k;
     if (job)
-        k = plat_fmt(l, "Installing the %s: step %d of %d. Keep the power on.", job == 1 ? "boot path" : "firmware copy",
-                     jdone + 1, jtotal);
+        k = plat_fmt(l, "Flash: %s, step %d of %d. Keep the power on.", job_name[job], jdone + 1, jtotal);
     else if (s1_resume >= 0)
-        k = plat_fmt(l, "Boot path install FAILED half way: keep the power on and press Set up again");
+        k = plat_fmt(l, "The %s FAILED half way: keep the power on and press %s again", job_name[jb == &pu ? J_UNBOOT : J_BOOT],
+                     jb == &pu ? "Remove" : "Set up");
     else if (!have_status)
         k = plat_fmt(l, "Checking the flash...");
     else if (pb.refuse)
@@ -502,12 +579,17 @@ static void set_line(void)
         k = plat_fmt(l, pb.env_state == INST_ENV_PATCHED ? "Boot: SD card, then stock (old boot script)"
                                                          : "Boot: stock only (boot path not set up)");
     else if (pc.state == INST_REG_COPY && pc.old_ok)
-        k = plat_fmt(l, "Boot: SD card, flash copy (build %s, #%u), stock", pc.old_build, pc.old_seq);
+        k = plat_fmt(l, "Boot: SD card, flash copy (build %s), stock", pc.old_build);
     else
         k = plat_fmt(l, "Boot: SD card, then stock (no flash copy)");
     if (!job && jres)
-        plat_fmt(l + k, jres > 0 ? ". Last install ok." : ". Last install failed: %s", jmsg);
+        plat_fmt(l + k, jres > 0 ? ". Last flash change ok." : ". Last flash change failed: %s", jmsg);
     l[127] = 0;
+    for (int st = 0; st < 2; st++) {
+        int b = !line_cur;
+        rows[b][st].f = row_text(st + 1, rows[b][st].label, sizeof rows[b][st].label, rows[b][st].button,
+                                 sizeof rows[b][st].button);
+    }
     line_cur = !line_cur;
 }
 
@@ -517,13 +599,21 @@ int install_line(char *out, int max)
     return 0;
 }
 
+int install_ui(int stage, char *label, int lmax, char *button, int bmax)
+{
+    int b = line_cur, st = stage == 2;
+    text(label, rows[b][st].label, lmax);
+    text(button, rows[b][st].button, bmax);
+    return rows[b][st].f;
+}
+
 static void fail(const char *what, int r)
 {
     char d[96];
     text(d, jmsg, sizeof d);   /* a step may have left the details in jmsg */
     plat_fmt(jmsg, "%s: %s (step %d of %d)%s%s", what, r <= -1 && r >= -10 ? nor_strerror(r) : "check failed", jdone + 1,
              jtotal, d[0] ? "; " : "", d);
-    if (job == 1)
+    if (job == J_BOOT || job == J_UNBOOT)
         s1_resume = jdone;   /* U-Boot may be half written: keep the plan, a retry continues from here */
     job = 0, jres = -1, jms = clk_ms() - jt0;
     refresh();
@@ -576,15 +666,14 @@ static int status_text(char *o, inst_fmt fmt, u32 src, u32 len, u32 crc)
     u32 id = 0;
     nor_jedec(&id);
     refresh();
-    o += fmt(o, "install: flash %06x %s; power-on boot loaded %s; running build %s\n", id,
-             id == NOR_JEDEC ? "(XM25QH128C)" : "(UNKNOWN PART: installs refused)",
-             boot_src == 2 ? "the NOR copy" : boot_src == 1 ? "the SD card's BOOT.BIN" : "? (no hu_src: version 1 script or EXEC)",
-             hu_build_id);
+    o += fmt(o, "install: flash %06x %s; running build %s (boot source: `hu.py cmd 'printenv hu_src'`)\n", id,
+             id == NOR_JEDEC ? "(XM25QH128C)" : "(UNKNOWN PART: installs refused)", hu_build_id);
     if (jres)
         o += fmt(o, "last job: %s in %u ms: %s\n", jres > 0 ? "ok" : "FAILED", jms, jmsg);
     if (s1_resume >= 0)
-        o += fmt(o, "STAGE 1 INTERRUPTED at step %d of %d: U-Boot may be half written. Do not power off; run `install "
-                    "boot --write` again to finish it.\n", s1_resume + 1, pb.nblk);
+        o += fmt(o, "STAGE 1 %s INTERRUPTED at step %d of %d: U-Boot may be half written. Do not power off; run `install "
+                    "%s --write` again to finish it.\n", jb == &pu ? "REMOVAL" : "INSTALL", s1_resume + 1, jb->nblk,
+                 jb == &pu ? "remove-boot" : "boot");
     o += fmt(o, "u-boot: uImage at %06x, body %x bytes, sums hdr %08x data %08x; env %s at %06x\n", NOR_UBOOT_HDR, pb.body,
              pb.hsum, pb.dsum, pb.env_state == INST_ENV_STOCK ? "stock" : pb.env_state == INST_ENV_PATCHED ? "patched" :
              pb.env_state == INST_ENV_MANY ? "FOUND MORE THAN ONCE" : "not found", pb.env_off);
@@ -605,6 +694,16 @@ static int status_text(char *o, inst_fmt fmt, u32 src, u32 len, u32 crc)
             o += fmt(o, "; new sums hdr %08x data %08x", pb.new_hsum, pb.new_dsum);
         o += fmt(o, "\n");
     }
+    o += fmt(o, "stage 1 undo (remove-boot): ");
+    if (pu.refuse)
+        o += fmt(o, "REFUSE: %s\n", pu.refuse);
+    else {
+        o += fmt(o, "would write");
+        for (int k = 0; k < pu.nblk; k++)
+            o += fmt(o, " %06x (%s)", pu.blk_off[k], pu.blk_off[k] == NOR_SCRIPT_BLK ? "script erased" :
+                     pu.blk_off[k] == blk_base(NOR_UBOOT_HDR) ? "uImage sums" : "stock environment");
+        o += fmt(o, "; sums back to hdr %08x data %08x; then only stock eCos starts\n", pu.new_hsum, pu.new_dsum);
+    }
     o += fmt(o, "copy region %06x..%06x: ", INST_COPY_OFF, INST_COPY_END - 1);
     if (pc.state == INST_REG_BLANK)
         o += fmt(o, "blank");
@@ -613,6 +712,15 @@ static int status_text(char *o, inst_fmt fmt, u32 src, u32 len, u32 crc)
     else
         o += fmt(o, "%scopy #%u, build %s, %u bytes, %s", pc.state == INST_REG_COPY ? "" : "interrupted (no magic) ",
                  pc.old_seq, pc.old_build, pc.old_len, pc.old_ok ? "CRC ok: boots" : "does NOT boot (CRC or magic)");
+    struct inst_copy u = pc;
+    if (inst_plan_uncopy(&u))
+        o += fmt(o, "\nstage 2 undo (remove-firmware): REFUSE: %s", u.refuse);
+    else {
+        u32 ne = 0;
+        for (u32 k = 0; k < INST_COPY_BLOCKS; k++)
+            ne += u.erase_mask >> k & 1;
+        o += fmt(o, "\nstage 2 undo (remove-firmware): would zero the magic, then erase %u block(s), header block last", ne);
+    }
     o += fmt(o, "\nstage 2 (firmware, %s): ", src ? "the uploaded image" : "the card's BOOT.BIN");
     u32 n = 0;
     const char *e = s1_resume >= 0 ? "stage 1 is unfinished" : load_source(src, len, crc, &n);
@@ -628,28 +736,48 @@ static int status_text(char *o, inst_fmt fmt, u32 src, u32 len, u32 crc)
                           "block(s) first\n", c.build, n, INST_COPY_MAX, c.seq, c.crc, c.span_crc, ne);
 }
 
-static int start_boot(char *o, inst_fmt fmt)
+static int start_s1(int undo, char *o, inst_fmt fmt)
 {
+    const char *nm = undo ? "install remove-boot" : "install boot";
+    struct inst_boot *b = undo ? &pu : &pb;
     if (s1_resume >= 0) {   /* finish the interrupted plan; nor_boot_write accepts blocks it already (partly) wrote */
-        job = 1, jdone = s1_resume, jtotal = pb.nblk, jres = 0, jt0 = clk_ms(), jmsg[0] = 0;
+        if (jb != b)
+            return fmt(o, "ERR %s: the interrupted %s has to be finished first", nm, job_name[jb == &pu ? J_UNBOOT : J_BOOT]);
+        job = undo ? J_UNBOOT : J_BOOT, jdone = s1_resume, jtotal = b->nblk, jres = 0, jt0 = clk_ms(), jmsg[0] = 0;
         s1_resume = -1;
         set_line();
-        return fmt(o, "install boot: resuming the interrupted plan at step %d of %d", jdone + 1, jtotal);
+        return fmt(o, "%s: resuming the interrupted plan at step %d of %d", nm, jdone + 1, jtotal);
     }
     refresh();
-    if (pb.refuse)
-        return fmt(o, "ERR install boot: %s", pb.refuse);
-    if (!pb.nblk)
-        return fmt(o, "install boot: nothing to do, the version 2 script and the patched environment are installed");
-    job = 1, jdone = 0, jtotal = pb.nblk, jres = 0, jt0 = clk_ms(), jmsg[0] = 0;
+    if (b->refuse)
+        return fmt(o, "ERR %s: %s", nm, b->refuse);
+    if (!b->nblk)
+        return fmt(o, "%s: nothing to do", nm);
+    jb = b, job = undo ? J_UNBOOT : J_BOOT, jdone = 0, jtotal = b->nblk, jres = 0, jt0 = clk_ms(), jmsg[0] = 0;
     set_line();
-    return fmt(o, "install boot: started, %d block(s); poll with `hu.py nor install progress`", pb.nblk);
+    return fmt(o, "%s: started, %d block(s); poll with `hu.py nor install progress`", nm, b->nblk);
+}
+
+static int start_uncopy(char *o, inst_fmt fmt)
+{
+    if (s1_resume >= 0)
+        return fmt(o, "ERR install remove-firmware: the interrupted stage 1 change has to be finished first");
+    refresh();
+    if (inst_plan_uncopy(&pc))
+        return fmt(o, "ERR install remove-firmware: %s", pc.refuse);
+    jtotal = 1;
+    for (u32 k = 0; k < INST_COPY_BLOCKS; k++)
+        jtotal += pc.erase_mask >> k & 1;
+    job = J_UNCOPY, jphase = 0, jidx = INST_COPY_BLOCKS - 1, jdone = 0, jres = 0, jt0 = clk_ms(), jmsg[0] = 0;
+    set_line();
+    return fmt(o, "install remove-firmware: started, copy build %s, %d steps; poll with `hu.py nor install progress`",
+               pc.old_build, jtotal);
 }
 
 static int start_copy(u32 src, u32 len, u32 crc, char *o, inst_fmt fmt)
 {
     if (s1_resume >= 0)
-        return fmt(o, "ERR install firmware: stage 1 is unfinished, run install boot first");
+        return fmt(o, "ERR install firmware: the interrupted stage 1 change has to be finished first");
     refresh();
     u32 n = 0;
     const char *e = load_source(src, len, crc, &n);
@@ -661,34 +789,41 @@ static int start_copy(u32 src, u32 len, u32 crc, char *o, inst_fmt fmt)
     for (u32 k = 0; k < INST_COPY_BLOCKS; k++)
         jtotal += pc.erase_mask >> k & 1;
     jtotal += 1 + (int)((n + BLK - 1) / BLK) + 2;   /* header, image chunks, whole-region check, magic */
-    job = 2, jphase = 0, jidx = INST_COPY_BLOCKS - 1, jdone = 0, jres = 0, jt0 = clk_ms(), jmsg[0] = 0;
+    job = J_COPY, jphase = 0, jidx = INST_COPY_BLOCKS - 1, jdone = 0, jres = 0, jt0 = clk_ms(), jmsg[0] = 0;
     want_seq = pc.seq;
     set_line();
     return fmt(o, "install firmware: started, build %s, %u bytes as copy #%u, %d steps; poll with `hu.py nor install "
                   "progress`", pc.build, n, pc.seq, jtotal);
 }
 
-static void finish(int stage)
+static void finish(void)
 {
-    job = 0, jms = clk_ms() - jt0;
-    refresh();   /* re-read everything from flash: the result must look installed from scratch */
-    int ok = stage == 1 ? inst_stage1_done(&pb) && !pb.nblk
-                        : pc.state == INST_REG_COPY && pc.old_ok && pc.old_seq == want_seq;
+    int j = job, ok;
+    job = J_IDLE, jms = clk_ms() - jt0;
+    refresh();   /* re-read everything from flash: the result must look right from scratch */
+    if (j == J_BOOT)
+        ok = inst_stage1_done(&pb) && !pb.nblk;
+    else if (j == J_UNBOOT)
+        ok = !pb.refuse && pb.env_state == INST_ENV_STOCK && pb.scr_state == INST_SCR_BLANK;
+    else if (j == J_COPY)
+        ok = pc.state == INST_REG_COPY && pc.old_ok && pc.old_seq == want_seq;
+    else
+        ok = pc.state == INST_REG_BLANK;
     jres = ok ? 1 : -1;
-    plat_fmt(jmsg, "stage %d written and verified; read back from flash: %s", stage, ok ? "installed" : "NOT as planned");
+    plat_fmt(jmsg, "%s written and verified; read back from flash: %s", job_name[j], ok ? "as planned" : "NOT as planned");
     set_line();
 }
 
 static void step_boot(void)
 {
-    u32 off = pb.blk_off[jdone];
-    int r = nor_boot_write(off, pb.blk[jdone], pb.blk_live_crc[jdone], pb.env_off, INST_ENV_LEN, RBUF);
+    u32 off = jb->blk_off[jdone];
+    int r = nor_boot_write(off, jb->blk[jdone], jb->blk_live_crc[jdone], jb->env_off, INST_ENV_LEN, RBUF);
     if (r) {
         fail(off == NOR_SCRIPT_BLK ? "boot script block" : "U-Boot block", r);
         return;
     }
     if (++jdone == jtotal)
-        finish(1);
+        finish();
     else
         set_line();
 }
@@ -781,17 +916,60 @@ static void step_copy(void)
     if (bc || bx)
         FAIL("magic verify", NOR_EVERIFY);
     jdone++;
-    finish(2);
+    finish();
+}
+
+/* stage 2 undo: zero the magic first (programming only clears bits, no erase), so the copy can no longer boot while
+ * the header still marks the region as ours; then erase the blocks that hold data, last block first, header block
+ * last; the end check (finish) wants the whole region blank. */
+static void step_uncopy(void)
+{
+    u32 bc, bx;
+    int r;
+    if (jphase == 0) {
+        static const u8 zero[4];
+        if ((r = nor_program(INST_COPY_OFF, zero, 4)) || (r = nor_verify(INST_COPY_OFF, zero, 4, &bc, &bx)))
+            FAIL("magic", r);
+        if (bc || bx)
+            FAIL("magic verify", NOR_EVERIFY);
+        jphase = 1, jdone++;
+        set_line();
+        return;
+    }
+    while (jidx >= 0 && !(pc.erase_mask >> jidx & 1))
+        jidx--;
+    if (jidx < 0) {
+        finish();
+        return;
+    }
+    u32 off = INST_COPY_OFF + (u32)jidx * BLK;
+    if ((r = nor_erase(off, BLK)) || (r = nor_blank(off, BLK, &bc, &bx)))
+        FAIL("erase", r);
+    if (bc || bx)
+        FAIL("erase (not blank afterwards)", NOR_EVERIFY);
+    jidx--, jdone++;
+    if (jdone == jtotal)
+        finish();
+    else
+        set_line();
 }
 
 void install_poll(void)
 {
-    if (job == 1) {
+    if (job == J_BOOT) {
         step_boot();
         return;
     }
-    if (job == 2) {
+    if (job == J_COPY) {
         step_copy();
+        return;
+    }
+    if (job == J_UNBOOT) {
+        step_boot();
+        return;
+    }
+    if (job == J_UNCOPY) {
+        step_uncopy();
         return;
     }
     int r = req;   /* no refresh at boot: its flash reads hold the net task long enough to cost AA its first picture */
@@ -799,10 +977,12 @@ void install_poll(void)
         return;
     req = 0;
     char t[200];
-    if (r == 1)
-        start_boot(t, plat_fmt);
+    if (r == 1 || r == 4)
+        start_s1(r == 4, t, plat_fmt);
     else if (r == 2)
         start_copy(0, 0, 0, t, plat_fmt);
+    else if (r == 5)
+        start_uncopy(t, plat_fmt);
     else
         refresh();
     if (!job && r != 3 && t[0] == 'E') {   /* refused before it started */
@@ -818,7 +998,9 @@ void install_poll(void)
  * 10 boot     u32 magic                   start stage 1 (or finish an interrupted one)
  * 11 firmware u32 magic [, src, len, crc] start stage 2 (without src: the card's BOOT.BIN, which must be the running build)
  * 12 progress                              the running job or the last result
- * 13 script                                the version 2 script text, its uImage size and CRC (for the dry run) */
+ * 13 script                                the version 2 script text, its uImage size and CRC (for the dry run)
+ * 14 remove-boot     u32 magic            undo stage 1: stock environment and sums, script block erased
+ * 15 remove-firmware u32 magic            undo stage 2: zero the copy's magic, erase the region */
 int install_op(const unsigned char *p, int n, char *out, inst_fmt fmt)
 {
     int c = n ? p[0] : 12;
@@ -826,7 +1008,7 @@ int install_op(const unsigned char *p, int n, char *out, inst_fmt fmt)
     u32 a4 = n >= 17 ? le32(p + 13) : 0;
     if (c == 12) {
         if (job)
-            return fmt(out, "install: stage %d running, step %d of %d, %u ms", job, jdone + 1, jtotal, clk_ms() - jt0);
+            return fmt(out, "install: %s running, step %d of %d, %u ms", job_name[job], jdone + 1, jtotal, clk_ms() - jt0);
         return fmt(out, "install: idle; last: %s (%u ms) %s", jres > 0 ? "ok" : jres < 0 ? "FAILED" : "none", jms, jmsg);
     }
     if (c == 13) {
@@ -838,16 +1020,18 @@ int install_op(const unsigned char *p, int n, char *out, inst_fmt fmt)
         return k + fmt(out + k, "%s", script_text);
     }
     if (job)
-        return fmt(out, "ERR install: busy (stage %d, step %d of %d)", job, jdone + 1, jtotal);
+        return fmt(out, "ERR install: busy (%s, step %d of %d)", job_name[job], jdone + 1, jtotal);
     if (c == 9)
         return status_text(out, fmt, n >= 13 ? a1 : 0, a2, a3);
-    if (c == 10 || c == 11) {
+    if (c == 10 || c == 11 || c == 14 || c == 15) {
         if (n < 5 || a1 != NOR_MAGIC)
             return fmt(out, "ERR install: write sub-ops need the magic %08x", NOR_MAGIC);
-        int k = c == 10 ? start_boot(out, fmt) : start_copy(n >= 17 ? a2 : 0, a3, a4, out, fmt);
+        int k = c == 10 || c == 14 ? start_s1(c == 14, out, fmt) : c == 11 ? start_copy(n >= 17 ? a2 : 0, a3, a4, out, fmt)
+                                                                          : start_uncopy(out, fmt);
         set_line();
         return k;
     }
-    return fmt(out, "ERR install sub-op: 9 status, 10 boot, 11 firmware, 12 progress, 13 script");
+    return fmt(out, "ERR install sub-op: 9 status, 10 boot, 11 firmware, 12 progress, 13 script, 14 remove-boot, "
+                    "15 remove-firmware");
 }
 #endif

@@ -534,23 +534,35 @@ static void confirm_cb(lv_event_t *e)
         plat_ui_reboot();
     else if (which == 1)
         plat_ui_boot_stock();
-    else if (which == 3 || which == 4)
-        plat_ui_install(which - 2);
+    else if (which >= 3 && which <= 6)
+        plat_ui_install(which == 3 ? 1 : which == 4 ? 2 : which == 5 ? 4 : 5);
 }
 
-static void install_cb(lv_event_t *e)   /* install to flash: ask first, these write the boot flash */
+/* install to flash and its undo: ask first, these write the boot flash. 3 set up the boot path, 4 install this
+ * firmware, 5 remove the boot path, 6 remove the flash copy */
+static void install_cb(lv_event_t *e)
 {
+    static const char *const title[] = { "Set up the boot path?", "Install this firmware to flash?",
+                                         "Remove the boot path?", "Remove the flash copy?" };
+    static const char *const body[] = {
+        "Power-on then starts BOOT.BIN from the SD card, else the copy in flash, else the original firmware. This "
+        "rewrites the boot script and, the first time, U-Boot's settings. Keep the power on until it says it is done.",
+        "Copies this firmware (BOOT.BIN on the SD card) into flash, so the unit starts it even without the card. Takes "
+        "about a minute; keep the power on.",
+        "From the next power-on the unit starts the original firmware, and this app no longer starts, not even from "
+        "the SD card, until it is set up again from a PC or with an SD-card update. This puts U-Boot's settings back "
+        "and erases the boot script. Keep the power on until it says it is done.",
+        "Erases the copy of the firmware in flash. With no BOOT.BIN on the SD card the unit then starts the original "
+        "firmware.",
+    };
+    static const char *const ok_text[] = { "Set up", "Install", "Remove", "Remove" };
     int which = (int)(intptr_t)lv_event_get_user_data(e);
     dialog_close();
     lv_obj_t *mb = dialog = lv_msgbox_create(0);
     lv_obj_set_width(mb, 640);
-    lv_msgbox_add_title(mb, which == 3 ? "Set up the boot path?" : "Install this firmware to flash?");
-    lv_msgbox_add_text(mb, which == 3 ? "Power-on then starts BOOT.BIN from the SD card, else the copy in flash, else the "
-                                        "original firmware. This rewrites the boot script and, the first time, U-Boot's "
-                                        "settings. Keep the power on until it says it is done."
-                                      : "Copies this firmware (BOOT.BIN on the SD card) into flash, so the unit starts it "
-                                        "even without the card. Takes about a minute; keep the power on.");
-    lv_obj_t *ok = lv_msgbox_add_footer_button(mb, "Install");
+    lv_msgbox_add_title(mb, title[which - 3]);
+    lv_msgbox_add_text(mb, body[which - 3]);
+    lv_obj_t *ok = lv_msgbox_add_footer_button(mb, ok_text[which - 3]);
     lv_obj_add_event_cb(ok, confirm_cb, LV_EVENT_CLICKED, (void *)(intptr_t)which);
     lv_obj_t *no = lv_msgbox_add_footer_button(mb, "Cancel");
     lv_obj_add_event_cb(no, cancel_cb, LV_EVENT_CLICKED, 0);
@@ -863,6 +875,23 @@ static void build_eq(lv_obj_t *p)
 }
 
 static lv_obj_t *dump_label, *install_label;
+static struct { lv_obj_t *label, *main, *main_text, *remove; } inst_row[2];
+
+static void show_if(lv_obj_t *o, int on)
+{
+    if (on != !lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) {
+        if (on)
+            lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void set_text(lv_obj_t *l, const char *t)   /* only on a change: a new text relayouts the row */
+{
+    if (lv_strcmp(t, lv_label_get_text(l)))
+        lv_label_set_text(l, t);
+}
 static void dump_cb(lv_event_t *e)
 {
     (void)e;
@@ -994,14 +1023,20 @@ static void build_settings(void)
     b = lv_button_create(r);
     lv_label_set_text(lv_label_create(b), "Back up");
     lv_obj_add_event_cb(b, dump_cb, LV_EVENT_CLICKED, 0);
-    r = row(p, "Boot from the SD card, else from flash");
-    b = lv_button_create(r);
-    lv_label_set_text(lv_label_create(b), "Set up");
-    lv_obj_add_event_cb(b, install_cb, LV_EVENT_CLICKED, (void *)3);
-    r = row(p, "Install this firmware to flash");
-    b = lv_button_create(r);
-    lv_label_set_text(lv_label_create(b), "Install");
-    lv_obj_add_event_cb(b, install_cb, LV_EVENT_CLICKED, (void *)4);
+    for (int s = 0; s < 2; s++) {   /* stage 1 (boot path) and stage 2 (flash copy): text, main button, Remove */
+        r = row(p, s ? "Install this firmware to flash" : "Boot from the SD card, else from flash");
+        inst_row[s].label = lv_obj_get_child(r, 0);
+        b = inst_row[s].main = lv_button_create(r);
+        inst_row[s].main_text = lv_label_create(b);
+        lv_label_set_text(inst_row[s].main_text, s ? "Install" : "Set up");
+        lv_obj_add_event_cb(b, install_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(3 + s));
+        lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);   /* shown once the flash has been checked */
+        b = inst_row[s].remove = lv_button_create(r);
+        lv_obj_set_style_margin_left(b, 12, 0);
+        lv_label_set_text(lv_label_create(b), "Remove");
+        lv_obj_add_event_cb(b, install_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(5 + s));
+        lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+    }
     r = row(p, "");
     install_label = lv_obj_get_child(r, 0);
     show_page(0);
@@ -1017,8 +1052,15 @@ static void status_timer(lv_timer_t *t)
         plat_ui_nor_dump_status(buf, sizeof buf);
         lv_label_set_text(dump_label, buf + 10);   /* without the "nor dump: " prefix */
         plat_ui_install_status(buf, sizeof buf);
-        if (lv_strcmp(buf, lv_label_get_text(install_label)))
-            lv_label_set_text(install_label, buf);
+        set_text(install_label, buf);
+        for (int s = 0; s < 2; s++) {
+            char btn[16];
+            int f = plat_ui_install_row(s + 1, buf, sizeof buf, btn, sizeof btn);
+            set_text(inst_row[s].label, buf);
+            set_text(inst_row[s].main_text, btn);
+            show_if(inst_row[s].main, f & 1);
+            show_if(inst_row[s].remove, f & 2);
+        }
     }
 }
 

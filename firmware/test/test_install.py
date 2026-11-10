@@ -88,9 +88,34 @@ def boot_ok(name, d, blocks, env_off):
     return o
 
 
+def unboot_ok(name, installed, original):
+    """Undo stage 1 on `installed`: the result must equal `original` with a blank script block, plan nothing more,
+    and installing again must give `installed` back (when original had a blank script block)."""
+    r = run('unboot', put(name + '.inst', installed), path(name + '.undone'))
+    check(r['rc'] == 0 and r['refuse'] == '', '%s: undo refused: %s' % (name, r.get('refuse')))
+    if r['rc']:
+        return None
+    u = open(path(name + '.undone'), 'rb').read()
+    want = bytearray(original)
+    want[SCRIPT:SCRIPT + 0x10000] = b'\xff' * 0x10000
+    check(u == bytes(want), '%s: undo is not the original with a blank script block (blocks %s)' %
+          (name, [hex(b) for b in changed_blocks(u, want)]))
+    size = be32(u, FLASH_UBOOT_HDR + 12)
+    check(check_stock_uboot(u[FLASH_UBOOT_HDR:BODY + size]) is None, '%s: undo fails the xboot check' % name)
+    r2 = run('unboot', path(name + '.undone'))
+    check(r2['rc'] == 2 and 'nothing to remove' in r2['refuse'], '%s: second undo not refused: %s' % (name, r2))
+    r3 = run('boot', path(name + '.undone'), path(name + '.again'))
+    check(r3['rc'] == 0, '%s: install after undo refused' % name)
+    if original[SCRIPT:SCRIPT + 0x10000] == b'\xff' * 0x10000 and installed[SCRIPT + 32:SCRIPT + 51] == \
+            b'nor boot script v2\0' and r3['rc'] == 0:
+        check(open(path(name + '.again'), 'rb').read() == bytes(installed), '%s: undo + install does not round-trip' % name)
+    return u
+
+
 def refused(name, d, want, cmd='boot', *extra):
     r = run(cmd, put(name, d), *extra)
-    reason = r.get('copy_refuse') or r.get('refuse', '') if cmd == 'copy' else r.get('refuse', '')
+    reason = (r.get('copy_refuse') or r.get('refuse', '')) if cmd == 'copy' else r.get('uncopy_refuse', '') \
+        if cmd == 'uncopy' else r.get('refuse', '')
     check(r['rc'] == 2 and want in reason, '%s: want refusal "%s", got rc %d "%s"' % (name, want, r['rc'], reason))
 
 
@@ -198,7 +223,37 @@ def main():
              (body[:i + delta] + body[i:])
         d = bytearray(dump)
         d[BODY:BODY + len(nb)] = nb
-        boot_ok(name, resum(d, len(nb)), blocks, eo + delta)
+        d = resum(d, len(nb))
+        o = boot_ok(name, d, blocks, eo + delta)
+        if o is not None:
+            unboot_ok(name + '-undo', o, d)
+
+    # stage 1 undo: the fresh install and this unit's state (patch_uboot.py, version 1 script) both go back to dump1
+    unboot_ok('undo-fresh', fresh, dump)
+    u = unboot_ok('undo-v1', pu, dump)
+    check(u is not None and u[0x920000:0x930000] == dump[0x920000:0x930000] and
+          u[0x8A0000:0x8B0000] == dump[0x8A0000:0x8B0000] and u == bytes(dump), 'undo-v1: not dump1 byte for byte')
+    r = run('unboot', path('undo-v1.inst'))
+    check(r.get('blocks') == '0x%x,0x920000,0x8a0000' % SCRIPT, 'undo blocks: %s' % r.get('blocks'))
+    refused('undo-stock', dump, 'nothing to remove', 'unboot')
+    d = bytearray(pu); d[SCRIPT:SCRIPT + 0x10000] = b'\xff' * 0x10000
+    refused('undo-no-script', d, 'does not hold our script', 'unboot')
+    d = bytearray(pu); d[SCRIPT + 0x1000] = 0x12
+    refused('undo-foreign-script', d, 'does not hold our script', 'unboot')
+    d = bytearray(pu); d[SCRIPT:SCRIPT + 0x10000] = mkscript('echo hi\n', 'isp stage1').ljust(0x10000, b'\xff')
+    refused('undo-other-script', d, 'does not hold our script', 'unboot')
+    d = bytearray(pu); d[SCRIPT:SCRIPT + 0x10000] = mkscript(text, 'nor boot script v3').ljust(0x10000, b'\xff')
+    refused('undo-newer-script', d, 'does not hold our script', 'unboot')
+    d = bytearray(pu); d[BODY + 0x1000] ^= 0x40
+    refused('undo-body-sum', d, 'body word sum', 'unboot')
+    d = bytearray(pu); d[FLASH_UBOOT_HDR + 8] ^= 1
+    refused('undo-header-sum', d, 'header word sum', 'unboot')
+    d = bytearray(pu); d[eo + 0x200:eo + 0x200 + 44] = ENV_NEW
+    refused('undo-env-twice', resum(d, be32(d, FLASH_UBOOT_HDR + 12)), 'more than once', 'unboot')
+    d = bytearray(pu); d[eo + 0x200:eo + 0x200 + 44] = ENV_OLD
+    refused('undo-env-both-forms', resum(d, be32(d, FLASH_UBOOT_HDR + 12)), 'more than once', 'unboot')
+    d = bytearray(pu); d[eo + 8:eo + 14] = b'SOURCE'
+    refused('undo-env-other', resum(d, be32(d, FLASH_UBOOT_HDR + 12)), 'not found', 'unboot')
 
     # stage 2
     img = image(0x11EE80, '20261109-120000', 1)
@@ -249,6 +304,29 @@ def main():
     check(r['rc'] == 0 and boot_script_says(open(path('cmax.bin'), 'rb').read()), 'largest image: %s' % r)
     noh = bytearray(img); noh[0x40:0x44] = b'XXXX'
     refused('copy-no-hune', fresh, 'HUNE', 'copy', put('noh.bin', noh))
+
+    # stage 2 undo: zero the magic, erase the blocks with data; only our own copy
+    for name, src in (('uncopy-c1', 'c1.bin'), ('uncopy-c2', 'c2.bin'), ('uncopy-pending', 'pend.bin'),
+                      ('uncopy-max', 'cmax.bin')):
+        f = open(path(src), 'rb').read()
+        r = run('uncopy', path(src), path(name + '.out'))
+        check(r['rc'] == 0, '%s: refused: %s' % (name, r.get('uncopy_refuse')))
+        o = open(path(name + '.out'), 'rb').read()
+        check(o[COPY:COPY_END] == b'\xff' * (COPY_END - COPY) and o[:COPY] == f[:COPY] and o[COPY_END:] == f[COPY_END:],
+              '%s: region not blank or other bytes changed' % name)
+        check(run('region', path(name + '.out')).get('region') == 'blank', '%s: region not blank' % name)
+    d = bytearray(c1); d[COPY:COPY + 4] = b'\0\0\0\0'   # interrupted removal: magic zeroed, nothing erased yet
+    r = run('region', put('half-removed.bin', d))
+    check(r.get('region') == 'pending' and r.get('old_ok') == '0' and not boot_script_says(d), 'half removed: %s' % r)
+    check(run('uncopy', path('half-removed.bin'))['rc'] == 0, 'uncopy of a half-removed copy refused')
+    d[COPY + 0x50000:COPY + 0x60000] = b'\xff' * 0x10000   # ... and one block erased
+    check(run('uncopy', put('half-removed2.bin', d))['rc'] == 0, 'uncopy of a half-erased copy refused')
+    check(run('copy', path('half-removed.bin'), path('img2.bin'))['rc'] == 0, 'install over a half-removed copy refused')
+    refused('uncopy-blank', fresh, 'nothing to remove', 'uncopy')
+    d = bytearray(fresh); d[0xD00000] = 0x12
+    refused('uncopy-foreign', d, 'not ours', 'uncopy')
+    d = bytearray(c1); d[COPY_IMG + len(img) + 0x10] = 0
+    refused('uncopy-junk-past-length', d, 'not ours', 'uncopy')
 
     print('test_install: %s (%d failures)' % ('FAILED' if fails else 'ok', fails))
     return 1 if fails else 0

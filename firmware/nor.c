@@ -59,8 +59,14 @@ int nor_boot_diff_ok(unsigned off, const unsigned char *live, const unsigned cha
 {
     if (!nor_boot_block_ok(off, env_off, env_len))
         return 0;
-    if (off == NOR_SCRIPT_BLK)   /* a legacy uImage; install.c checks that it is our script and what it replaces */
-        return blk[0] == 0x27 && blk[1] == 0x05 && blk[2] == 0x19 && blk[3] == 0x56;
+    if (off == NOR_SCRIPT_BLK) {   /* a legacy uImage, or all 0xFF (the undo); install.c checks the rest */
+        if (blk[0] == 0x27 && blk[1] == 0x05 && blk[2] == 0x19 && blk[3] == 0x56)
+            return 1;
+        for (u32 i = 0; i < NOR_BLOCK; i++)
+            if (blk[i] != 0xff)
+                return 0;
+        return 1;
+    }
     for (u32 i = 0; i < NOR_BLOCK; i++) {
         if (live[i] == blk[i])
             continue;
@@ -639,7 +645,7 @@ int nor_boot_write(unsigned off, const void *blk, unsigned live_crc, unsigned en
  * 5 erase64  u32 magic, u32 off: one 64 KB block, then a blank check
  * 6 program  u32 magic, u32 off, u32 src, u32 len: the target must read blank first; then verify (len <= 64 KB)
  * Writes need NOR_MAGIC, an address range nor_range_ok accepts and the JEDEC ID NOR_JEDEC. Sub-ops 7 and 8 (whole-flash
- * backup) live in net.c, 9..13 (install to flash, the only path to the boot blocks) in install.c. */
+ * backup) live in net.c, 9..15 (install to flash and its undo, the only path to the boot blocks) in install.c. */
 static u32 le32(const u8 *p) { return p[0] | p[1] << 8 | p[2] << 16 | (u32)p[3] << 24; }
 static int ram_ok(u32 a, u32 n) { return a >= 0x00100000u && a < MM_DRAM_END && n <= MM_DRAM_END - a; }
 
@@ -757,6 +763,6 @@ int nor_op(const unsigned char *p, int n, char *out, nor_fmt fmt)
         return o - out + compare(off, len, (const u8 *)src, NOR_RD, o, fmt);
     }
     return fmt(o, "ERR nor sub-op: 0 status, 1 compare, 2 read, 3 verify, 4 erase, 5 erase64, 6 program, 7 dump, "
-                  "8 dump status, 9..13 install");
+                  "8 dump status, 9..15 install");
 }
 #endif

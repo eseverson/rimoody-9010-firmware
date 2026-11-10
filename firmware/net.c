@@ -3606,6 +3606,10 @@ void plat_ui_log(const char *m) { log_s(m); }
 /* Install to flash (install.c): Settings > System queues the request, the net task runs it */
 int plat_ui_install_status(char *out, int max) { return install_line(out, max); }
 void plat_ui_install(int stage) { install_request(stage); }
+int plat_ui_install_row(int stage, char *label, int lmax, char *button, int bmax)
+{
+    return install_ui(stage, label, lmax, button, bmax);
+}
 int plat_load_file(const char *name, void *dst, unsigned max, unsigned *len)
 {
     u32 n = 0;
@@ -4116,8 +4120,8 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         return vfmt_n(t, "ap: starting on channel %d as '%s' after this reply; this network connection ends", ch, ap_req_ssid);
     }
     case 29:   /* NOR (nor.c): 0 status, 1 compare, 2 read, 3 verify (read-only); 4 erase, 5 erase64, 6 program (magic);
-                * 7 dump the whole flash to NORDUMP.BIN, 8 dump status (net.c); 9..13 install to flash (install.c) */
-        if (n >= 1 && p[0] >= 9 && p[0] <= 13)
+                * 7 dump the whole flash to NORDUMP.BIN, 8 dump status (net.c); 9..15 install to flash (install.c) */
+        if (n >= 1 && p[0] >= 9 && p[0] <= 15)
             return install_op(p, n, t, vfmt_n);
         if (n >= 1 && p[0] >= 4 && p[0] <= 6 && install_busy())
             return vfmt_n(t, "ERR nor: an install is writing the flash");

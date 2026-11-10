@@ -145,6 +145,12 @@ static void boot_guard(void)
     CHECK(nor_boot_diff_ok(NOR_SCRIPT_BLK, live, blk, env, 44));
     blk[0] = 0xff;
     CHECK(!nor_boot_diff_ok(NOR_SCRIPT_BLK, live, blk, env, 44));
+    for (unsigned i = 0; i < NOR_BLOCK; i++)   /* the undo: an erased script block */
+        blk[i] = 0xff;
+    CHECK(nor_boot_diff_ok(NOR_SCRIPT_BLK, live, blk, env, 44));
+    blk[NOR_BLOCK - 1] = 0;
+    CHECK(!nor_boot_diff_ok(NOR_SCRIPT_BLK, live, blk, env, 44));
+    CHECK(!nor_boot_diff_ok(0x920000, live, blk, env, 44));
     CHECK(!nor_boot_diff_ok(0xC70000, live, live, env, 44));
 }
 
