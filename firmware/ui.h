@@ -48,6 +48,12 @@ void plat_ui_install(int what);                  /* 1 set up the boot path (SD, 
                                                  * flash, 3 refresh the status, 4 remove the boot path, 5 remove the copy */
 int plat_ui_install_row(int stage, char *label, int lmax, char *button, int bmax);   /* a Settings > Flash row: its
                                                  * text, main button text; 1 = main button, 2 = Remove, 3 = both */
+const char *plat_ui_install_late(void);          /* why setting up / removing the boot path is refused now (the
+                                                 * installer boot after its deadline), else 0 */
 int plat_ui_hu1(char *out, int max);             /* Settings > Network: whether HU1 commands are on (token set) */
+int plat_ui_notice(int *gen, int *pct, char *title, int tmax, char *body, int bmax);   /* a full-screen notice from
+                                                 * the net task: 0 none, 1 busy (no way out), 2 final (OK closes it),
+                                                 * 3 a short note (OK, or it closes itself); gen changes per notice,
+                                                 * pct < 0: no progress bar */
 
 #endif

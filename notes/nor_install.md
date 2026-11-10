@@ -19,6 +19,15 @@ Which path was taken is left in `hu_src`: `hu.py cmd 'printenv hu_src'`. The pay
 
 The script text lives in `install.c` (`script_text`); `hu.py nor install script` prints it from the running payload.
 
+## Installer boot
+
+The SD-card installer (`tools/mkrelease.py`) runs on a stock unit through its own update prompt. Accepting the update parks the MCU (`e5 01`), and the parked MCU power-cycles the unit about 145 s later whatever the SoC sends, so the first session is about two minutes long. On a stock unit stage 1 writes three blocks (script, environment, uImage sums), and a power cut during the last two leaves a unit that does not boot.
+
+- Marker: the installer script starts the payload with `go 0x1800000 main isp`. `payload_entry` reads `argv[2]`; nothing is kept in RAM, so an EXEC (the trampoline passes only `main`) or any later boot never sees it. U-Boot's `hu_src=isp` is still set for `hu.py cmd 'printenv hu_src'`; the payload does not read it.
+- `installer_setup` (net.c) runs first thing in the net task, before WIFI.TXT, the audio DSP, USB, Wi-Fi and Android Auto: it waits for the UI (at most 5 s), shows a full-screen notice, runs `install_request(1)` and polls it to the end, with the block count as progress. A write that failed half way is resumed up to twice. Results: "Installed" (restart in about two minutes, then the card's BOOT.BIN), "already set up" (a short note, closes itself), "not installed" with the refusal reason (nothing written; the restart brings back stock), or "FAILED" after a partial write. Every step is logged with its time.
+- While it runs (`inst_quiet`), and during any install job, Bluetooth AA channel opens are ignored, `aa start` / `aa connect` and microphone recording refuse, the flash dump refuses to start and a running dump pauses.
+- Late guard: `install_s1_deadline(90000)`. From clk_ms 90 s on (clk_ms starts with U-Boot, about when the update reset happened), stage 1 and its undo refuse to start, from the UI and over HU1; Settings > Flash hides the buttons and says why. A retry of a half-written plan still runs: it can only help.
+
 ## Flash layout
 
 | Flash | What | Written by |

@@ -3,7 +3,7 @@
  *
  * Screens: home (the Miata logo, white on black, with a faint dock), Android Auto (transparent over the video; a
  * "waiting for phone" card when there is no session), Settings, Console (the log tail). The volume overlay lives on
- * LVGL's top layer. Front buttons: 1 mute (long press: reboot), 2 home, 3 back (the phone's back key in AA), 4/5
+ * LVGL's top layer, and so does the full-screen notice (plat_ui_notice: the installer boot's set-up). Front buttons: 1 mute (long press: reboot), 2 home, 3 back (the phone's back key in AA), 4/5
  * volume. Only the UI task touches LVGL; other tasks reach it through ui_pointer / ui_button / ui_aa_session. */
 #include "lvgl.h"
 #include "ui.h"
@@ -560,6 +560,19 @@ static void install_cb(lv_event_t *e)
     dialog_close();
     lv_obj_t *mb = dialog = lv_msgbox_create(0);
     lv_obj_set_width(mb, 640);
+    if ((which == 3 || which == 5) && plat_ui_install_late()) {   /* the installer boot, late in its session */
+        lv_msgbox_add_title(mb, "Not possible now");
+        lv_msgbox_add_text(mb, which == 3 ?
+                           "After the update the unit switches itself off and on again, about two minutes later. That "
+                           "could cut this change off half way and leave the unit unable to start. Run the installer "
+                           "again: it sets up the boot path by itself as soon as it starts." :
+                           "After the update the unit switches itself off and on again, about two minutes later. That "
+                           "could cut this change off half way and leave the unit unable to start. Remove the boot "
+                           "path after the restart.");
+        lv_obj_t *ok = lv_msgbox_add_footer_button(mb, "OK");
+        lv_obj_add_event_cb(ok, cancel_cb, LV_EVENT_CLICKED, 0);
+        return;
+    }
     lv_msgbox_add_title(mb, title[which - 3]);
     lv_msgbox_add_text(mb, body[which - 3]);
     lv_obj_t *ok = lv_msgbox_add_footer_button(mb, ok_text[which - 3]);
@@ -1121,6 +1134,95 @@ static void vol_show(void)
     lv_timer_resume(vol_timer);
 }
 
+/* ---- full-screen notice on the top layer, over every screen and the video (plat_ui_notice) ---- */
+
+static lv_obj_t *nt_panel, *nt_title, *nt_body, *nt_bar, *nt_ok;
+static int nt_shown_gen = -1, nt_closed_gen = -1;
+static unsigned int nt_hide_at;
+
+static void notice_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    nt_closed_gen = nt_shown_gen;
+    lv_obj_add_flag(nt_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static int notice_wanted(void)   /* a notice is waiting that OK has not closed yet */
+{
+    static char t[64], b[512];
+    int gen, pct;
+    return plat_ui_notice(&gen, &pct, t, sizeof t, b, sizeof b) && gen != nt_closed_gen;
+}
+
+static void notice_timer(lv_timer_t *tm)
+{
+    (void)tm;
+    static char t[64], b[512];
+    int gen, pct, st = plat_ui_notice(&gen, &pct, t, sizeof t, b, sizeof b);
+    if (!st || gen == nt_closed_gen) {
+        show_if(nt_panel, 0);
+        return;
+    }
+    if (gen != nt_shown_gen) {   /* a new notice */
+        nt_shown_gen = gen;
+        nt_hide_at = st == 3 ? tick_cb() + 8000 : 0;
+        dialog_close();
+    }
+    if (nt_hide_at && (int)(tick_cb() - nt_hide_at) >= 0) {
+        notice_ok_cb(0);
+        return;
+    }
+    set_text(nt_title, t);
+    set_text(nt_body, b);
+    if (pct >= 0)
+        lv_bar_set_value(nt_bar, pct, LV_ANIM_OFF);
+    show_if(nt_bar, pct >= 0);
+    show_if(nt_ok, st >= 2);
+    if (lv_obj_has_flag(nt_panel, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_move_foreground(nt_panel);   /* above the volume overlay */
+        show_if(nt_panel, 1);
+    }
+}
+
+static void build_notice(void)
+{
+    nt_panel = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(nt_panel);
+    lv_obj_add_flag(nt_panel, LV_OBJ_FLAG_CLICKABLE);   /* taps stop here, not on the screen underneath */
+    lv_obj_remove_flag(nt_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(nt_panel, PANEL_W, PANEL_H);
+    lv_obj_set_style_bg_color(nt_panel, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(nt_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_hor(nt_panel, 80, 0);
+    lv_obj_set_style_pad_row(nt_panel, 32, 0);
+    lv_obj_set_flex_flow(nt_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(nt_panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    nt_title = lv_label_create(nt_panel);
+    nt_body = lv_label_create(nt_panel);
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *l = i ? nt_body : nt_title;
+        lv_label_set_text(l, "");
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(l, LV_PCT(100));
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(l, lv_color_white(), 0);
+        lv_obj_set_style_text_font(l, i ? &lv_font_montserrat_20 : &lv_font_montserrat_28, 0);
+    }
+    nt_bar = lv_bar_create(nt_panel);
+    lv_bar_set_range(nt_bar, 0, 100);
+    lv_obj_set_size(nt_bar, 600, 16);
+    lv_obj_set_style_bg_color(nt_bar, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(nt_bar, LV_OPA_20, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(nt_bar, lv_color_white(), LV_PART_INDICATOR);
+    nt_ok = lv_button_create(nt_panel);
+    lv_obj_set_size(nt_ok, 200, 64);
+    lv_obj_t *l = lv_label_create(nt_ok);
+    lv_label_set_text(l, "OK");
+    lv_obj_center(l);
+    lv_obj_add_event_cb(nt_ok, notice_ok_cb, LV_EVENT_CLICKED, 0);
+    lv_obj_add_flag(nt_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
 /* ---- navigation ---- */
 
 static void show_home(void)
@@ -1249,7 +1351,9 @@ static void ui_task(void *arg)
     build_wifi();
     build_btname();
     build_volume();
+    build_notice();
     lv_timer_create(status_timer, 500, 0);
+    lv_timer_create(notice_timer, 200, 0);
     lv_timer_create(lights_timer, 200, 0);
     lv_screen_load(scr_home);
     if (boot_console)
@@ -1263,7 +1367,9 @@ static void ui_task(void *arg)
         poll_held();
         if (console_on) {   /* the text console owns the panel: no LVGL drawing; a tap (on release) comes back */
             static int was_down;
-            if (ptr_down)
+            if (notice_wanted())
+                leave_console();   /* a notice (the installer boot's set-up) takes the panel */
+            else if (ptr_down)
                 was_down = 1;
             else if (was_down)
                 was_down = 0, leave_console();

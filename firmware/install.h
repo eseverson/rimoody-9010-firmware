@@ -99,6 +99,14 @@ int install_ui(int stage, char *label, int lmax, char *button, int bmax);   /* S
                                        * its text and main button text; returns 1 = main button, 2 = Remove, 3 = both */
 int install_busy(void);               /* a stage is being written */
 int install_line(char *out, int max); /* one line for Settings > System (any task) */
+/* the installer boot (notes/nor_install.md "Installer boot"): after clk_ms() passes `at`, stage 1 and its undo refuse
+ * to start (a retry of an interrupted plan still runs); 0 = no limit */
+void install_s1_deadline(unsigned at);
+const char *install_s1_late(void);    /* the refusal reason once the deadline has passed, else 0 (any task) */
+int install_progress(int *done, int *total);   /* a job is running: 1 and its step count; else 0 */
+int install_last(char *msg, int max); /* the last job: 1 ok, -1 refused or failed, -2 stage 1 failed half way (the plan
+                                       * is kept: install_request(1) resumes it), 0 none; its message */
+int install_s1_installed(void);       /* the last status read: stage 1 installed, nothing left to write */
 int plat_load_file(const char *name, void *dst, unsigned max, unsigned *len);   /* net.c: card file into RAM */
 #endif
 #endif

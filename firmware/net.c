@@ -11,6 +11,8 @@
  *                        broadcasts a hello to UDP 5152 every 2 s. Runs until the unit resets; rejoins after a
  *                        deauth, a failed handshake or 10 s without beacons. Talks to the MCU on UART1 (mcu.c):
  *                        heartbeat, frame parser, the a4 time handshake, the 00 shutdown request.
+ *   go 0x1800000 main isp   the same, started by the SD-card installer (tools/mkrelease.py): sets up the boot path
+ *                        first (installer_setup).
  *   HU1 EXEC             replaces this payload in place with an image uploaded to RAM (tramp.c at 0x02f00000).
  *
  * Fixed RAM: 0x01500000 HELLO.TXT text, 0x01600000 MCU RX hex, 0x01800000 this payload + bss (< 0x1A00000),
@@ -1691,6 +1693,11 @@ static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 
 #define PROBATION_MS 90000
 struct handoff { u32 magic, ssid_len, ip; u8 ssid[33], pmk[32], token[32]; u8 pad[3]; u32 crc; };
 static int exec_trial, net_online, prev_boot_failed;
+/* started by the SD-card installer (`go 0x1800000 main isp`, tools/mkrelease.py). The marker is the `go` argument, so
+ * an EXEC (the trampoline passes only "main") or any later boot never sees it again. */
+static int installer_boot;
+static volatile int inst_quiet;   /* installer_setup is writing the boot path: no AA, flash dump or mic until it ends */
+static int flash_busy(void) { return inst_quiet || install_busy(); }
 static u32 net_task_t0, hwwdt_test_at;
 
 static void handoff_write(void)
@@ -3497,6 +3504,10 @@ static int aa_op(int c, const u8 *p, int n, char *t);
 static void bt_aa_open(int handle, cu32 now)
 {
     static char reply[600];
+    if (flash_busy()) {   /* the phone tries again; AA's certificate load and TLS must not run between flash writes */
+        lprintf("bt: AA channel %d open ignored: the flash is being written\n", handle);
+        return;
+    }
     if (jstate != J_AP && !cfg_ssid_len) {   /* no home network: the phone can only join the car network */
         lprintf("bt: AA channel %d open ignored: no home network and the car network is not up yet\n", handle);
         return;
@@ -3627,6 +3638,7 @@ void plat_ui_log(const char *m) { log_s(m); }
 
 /* Install to flash (install.c): Settings > System queues the request, the net task runs it */
 int plat_ui_install_status(char *out, int max) { return install_line(out, max); }
+const char *plat_ui_install_late(void) { return install_s1_late(); }
 void plat_ui_install(int stage) { install_request(stage); }
 int plat_ui_install_row(int stage, char *label, int lmax, char *button, int bmax)
 {
@@ -3836,6 +3848,8 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         u32 ip = n >= 5 ? (u32)p[1] << 24 | (u32)p[2] << 16 | (u32)p[3] << 8 | p[4] : 0;
         if (c == 1 && aa_listening)
             return vfmt_n(t, "ERR aa: already listening");
+        if (flash_busy())
+            return vfmt_n(t, "ERR aa: the flash is being written");
         if (c == 2 && (!ip || aa_tcp_connected()))
             return vfmt_n(t, "ERR aa: no ip, or a session is up");
         u32 cl, kl;
@@ -4063,6 +4077,8 @@ static int nor_dump_start(void)
 {
     if (dump_state == 1 || dump_state == 2)
         return -1;
+    if (flash_busy())
+        return dump_result = -9, dump_state = 3, -9;
     if (fs_mount())
         return dump_result = -2, dump_state = 3, -2;
     if (f_open(&dump_f, "NORDUMP.BIN", FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
@@ -4131,6 +4147,8 @@ static int nor_dump_status(char *o)
     if (dump_state == 1 || dump_state == 2)
         return vfmt_n(o, "nor dump: %s %u of %u KB, %u ms", dump_state == 1 ? "writing" : "verifying", dump_pos >> 10,
                       NOR_SIZE >> 10, clk_ms() - dump_t0);
+    if (dump_state == 3 && dump_result == -9)
+        return vfmt_n(o, "nor dump: not started, the flash is being written; try again when it is done");
     if (dump_state == 3)
         return dump_result ? vfmt_n(o, "nor dump: FAILED (%d)", dump_result)
                            : vfmt_n(o, "nor dump: NORDUMP.BIN %u bytes, jedec %06x, crc32 %08x, read back ok, %u ms",
@@ -4386,6 +4404,8 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
                 mic_rec_poll();
             } else if (c == 9 && mic_rec_state == 1)
                 k = vfmt_n(t, "ERR already recording; ");
+            else if (c == 9 && flash_busy())
+                k = vfmt_n(t, "ERR the flash is being written; ");
             else if (c == 9) {
                 u32 secs = n >= 3 ? (u32)(p[1] | p[2] << 8) : 5;
                 secs = secs < 1 ? 1 : secs > MIC_REC_MAX_S ? MIC_REC_MAX_S : secs;
@@ -4905,7 +4925,8 @@ static void net_loop(void)
         }
         aud_poll();
         mic_rec_poll();
-        nor_dump_poll();
+        if (!install_busy())   /* a running dump pauses while an install step writes */
+            nor_dump_poll();
         install_poll();
         if (ui_req_dump) {
             ui_req_dump = 0;
@@ -5038,6 +5059,127 @@ static void touch_task(void *arg)
     }
 }
 
+/* A full-screen notice for the UI (plat_ui_notice), written by the net task: two buffers, the UI reads the current one.
+ * gen changes with the title or the state, so the UI shows a new notice again after OK closed the last one. */
+static struct notice { int state, pct; char title[64], body[512]; } notices[2];
+static volatile int notice_cur, notice_gen;
+
+static void notice_set(int state, int pct, const char *title, const char *body)
+{
+    struct notice *o = &notices[notice_cur], *n = &notices[!notice_cur];
+    int k;
+    for (k = 0; title[k] && k < (int)sizeof n->title - 1; k++)
+        n->title[k] = title[k];
+    n->title[k] = 0;
+    for (k = 0; body[k] && k < (int)sizeof n->body - 1; k++)
+        n->body[k] = body[k];
+    n->body[k] = 0;
+    int same = o->state == state;   /* the same notice with new progress: keep its gen */
+    for (k = 0; same && k < (int)sizeof o->title && (o->title[k] || n->title[k]); k++)
+        same = o->title[k] == n->title[k];
+    n->state = state, n->pct = pct;
+    if (!same)
+        notice_gen++;
+    notice_cur = !notice_cur;
+}
+
+int plat_ui_notice(int *gen, int *pct, char *title, int tmax, char *body, int bmax)
+{
+    const struct notice *n = &notices[notice_cur];
+    int k;
+    *gen = notice_gen, *pct = n->pct;
+    for (k = 0; n->title[k] && k < tmax - 1; k++)
+        title[k] = n->title[k];
+    title[k] = 0;
+    for (k = 0; n->body[k] && k < bmax - 1; k++)
+        body[k] = n->body[k];
+    body[k] = 0;
+    return n->state;
+}
+
+/* The SD-card installer's boot: a stock unit that has just accepted the "update". Its MCU stays parked and power-cycles
+ * the unit about 145 s after the update started (clk_ms counts from about the same moment), whatever the SoC sends.
+ * Stage 1 (the boot path) is set up here, first thing in the net task: before USB, Wi-Fi, the audio DSP and Android
+ * Auto, so nothing else runs while U-Boot's blocks are written, and well before the power cut. After it, every
+ * power-on starts BOOT.BIN from the card. Settings > Flash > Set up (and Remove) refuse to start stage 1 from
+ * INSTALLER_S1_LATE_MS on: a power cut while U-Boot's environment or sums are written leaves a unit that does not boot. */
+#define INSTALLER_S1_LATE_MS 90000u
+#define INSTALLER_RETRIES    2   /* a stage 1 write that failed half way is resumed this many times */
+static void installer_setup(void)
+{
+    static char body[512], msg[160];
+    install_s1_deadline(INSTALLER_S1_LATE_MS);
+    lprintf("installer boot: t=%u ms; setting up the boot path (stage 1 refuses to start after t=%u ms)\n", clk_ms(),
+            INSTALLER_S1_LATE_MS);
+    inst_quiet = 1;
+    for (u32 t0 = clk_ms(); !ui_running() && clk_ms() - t0 < 5000;) {   /* the notice should be up before any write */
+        hb_tick();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    notice_set(1, -1, "Installing the boot path... do not switch off", "Checking the flash.");
+    for (u32 t0 = clk_ms(); clk_ms() - t0 < 600;) {
+        hb_tick();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    u32 t0 = clk_ms();
+    int tries = 0, last = -1, started = 0, r;
+    install_request(1);
+    for (;;) {
+        install_poll();   /* the first pass plans (about 3 MB of flash reads), then one 64 KB block per pass */
+        int done, total;
+        if (install_progress(&done, &total)) {
+            started = 1;
+            if (done != last) {
+                last = done;
+                lprintf("installer boot: writing block %d of %d (t=%u ms)\n", done + 1, total, clk_ms());
+                vfmt_n(body, "Writing block %d of %d. Keep the power on.", done + 1, total);
+                notice_set(1, total ? 100 * done / total : 0, "Installing the boot path... do not switch off", body);
+            }
+            hb_tick();
+            vTaskDelay(1);   /* the UI draws the progress between blocks */
+            continue;
+        }
+        r = install_last(msg, sizeof msg);
+        if (r == -2 && tries < INSTALLER_RETRIES) {
+            tries++;
+            lprintf("installer boot: stage 1 failed half way (%s); resuming, try %d of %d\n", msg, tries, INSTALLER_RETRIES);
+            install_request(1);
+            last = -1;
+            continue;
+        }
+        break;
+    }
+    u32 ms = clk_ms() - t0;
+    const char *why = msg;
+    static const char pre[] = "install boot: ";   /* a refusal comes as "install boot: <reason>" */
+    for (int k = 0; why == msg && k < (int)sizeof pre; k++)
+        if (!pre[k])
+            why = msg + k;
+        else if (msg[k] != pre[k])
+            break;
+    if (r == 1) {
+        lprintf("installer boot: boot path installed in %u ms (t=%u ms): %s\n", ms, clk_ms(), msg);
+        notice_set(2, 100, "Installed", "The unit restarts by itself in about two minutes; after that it starts this "
+                   "firmware from the SD card. Keep the card in the unit.");
+    } else if (r == 0 && install_s1_installed()) {
+        lprintf("installer boot: the boot path is already set up, nothing written (t=%u ms)\n", clk_ms());
+        notice_set(3, -1, "Boot path already set up", "This unit already starts this firmware from the SD card.");
+    } else if (started) {   /* written at least in part, then a step failed or the read-back did not match */
+        lprintf("installer boot: boot path FAILED after %d retries (t=%u ms): %s\n", tries, clk_ms(), msg);
+        vfmt_n(body, "%s\n\nKeep the power on and press Settings > Flash > Set up to retry. If the unit does not start "
+               "after it restarts by itself, its flash has to be rewritten with a programmer.", why);
+        notice_set(2, -1, "Setting up the boot path FAILED", body);
+    } else {
+        if (!why[0])
+            why = "the flash could not be checked";
+        lprintf("installer boot: boot path NOT installed (t=%u ms): %s\n", clk_ms(), why);
+        vfmt_n(body, "%s.\n\nNothing was changed. The unit goes back to the original firmware at the next restart.", why);
+        notice_set(2, -1, "Boot path not installed", body);
+    }
+    flush("installer boot");
+    inst_quiet = 0;
+}
+
 /* Everything that calls U-Boot (USB for Wi-Fi, mmc/fat, commands, get_timer/udelay) stays in this one task: the old
  * main loop, unchanged. It never blocks, so it runs whenever no higher-priority task is ready. */
 #define NET_STACK_WORDS (64 * 1024)
@@ -5060,6 +5202,8 @@ static void net_task(void *arg)
                 lprintf("--- %s: own FAT write failed (%d)\n", name, fr);
         }
     }
+    if (installer_boot)
+        installer_setup();
     load_config();
     audio_boot();
 
@@ -5204,6 +5348,10 @@ int payload_entry(int argc, char *const argv[])
 
     for (u32 *p = __bss_start; p < __bss_end; p++)
         *p = 0;
+    if (argc > 2) {   /* `go 0x1800000 main isp`: the SD-card installer's boot */
+        const char *a = argv[2];
+        installer_boot = a[0] == 'i' && a[1] == 's' && a[2] == 'p' && !a[3];
+    }
     /* the previous run ended in a crash record: keep the tail of its log before ours overwrites it */
     prev_log_len = irq_prev_log_len();
     if (prev_log_len) {
@@ -5215,7 +5363,7 @@ int payload_entry(int argc, char *const argv[])
     irq_log_len_ptr = (volatile unsigned int *)&log_len;
     ecos_boot_check();   /* returns unless /ECOSRUN.FLG asks for a stock eCos snapshot run */
     vdec_hw_reset();   /* a decoder left running by the previous run stops here */
-    lprintf("net main, build %s\n", hu_build_id);
+    lprintf("net main, build %s%s\n", hu_build_id, installer_boot ? ", installer boot (go ... main isp)" : "");
     mem_boot_check();
     {
         static char crumb_msg[96];

@@ -482,8 +482,21 @@ static struct { char label[128], button[16]; int f; } rows[2][2];   /* [buffer][
 static volatile int line_cur;
 static const char *const job_name[] = { "", "boot path install", "firmware copy", "boot path removal", "copy removal" };
 
+static u32 s1_deadline;       /* install_s1_deadline: clk_ms() after which stage 1 changes do not start */
+
 void install_request(int stage) { req = stage; }
 int install_busy(void) { return job != 0; }
+void install_s1_deadline(unsigned at) { s1_deadline = at; }
+const char *install_s1_late(void)   /* a retry of a half-written plan is never refused: it can only help */
+{
+    return s1_deadline && s1_resume < 0 && (int)(clk_ms() - s1_deadline) >= 0 ?
+           "too late after the update: the unit restarts by itself soon. Run the installer again" : 0;
+}
+int install_progress(int *done, int *total)
+{
+    *done = jdone, *total = jtotal;
+    return job != 0;
+}
 
 static void text(char *d, const char *s, int max)
 {
@@ -535,6 +548,13 @@ static int row_text(int stage, char *label, int lmax, char *button, int bmax)
             plat_fmt(t, "Boot from the SD card, else from flash: not possible (%s)", pb.refuse);
         else
             plat_fmt(t, "Boot from the SD card, else from flash"), f = 1;
+        if (!job && have_status && install_s1_late()) {   /* the installer boot's late guard: no buttons */
+            if (inst_stage1_done(&pb))
+                plat_fmt(t, "Boot from the SD card, else from flash: installed");
+            else
+                plat_fmt(t, "Boot from the SD card, else from flash: not set up (%s)", install_s1_late());
+            f = 0;
+        }
     } else {
         int ours = pc.state == INST_REG_COPY || pc.state == INST_REG_PENDING;
         int sameb = ours && pc.old_ok;
@@ -606,6 +626,14 @@ int install_ui(int stage, char *label, int lmax, char *button, int bmax)
     text(button, rows[b][st].button, bmax);
     return rows[b][st].f;
 }
+
+int install_last(char *msg, int max)
+{
+    text(msg, jmsg, max);
+    return job || !jres ? 0 : jres > 0 ? 1 : s1_resume >= 0 ? -2 : -1;
+}
+
+int install_s1_installed(void) { return have_status && s1_resume < 0 && !pb.refuse && !pb.nblk && inst_stage1_done(&pb); }
 
 static void fail(const char *what, int r)
 {
@@ -748,6 +776,9 @@ static int start_s1(int undo, char *o, inst_fmt fmt)
         set_line();
         return fmt(o, "%s: resuming the interrupted plan at step %d of %d", nm, jdone + 1, jtotal);
     }
+    const char *late = install_s1_late();
+    if (late)
+        return fmt(o, "ERR %s: %s", nm, late);
     refresh();
     if (b->refuse)
         return fmt(o, "ERR %s: %s", nm, b->refuse);
