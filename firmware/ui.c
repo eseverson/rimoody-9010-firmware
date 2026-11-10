@@ -43,7 +43,7 @@ static int key_mode = 1, key_color = 6;
 static const unsigned char key_rgb[] = { 1, 2, 3, 4, 5, 6, 7 };   /* bit 0 red, 1 green, 2 blue */
 static int lights;   /* debounced headlight input */
 static int card_log = CARD_LOG_DEFAULT;   /* UI.TXT cardlog=: crash, shutdown and car logs on the SD card */
-static int boot_console = 1;   /* UI.TXT boot=1: power up into the text console (Home goes to the home screen) */
+static int boot_console = 0;   /* UI.TXT boot=1: power up into the text console (Home goes to the home screen) */
 /* equalizer: 10 octave bands (audio.c), -12..+12 dB each; presets are ours, not stock's */
 #define EQ_N 10
 static signed char eq_db[EQ_N];
