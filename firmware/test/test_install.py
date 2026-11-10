@@ -7,7 +7,7 @@ byte for byte against tools/patch_uboot.py's output with the version 1 script sw
   python3 -I test_install.py ./install_host
 
 Needs dump1.bin (the original 16 MB flash, kept out of git) at the repository root; without it the test is skipped."""
-import os, random, struct, subprocess, sys, tempfile, zlib
+import atexit, hashlib, os, random, shutil, struct, subprocess, sys, tempfile, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
@@ -23,7 +23,20 @@ SCRIPT, COPY, COPY_IMG, COPY_END = 0xE00000, 0xC70000, 0xC70100, 0xE00000
 COPY_MAX = COPY_END - COPY_IMG
 BODY = FLASH_UBOOT_HDR + 64
 fails = 0
-tmp = tempfile.mkdtemp(prefix='install_test_')
+# One scratch dir per checkout (~1 GB of flash images, and /tmp may be RAM): wiped at startup so a killed run leaves at
+# most one stale dir, removed at exit unless the run failed. Keyed on the checkout path so parallel worktrees don't
+# wipe each other's live run.
+tmp = os.path.join(tempfile.gettempdir(), 'install_test_' + hashlib.sha1(ROOT.encode()).hexdigest()[:8])
+shutil.rmtree(tmp, ignore_errors=True)
+os.makedirs(tmp)
+
+
+@atexit.register
+def cleanup():
+    if fails:
+        print('test_install: images kept in', tmp)
+    else:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def check(cond, what):
