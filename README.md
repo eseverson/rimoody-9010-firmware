@@ -17,7 +17,26 @@ Working on the unit today:
 
 AA video throughput: TLS decryption in software (own AES-GCM in `gcm_alt.c`), delayed TCP ACKs, queued USB transmits and background decoding take a 720p stream to 81-87 fps with AES-128-GCM (103-108 fps with ChaCha20-Poly1305), well above the phone's 30-60 fps.
 
-In progress: occasional audio skips during AA (`notes/android_auto.md`, "Stutter hunt"), VPP0 tearing and downscaling, and Wi-Fi join reliability. Not built yet: Bluetooth hands-free calls, steering-wheel buttons, reverse camera, FM radio, AUX and wired AA.
+In progress: occasional audio skips during AA (`notes/android_auto.md`, "Stutter hunt"), VPP0 tearing and downscaling, and Wi-Fi join reliability.
+
+## Stock features not built yet
+
+The stock firmware does more than this firmware so far. Booting stock is one tap away (Settings > System > Boot stock) for anything below.
+
+| Stock feature | Status here |
+|---|---|
+| Bluetooth hands-free calls | Not built. The call frames, call events and audio route are worked out from the stock firmware ([notes/bt_calls.md](notes/bt_calls.md)); in AA the phone shows its own call screen, but call audio has to be routed in. |
+| Bluetooth music (A2DP) outside Android Auto | Not built. Same analog path from the Bluetooth chip as calls. |
+| Apple CarPlay (wired and wireless) | Not planned yet. Stock ships CarPlay, AirPlay and iAP2 modules; nothing reverse engineered. |
+| Wired Android Auto (USB) | Not built; wireless AA only. |
+| Other phone mirroring (CarLife, the AutoLink app, Miracast) | Not planned. |
+| FM radio (with RDS) | Not built. The tuner sits behind the SoC's hardware I2C and feeds the SoC's audio input; not started. |
+| AUX input | Not built. Same audio input mux as the radio, partly mapped ([notes/audio.md](notes/audio.md)). |
+| USB and SD media player (music, video) | Not built. |
+| Reverse camera | Not built. Stock has a camera option and a video input; not looked at. |
+| Steering-wheel buttons | Not built. Stock learns them from two ADC lines ([notes/display_touch.md](notes/display_touch.md)); `tools/adc.py` samples those lines. |
+| IR remote, CAN bus, TV/DTV | Factory options in the stock configuration; whether this board has the hardware is unknown. |
+| Stock settings (EQ presets, tone, clock, factory menu) | Partly replaced by our own settings (EQ, display, Wi-Fi); the clock and factory menu are not. |
 
 ## Hardware
 
