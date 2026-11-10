@@ -348,10 +348,27 @@ static int run(const char *f, ...)
 static u32 prev_log_len;
 static void hb_tick(void);
 
+static int installer_boot;
+static void save_log(const char *name);
+/* On the installer boot (a demo with nothing else to go on when it fails) every milestone also saves the log so far to
+ * the card as Snn.TXT, through U-Boot's fatwrite on the update path's card: the last file shows where it stopped. */
+static void isp_mark(const char *why)
+{
+    static int n;
+    if (!installer_boot || n >= 40)
+        return;
+    char name[12];
+    name[0] = 'S', name[1] = (char)('0' + n / 10), name[2] = (char)('0' + n % 10), name[3] = '.', name[4] = 'T',
+    name[5] = 'X', name[6] = 'T', name[7] = 0;
+    n++;
+    lprintf("--- installer step %s: %s\n", name, why);
+    save_log(name);
+}
 static void flush(const char *why)
 {
     hb_tick();
     lprintf("--- %s t=%u\n", why, ub_ms(0));
+    isp_mark(why);
 }
 
 /* ---- our own SD + FatFs (sd.c, diskio.c, fatfs/): config, logs, persist, HU1 op 17. Net task only. Every mount
@@ -1696,7 +1713,6 @@ struct handoff { u32 magic, ssid_len, ip; u8 ssid[33], pmk[32], token[32]; u8 pa
 static int exec_trial, net_online, prev_boot_failed;
 /* started by the SD-card installer (`go 0x1800000 main isp`, tools/mkrelease.py). The marker is the `go` argument, so
  * an EXEC (the trampoline passes only "main") or any later boot never sees it again. */
-static int installer_boot;
 static volatile int inst_quiet;   /* set while a boot-time flash job must run alone (none today: the installer boot writes nothing) */
 static int flash_busy(void) { return inst_quiet || install_busy(); }
 static u32 net_task_t0, hwwdt_test_at;
@@ -5426,8 +5442,10 @@ int payload_entry(int argc, char *const argv[])
     ecos_boot_check();   /* returns unless /ECOSRUN.FLG asks for a stock eCos snapshot run */
     vdec_hw_reset();   /* a decoder left running by the previous run stops here */
     lprintf("net main, build %s%s\n", hu_build_id, installer_boot ? ", installer boot (go ... main isp)" : "");
+    isp_mark("main");
     mem_boot_check();
     disp_boot();
+    isp_mark("display set up");
     {
         static char crumb_msg[96];
         if (vdec_crumb_report(crumb_msg, vfmt_n))
@@ -5460,6 +5478,7 @@ int payload_entry(int argc, char *const argv[])
 #endif
     if (BOOT_FB)
         fb_enable();   /* text console on OSD0 from here on */
+    isp_mark("console on");
     {
         static char rep[1024];
         if (irq_crash_report(rep, crash_brief)) {

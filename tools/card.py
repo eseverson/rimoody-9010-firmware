@@ -86,7 +86,10 @@ def load(a):
     if names[0] != 'ISP_UPDT.BIN':
         print('note: no ISP_UPDT.BIN -- a boot-from-card round (NOR bootcmd runs /BOOT.BIN), not an update round')
     keep = [k for k in a.keep if os.path.exists(os.path.join(root, k))]
-    with tempfile.TemporaryDirectory(dir=os.environ.get('XDG_RUNTIME_DIR')) as tmp:
+    # the kept files' copy survives a failed format or copy (a udisks Format error once lost WIFI.TXT this way): it is
+    # removed only once they are back on the card and verified
+    tmp = tempfile.mkdtemp(prefix='card-keep-', dir=os.environ.get('XDG_RUNTIME_DIR'))
+    if True:
         saved = {}
         for k in keep:
             shutil.copyfile(os.path.join(root, k), os.path.join(tmp, k))
@@ -103,7 +106,8 @@ def load(a):
     print('card %s (freshly formatted):' % root)
     check(root)
     if bad:
-        sys.exit('MISMATCH after copy: %s (card left mounted)' % ' '.join(bad))
+        sys.exit('MISMATCH after copy: %s (card left mounted; kept files are still in %s)' % (' '.join(bad), tmp))
+    shutil.rmtree(tmp, ignore_errors=True)
     if 'WIFI.TXT' in a.keep and 'WIFI.TXT' not in keep:
         print('note: no WIFI.TXT on the card; run `card.py wifi` if this round needs Wi-Fi')
     print('verified: %s%s' % (' '.join(names), (' + kept ' + ' '.join(keep)) if keep else ''))
