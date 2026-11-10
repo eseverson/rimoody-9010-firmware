@@ -17,7 +17,7 @@ You need a microSD card of 32 GB or less, formatted FAT32 (not exFAT), and a PC.
 3. Optional: `WIFI.TXT` (see below). Rename `WIFI.TXT.example` to `WIFI.TXT`, fill it in, and copy it to the card.
 4. Put the card in, switch the unit on, and accept the software update it offers.
 5. The unit restarts into this firmware, running from the card, as a demo: nothing on the unit is changed. The installer deletes its own two files from the card.
-6. Try it. About two minutes after the update, the unit's power controller switches the unit off and on again by itself (it does that after every update) and the original firmware is back. To try again, copy the two installer files to the card again.
+6. Try it. About two minutes after the update, the unit's power controller restarts it by itself (it does that after every update). The original firmware may then stop at its start screen: switch the unit off and on (ignition off and on) and it starts normally. To try again, copy the two installer files to the card again.
 7. To keep it, during the demo and within its first 90 seconds: Settings > Flash > Set up ("Boot from the SD card, else from flash"). It writes the boot path into the unit's flash in a few seconds; keep the power on meanwhile. From then on every power-on starts this firmware from the card, with no time limit, and the original firmware starts whenever the card is out. Remove on the same row undoes it.
 8. Recommended: Settings > Flash > Back up, then keep `NORDUMP.BIN` from the card on your PC. It is what a flash programmer needs to repair the unit.
 9. Optional: Settings > Flash > Install copies the firmware into flash, so it starts even without the card.

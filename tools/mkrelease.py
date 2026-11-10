@@ -107,7 +107,7 @@ You need: a microSD card of 32 GB or less, a PC, and the unit running its origin
 
 5. The unit restarts and our firmware starts from the card within a few seconds, as a demo: nothing on the unit has been changed. The installer deletes ISP_UPDT.BIN and ISPBOOOT.BIN from the card.
 
-6. Try it. About two minutes after the update the unit switches itself off and on (its power controller does this after every update) and the original firmware is back. To try again, copy ISP_UPDT.BIN and ISPBOOOT.BIN to the card again.
+6. Try it. About two minutes after the update the unit restarts by itself (its power controller does this after every update). The original firmware may then stop at its start screen: switch the unit off and on (ignition off and on), and it starts normally. To try again, copy ISP_UPDT.BIN and ISPBOOOT.BIN to the card again.
 
 7. To keep it: during the demo, within the first 90 seconds, go to Settings > Flash > Set up ("Boot from the SD card, else from flash") and confirm. It writes the boot path into the unit's flash, a few seconds; keep the power on and do not start the engine meanwhile, since a power loss while it writes can leave the unit unable to start. From then on every power-on starts this firmware from the card, with no time limit; without the card the original firmware starts. Remove on the same row undoes it.
 
