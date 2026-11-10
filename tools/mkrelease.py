@@ -52,20 +52,19 @@ STOCK_ENV = b'bootcmd=bootsp\0bootdelay=0\0baudrate=921600\0\0'   # the 44-byte 
 IMAGE_MAX = 0x18FF00      # largest image the flash copy takes (notes/nor_install.md); MM_PAYLOAD_SZ also holds .bss
 ECOS_NAMES = ('MCU_SY260L.BIN', 'LOGO.BIN', 'DKEY.BIN')   # other files stock eCos acts on: never ship these
 
-# The installer script. Same pinmux, UART1, MCU frame, SD and card lines as the NOR boot script (isp/bootcmd/boot.txt),
-# after the update is marked done and the installer files are gone. Every line, in order:
+# The installer script: the command sequence of the ISP test rounds that ran on the unit (load through the update
+# path's own card settings, isp_if=mmc isp_dev=0 there; no pinmux, mmc or ispsp commands of our own). Every line:
 #   setenv isp_all_or_update_done 1   ispsp stops after `source` instead of starting over (stock end of update)
 #   mw.l 0x9c00317c 0 1               clear the QART boot mode: any reset from here on boots normally, not ISP again
 #   fatrm ... ISP_UPDT.BIN            eCos must not find it again (it would go back into the updater on every boot);
 #                                     first, so a failure further down cannot loop the update
-#   fatrm ... ISPBOOOT.BIN            the other copy; harmless if left, removed so the card holds only the firmware
+#   fatrm ... ISPBOOOT.BIN            the other copy; removed so the card holds only the firmware
 #   wdt stop all                      no SoC watchdog reset while the card is read
+#   fatload ... BOOT.BIN              the firmware, through the update path's card settings
+#   crc32 ...                         evicts the D-cache so the freshly loaded code is what the CPU fetches
 #   pinmux, uartsp, d1 00             UART1 up and one heartbeat, as boot.txt (the parked MCU ignores it)
-#   ispsp update_finish               the frame stock sends after an update (`ad`); was harmless on the ISP rounds
-#   SD pinmux, isp_if/isp_dev, mmc    boot.txt's card setup and its mmc 0, then mmc 1 search for /BOOT.BIN
 #   hu_src isp                        shows `hu.py cmd 'printenv hu_src'` that it came in this way (the firmware does
 #                                     not read U-Boot's environment at boot)
-#   crc32 ...                         evicts the D-cache so the freshly loaded code is what the CPU fetches
 #   go hello, go main isp             the firmware's two entry calls, as boot.txt; `isp` marks the demo session (the
 #                                     firmware explains how to keep it; an EXEC or a later boot never passes it)
 #   reset                             no BOOT.BIN or the firmware returned: boot normally (stock eCos)
@@ -75,18 +74,12 @@ mw.l 0x9c00317c 0 1
 fatrm $isp_if $isp_dev ISP_UPDT.BIN
 fatrm $isp_if $isp_dev ISPBOOOT.BIN
 wdt stop all
+if fatload $isp_if $isp_dev 0x1800000 BOOT.BIN; then setenv load_ok 1; fi
+crc32 0x00f00000 0x100000
 mw.l 0x9c0000a4 0x1fe00220
 uartsp init 1 115200
 mw.l 0x9c000980 0xff;mw.l 0x9c000980 0xaa;mw.l 0x9c000980 0x02;mw.l 0x9c000980 0xd1;mw.l 0x9c000980 0x00;mw.l 0x9c000980 0x2d;mw.l 0x9c000980 0xbe;mw.l 0x9c000980 0xba
-ispsp update_finish
-mw.l 0x9c00008c 0x00f00050;mw.l 0x9c000100 0x00fc00fc;mw.l 0x9c00010c 0x00fc00fc
-setenv hu_ok
-setenv isp_if mmc
-setenv isp_dev 0
-mmc dev 0
-mmc rescan
-if fatload mmc 0 0x1800000 /BOOT.BIN; then setenv hu_ok 1; else mmc dev 1; mmc rescan; if fatload mmc 1 0x1800000 /BOOT.BIN; then setenv isp_dev 1; setenv hu_ok 1; fi; fi
-if test -n "$hu_ok"; then setenv hu_src isp; crc32 0x00f00000 0x100000; wdt stop all; go 0x1800000 hello; go 0x1800000 main isp; fi
+if test -n "$load_ok"; then setenv hu_src isp; go 0x1800000 hello; go 0x1800000 main isp; fi
 reset
 """
 
