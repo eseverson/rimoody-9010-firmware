@@ -11,8 +11,8 @@
  *                        broadcasts a hello to UDP 5152 every 2 s. Runs until the unit resets; rejoins after a
  *                        deauth, a failed handshake or 10 s without beacons. Talks to the MCU on UART1 (mcu.c):
  *                        heartbeat, frame parser, the a4 time handshake, the 00 shutdown request.
- *   go 0x1800000 main isp   the same, started by the SD-card installer (tools/mkrelease.py): sets up the boot path
- *                        first (installer_setup).
+ *   go 0x1800000 main isp   the same, started by the SD-card installer (tools/mkrelease.py): a demo session that
+ *                        writes nothing to the flash (installer_setup shows how to keep it).
  *   HU1 EXEC             replaces this payload in place with an image uploaded to RAM (tramp.c at 0x02f00000).
  *
  * Fixed RAM: 0x01500000 HELLO.TXT text, 0x01600000 MCU RX hex, 0x01800000 this payload + bss (< 0x1A00000),
@@ -1696,7 +1696,7 @@ static int exec_trial, net_online, prev_boot_failed;
 /* started by the SD-card installer (`go 0x1800000 main isp`, tools/mkrelease.py). The marker is the `go` argument, so
  * an EXEC (the trampoline passes only "main") or any later boot never sees it again. */
 static int installer_boot;
-static volatile int inst_quiet;   /* installer_setup is writing the boot path: no AA, flash dump or mic until it ends */
+static volatile int inst_quiet;   /* set while a boot-time flash job must run alone (none today: the installer boot writes nothing) */
 static int flash_busy(void) { return inst_quiet || install_busy(); }
 static u32 net_task_t0, hwwdt_test_at;
 
@@ -5097,87 +5097,27 @@ int plat_ui_notice(int *gen, int *pct, char *title, int tmax, char *body, int bm
     return n->state;
 }
 
-/* The SD-card installer's boot: a stock unit that has just accepted the "update". Its MCU stays parked and power-cycles
- * the unit about 145 s after the update started (clk_ms counts from about the same moment), whatever the SoC sends.
- * Stage 1 (the boot path) is set up here, first thing in the net task: before USB, Wi-Fi, the audio DSP and Android
- * Auto, so nothing else runs while U-Boot's blocks are written, and well before the power cut. After it, every
- * power-on starts BOOT.BIN from the card. Settings > Flash > Set up (and Remove) refuse to start stage 1 from
- * INSTALLER_S1_LATE_MS on: a power cut while U-Boot's environment or sums are written leaves a unit that does not boot. */
+/* The SD-card installer's boot: a stock unit that has just accepted the "update", so the user can try this firmware
+ * without changing anything. Nothing is written to the flash here: keeping it (Settings > Flash > Set up, then later
+ * Install) is the user's own decision. The unit's MCU stays parked and power-cycles the unit about 145 s after the
+ * update started (clk_ms counts from about the same moment), whatever the SoC sends, and the next power-on is the
+ * original firmware again unless Set up ran. Set up (and Remove) refuse to start from INSTALLER_S1_LATE_MS on: a power
+ * cut while U-Boot's environment or sums are written leaves a unit that does not boot. */
 #define INSTALLER_S1_LATE_MS 90000u
-#define INSTALLER_RETRIES    2   /* a stage 1 write that failed half way is resumed this many times */
 static void installer_setup(void)
 {
-    static char body[512], msg[160];
     install_s1_deadline(INSTALLER_S1_LATE_MS);
-    lprintf("installer boot: t=%u ms; setting up the boot path (stage 1 refuses to start after t=%u ms)\n", clk_ms(),
+    lprintf("installer boot: t=%u ms; demo session, nothing written (Set up refuses to start after t=%u ms)\n", clk_ms(),
             INSTALLER_S1_LATE_MS);
-    inst_quiet = 1;
-    for (u32 t0 = clk_ms(); !ui_running() && clk_ms() - t0 < 5000;) {   /* the notice should be up before any write */
+    for (u32 t0 = clk_ms(); !ui_running() && clk_ms() - t0 < 5000;) {
         hb_tick();
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-    notice_set(1, -1, "Installing the boot path... do not switch off", "Checking the flash.");
-    for (u32 t0 = clk_ms(); clk_ms() - t0 < 600;) {
-        hb_tick();
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    u32 t0 = clk_ms();
-    int tries = 0, last = -1, started = 0, r;
-    install_request(1);
-    for (;;) {
-        install_poll();   /* the first pass plans (about 3 MB of flash reads), then one 64 KB block per pass */
-        int done, total;
-        if (install_progress(&done, &total)) {
-            started = 1;
-            if (done != last) {
-                last = done;
-                lprintf("installer boot: writing block %d of %d (t=%u ms)\n", done + 1, total, clk_ms());
-                vfmt_n(body, "Writing block %d of %d. Keep the power on.", done + 1, total);
-                notice_set(1, total ? 100 * done / total : 0, "Installing the boot path... do not switch off", body);
-            }
-            hb_tick();
-            vTaskDelay(1);   /* the UI draws the progress between blocks */
-            continue;
-        }
-        r = install_last(msg, sizeof msg);
-        if (r == -2 && tries < INSTALLER_RETRIES) {
-            tries++;
-            lprintf("installer boot: stage 1 failed half way (%s); resuming, try %d of %d\n", msg, tries, INSTALLER_RETRIES);
-            install_request(1);
-            last = -1;
-            continue;
-        }
-        break;
-    }
-    u32 ms = clk_ms() - t0;
-    const char *why = msg;
-    static const char pre[] = "install boot: ";   /* a refusal comes as "install boot: <reason>" */
-    for (int k = 0; why == msg && k < (int)sizeof pre; k++)
-        if (!pre[k])
-            why = msg + k;
-        else if (msg[k] != pre[k])
-            break;
-    if (r == 1) {
-        lprintf("installer boot: boot path installed in %u ms (t=%u ms): %s\n", ms, clk_ms(), msg);
-        notice_set(2, 100, "Installed", "The unit restarts by itself in about two minutes; after that it starts this "
-                   "firmware from the SD card. Keep the card in the unit.");
-    } else if (r == 0 && install_s1_installed()) {
-        lprintf("installer boot: the boot path is already set up, nothing written (t=%u ms)\n", clk_ms());
-        notice_set(3, -1, "Boot path already set up", "This unit already starts this firmware from the SD card.");
-    } else if (started) {   /* written at least in part, then a step failed or the read-back did not match */
-        lprintf("installer boot: boot path FAILED after %d retries (t=%u ms): %s\n", tries, clk_ms(), msg);
-        vfmt_n(body, "%s\n\nKeep the power on and press Settings > Flash > Set up to retry. If the unit does not start "
-               "after it restarts by itself, its flash has to be rewritten with a programmer.", why);
-        notice_set(2, -1, "Setting up the boot path FAILED", body);
-    } else {
-        if (!why[0])
-            why = "the flash could not be checked";
-        lprintf("installer boot: boot path NOT installed (t=%u ms): %s\n", clk_ms(), why);
-        vfmt_n(body, "%s.\n\nNothing was changed. The unit goes back to the original firmware at the next restart.", why);
-        notice_set(2, -1, "Boot path not installed", body);
-    }
-    flush("installer boot");
-    inst_quiet = 0;
+    notice_set(2, -1, "Trying this firmware",
+               "It runs from the SD card and has changed nothing on the unit. In about two minutes the unit restarts "
+               "by itself into its original firmware.\n\nTo keep this firmware: Settings > Flash > Set up, within the "
+               "first 90 seconds. After that the unit starts it from the card at every power-on, and Remove on the same "
+               "row undoes it. To try again later, copy ISP_UPDT.BIN and ISPBOOOT.BIN to the card again.");
 }
 
 /* Everything that calls U-Boot (USB for Wi-Fi, mmc/fat, commands, get_timer/udelay) stays in this one task: the old

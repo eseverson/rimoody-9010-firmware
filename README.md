@@ -16,9 +16,9 @@ You need a microSD card of 32 GB or less, formatted FAT32 (not exFAT), and a PC.
 2. Format the card, so it starts empty. Copy `ISP_UPDT.BIN` and `ISPBOOOT.BIN` to it first, then `BOOT.BIN`.
 3. Optional: `WIFI.TXT` (see below). Rename `WIFI.TXT.example` to `WIFI.TXT`, fill it in, and copy it to the card.
 4. Put the card in, switch the unit on, and accept the software update it offers.
-5. The unit restarts into this firmware, running from the card. The installer deletes its own two files from the card.
-6. The firmware sets up the boot path in the unit's flash by itself: a full-screen message says "Installing the boot path... do not switch off" and shows its progress for a few seconds. Keep the power on until it says "Installed".
-7. About two minutes after the update, the unit's power controller switches the unit off and on again by itself (it does that after every update). From then on, every power-on starts this firmware from the card. If the message said the boot path was not installed, it names the reason, nothing was changed, and the original firmware comes back. Start over from step 2.
+5. The unit restarts into this firmware, running from the card, as a demo: nothing on the unit is changed. The installer deletes its own two files from the card.
+6. Try it. About two minutes after the update, the unit's power controller switches the unit off and on again by itself (it does that after every update) and the original firmware is back. To try again, copy the two installer files to the card again.
+7. To keep it, during the demo and within its first 90 seconds: Settings > Flash > Set up ("Boot from the SD card, else from flash"). It writes the boot path into the unit's flash in a few seconds; keep the power on meanwhile. From then on every power-on starts this firmware from the card, with no time limit, and the original firmware starts whenever the card is out. Remove on the same row undoes it.
 8. Recommended: Settings > Flash > Back up, then keep `NORDUMP.BIN` from the card on your PC. It is what a flash programmer needs to repair the unit.
 9. Optional: Settings > Flash > Install copies the firmware into flash, so it starts even without the card.
 
@@ -41,7 +41,7 @@ What works is listed below. Much of the stock feature set is not built yet: no B
 Risks:
 
 - It has been tested on one unit. Units sold as the 9010 may differ. Set up checks the flash layout and refuses anything it does not recognize.
-- Setting up the boot path (step 6, or Settings > Flash > Set up) and Remove rewrite U-Boot's settings in flash. If the power drops during those one to three seconds, the unit no longer starts, and only a flash programmer (for example a CH341A clip) with a backup can repair it. Don't run them while starting the engine. Right after the update, Set up and Remove refuse to start once 90 s have passed, so they can't run into the automatic restart.
+- Setting up the boot path (step 7, Settings > Flash > Set up) and Remove rewrite U-Boot's settings in flash. If the power drops during those one to three seconds, the unit no longer starts, and only a flash programmer (for example a CH341A clip) with a backup can repair it. Don't run them while starting the engine. In the demo right after the update, Set up and Remove refuse to start once 90 s have passed, so they can't run into the automatic restart.
 - Install the flash copy only after the card version has run well for a while. Once a copy is in flash, taking the card out no longer gets you back to stock.
 
 ## What works today

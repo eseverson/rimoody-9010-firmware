@@ -27,12 +27,11 @@ How the stock update path runs the installer (reverse engineered, see git histor
 The MCU stays parked for the whole session that follows: it ignores the heartbeat (`d1 00`), `e5 00` and `ad`, and
 power-cycles the unit about 145 s after the update started (measured on the ISP rounds; `ispsp update_finish` did not
 change it). Our firmware therefore runs only about two minutes after the installer. The script starts it as
-`go 0x1800000 main isp`: the `isp` argument tells it that this is the installer's boot, and it sets up the boot path
-(Settings > Flash > "Boot from the SD card, else from flash", stage 1) by itself within the first seconds, before
-anything else runs, with a full-screen message. After that every power-on boots the card's BOOT.BIN with the MCU in its
-normal mode. If the set-up is refused, the power cycle brings back the stock firmware: the script has already deleted
-the installer files, so eCos does not offer the update again. In this session a manual Set up is refused from 90 s
-after boot on, so it cannot run into the power cut.
+`go 0x1800000 main isp`: the `isp` argument tells it that this is the installer's boot, a demo. It writes nothing to
+the flash and says so on screen; keeping it is the user's choice (Settings > Flash > Set up, stage 1, after which every
+power-on boots the card's BOOT.BIN with the MCU in its normal mode). Otherwise the power cycle brings back the stock
+firmware: the script has already deleted the installer files, so eCos does not offer the update again. In this session
+Set up is refused from 90 s after boot on, so it cannot run into the power cut.
 
 The installer itself never writes the unit's NOR flash: the script has no flash command (checked below against a list
 of U-Boot commands that can write it), and the U-Boot it runs lives in RAM only. The flash is changed only by our
@@ -67,8 +66,8 @@ ECOS_NAMES = ('MCU_SY260L.BIN', 'LOGO.BIN', 'DKEY.BIN')   # other files stock eC
 #   hu_src isp                        shows `hu.py cmd 'printenv hu_src'` that it came in this way (the firmware does
 #                                     not read U-Boot's environment at boot)
 #   crc32 ...                         evicts the D-cache so the freshly loaded code is what the CPU fetches
-#   go hello, go main isp             the firmware's two entry calls, as boot.txt; `isp` makes the firmware set up the
-#                                     boot path at once (an EXEC or a later boot never passes it)
+#   go hello, go main isp             the firmware's two entry calls, as boot.txt; `isp` marks the demo session (the
+#                                     firmware explains how to keep it; an EXEC or a later boot never passes it)
 #   reset                             no BOOT.BIN or the firmware returned: boot normally (stock eCos)
 SCRIPT = """\
 setenv isp_all_or_update_done 1
@@ -113,11 +112,11 @@ You need: a microSD card of 32 GB or less, a PC, and the unit running its origin
 
 4. Put the card in the unit and switch it on. The original firmware offers a software update. Accept it.
 
-5. The unit restarts and our firmware starts from the card within a few seconds. The installer deletes ISP_UPDT.BIN and ISPBOOOT.BIN from the card.
+5. The unit restarts and our firmware starts from the card within a few seconds, as a demo: nothing on the unit has been changed. The installer deletes ISP_UPDT.BIN and ISPBOOOT.BIN from the card.
 
-6. The firmware then sets up the boot path in the unit's flash by itself: the screen says "Installing the boot path... do not switch off" and shows its progress, a few seconds. Keep the power on and do not start the engine until it says "Installed". A power loss while it writes can leave the unit unable to start.
+6. Try it. About two minutes after the update the unit switches itself off and on (its power controller does this after every update) and the original firmware is back. To try again, copy ISP_UPDT.BIN and ISPBOOOT.BIN to the card again.
 
-7. About two minutes after the update the unit switches itself off and on (its power controller does this after every update). If it said "Installed", it starts our firmware from the card at every power-on from now on. If it said the boot path was not installed, it gives the reason, nothing was changed, and the unit starts the original firmware again: start again from step 1, or ask for help with the reason.
+7. To keep it: during the demo, within the first 90 seconds, go to Settings > Flash > Set up ("Boot from the SD card, else from flash") and confirm. It writes the boot path into the unit's flash, a few seconds; keep the power on and do not start the engine meanwhile, since a power loss while it writes can leave the unit unable to start. From then on every power-on starts this firmware from the card, with no time limit; without the card the original firmware starts. Remove on the same row undoes it.
 
 8. Recommended, once it starts normally: Settings > Flash > Back up. It writes NORDUMP.BIN (16 MB, about two minutes) to the card. Keep a copy on your PC: it is the only way to repair the unit with a flash programmer.
 

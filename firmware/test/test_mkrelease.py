@@ -63,7 +63,7 @@ check('net.c no longer stops without WIFI.TXT (mkrelease then writes "optional")
 inst = mr.INSTALL.format(title='t', rule='=', url='u', wifi=mr.WIFI_OPTIONAL)
 check('INSTALL.txt: WIFI.TXT optional, car network and token explained',
       'Optional: WIFI.TXT' in inst and 'car network' in inst and 'AP.TXT' in inst and 'token' in inst)
-check('INSTALL.txt: the boot path is set up by itself', 'by itself' in inst and 'Installing the boot path' in inst)
+check('INSTALL.txt: a demo first, keeping it is the user\'s Set up', 'as a demo' in inst and 'Settings > Flash > Set up' in inst and 'Installing the boot path' not in inst)
 check('INSTALL.txt is ASCII (written CRLF for Windows)', inst.isascii())
 check('WIFI.TXT.example says the file is optional', 'optional' in mr.WIFI_EXAMPLE)
 
