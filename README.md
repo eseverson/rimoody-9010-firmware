@@ -6,7 +6,39 @@ A one-minute tour of what is built (UI captures from the unit; the video slides 
 
 https://github.com/user-attachments/assets/7f5d5dc7-6e97-40d7-84ee-3d8b79288821
 
-Working on the unit today:
+## Install on your head unit
+
+For a Rimoody 9010 that runs its original firmware. This is unofficial firmware: read the risks below first.
+
+You need a microSD card of 32 GB or less, formatted FAT32 (not exFAT), and a PC.
+
+1. Download the release zip (`rimoody-9010-firmware-<build>.zip`) and extract it. Its `INSTALL.txt` has these steps too.
+2. Format the card, so it starts empty. Copy `ISP_UPDT.BIN` and `ISPBOOOT.BIN` to it first, then `BOOT.BIN`.
+3. Rename `WIFI.TXT.example` to `WIFI.TXT`, fill in your Wi-Fi name and password and a token of your own, and copy it to the card. The current firmware does not start without this file. A network that is out of range is fine: the unit then runs its own "car network" for Android Auto.
+4. Put the card in, switch the unit on, and accept the software update it offers.
+5. The unit restarts into this firmware, running from the card. The installer deletes its own two files from the card and changes nothing in the unit's flash.
+6. Right away, open Settings > Flash and press Set up on "Boot from the SD card, else from flash". It has to finish within about two minutes of accepting the update. After an update, the unit's power controller switches the unit off and on again by itself.
+7. After that restart, every power-on starts this firmware from the card. If Set up did not finish in time, the original firmware comes back. Start over from step 2.
+8. Recommended: Settings > Flash > Back up, then keep `NORDUMP.BIN` from the card on your PC. It is what a flash programmer needs to repair the unit.
+9. Optional: Settings > Flash > Install copies the firmware into flash, so it starts even without the card.
+
+Android Auto needs the unit's own certificate (`AACERT.PEM`, `AAKEY.PEM`). The firmware takes it from the unit's flash at first start, so there is nothing to copy.
+
+Going back to the original firmware:
+
+- Settings > System > Boot stock starts it once, until the next ignition cycle.
+- Taking `BOOT.BIN` off the card does the same until you put it back. If you used Install, remove the flash copy first (Settings > Flash > Remove on its row).
+- Settings > Flash > Remove on the boot row makes it permanent. From the next power-on only the original firmware starts, until you run the installer again.
+
+What works is listed below. Much of the stock feature set is not built yet: no Bluetooth calls or music outside Android Auto, no CarPlay, radio, reverse camera or steering-wheel buttons ([Stock features not built yet](#stock-features-not-built-yet)).
+
+Risks:
+
+- It has been tested on one unit. Units sold as the 9010 may differ. Set up checks the flash layout and refuses anything it does not recognize.
+- Set up and Remove rewrite U-Boot's settings in flash. If the power drops during those one to three seconds, the unit no longer starts, and only a flash programmer (for example a CH341A clip) with a backup can repair it. Don't run them while starting the engine, or close to the restart two minutes after the update.
+- Install the flash copy only after the card version has run well for a while. Once a copy is in flash, taking the card out no longer gets you back to stock.
+
+## What works today
 
 - Boot: power-on runs the NOR boot script (flash 0xE00000), which loads `/BOOT.BIN` from the card to 0x01800000 and jumps to it; with no `BOOT.BIN` it falls through to stock eCos (`isp/bootcmd/boot.txt`).
 - FreeRTOS V11.1.0 with our NDS32 port, own EHCI host and USB enumeration, RTL8188F Wi-Fi driver with WPA2 (CCMP in the chip's hardware for unicast data, software for group traffic), lwIP, own access point mode and DHCP server.
@@ -63,7 +95,7 @@ Identifying marks, for matching other units (the same board likely ships under o
 | Path | Contents |
 |---|---|
 | `firmware/` | The payload (main code). Built into `NET.BIN`. |
-| `isp/bootcmd/boot.txt` | The NOR boot script that loads `/BOOT.BIN` (version 1, SD card only). Version 2 (SD card, then a payload copy in NOR, then stock) is built into the payload and installed from Settings > System or `hu.py nor install` ([notes/nor_install.md](notes/nor_install.md)). |
+| `isp/bootcmd/boot.txt` | The NOR boot script that loads `/BOOT.BIN` (version 1, SD card only). Version 2 (SD card, then a payload copy in NOR, then stock) is built into the payload and installed from Settings > Flash or `hu.py nor install` ([notes/nor_install.md](notes/nor_install.md)). |
 | `isp/mkisp.py` | Builds an `ISP_UPDT.BIN` (the stock SD-card update path) from the stock dump plus a U-Boot script: the recovery route if the NOR boot script is lost. The early ISP rounds that used it (probing, NOR dumps, first Wi-Fi, MCU) are in git history before the move to `firmware/`. |
 | `tools/ecos-snap/` | Hooks that boot stock eCos and snapshot registers or log calls (`tools/ecos_snap.py`). |
 | `tools/` | PC-side tools, see below. |
@@ -93,7 +125,11 @@ Important files in `firmware/`:
 | `test/` | Host tests and H.264 test streams (`test/h264/README.md`). |
 | `WIFI.TXT.example` | Card config format (`ssid=`, `psk=`, `token=`, optional `ip=`). |
 
-## Building
+## Development
+
+Everything below is for building and changing the firmware.
+
+### Building
 
 The payload is cross-compiled with an NDS32 little-endian bare-metal toolchain (`nds32le-elf-`, gcc 14 with newlib). The Makefile looks for it at `$(HOME)/nds32/bin/nds32le-elf-`; point `CROSS` elsewhere if yours lives somewhere else:
 
@@ -105,7 +141,15 @@ make -C firmware CROSS=/path/to/nds32/bin/nds32le-elf-
 
 Host tests run on the PC with plain gcc, python3 (with the `cryptography` package) and openssl: `make -C firmware test`. They cover crypto, WPA, IP, MCU frames, the console, the H.264 parser, lwIP TCP, the wireless AA handshake, AP mode, DHCP, osdvid de-tiling, TLS and the AA stack over TCP against a scripted phone.
 
-## Running and day-to-day
+### Making a release
+
+```sh
+tools/mkrelease.py firmware/NET.BIN stock-dump.bin    # dist/rimoody-9010-firmware-<BUILD_ID>/ and .zip
+```
+
+The second argument is a 16 MB dump of a stock unit's NOR flash. Only its xboot and its U-Boot go into the installer, copied unchanged, and the tool refuses a U-Boot that fails xboot's word-sum check, lacks the verify flag or carries anything but the stock default environment. The installer is the stock SD-card update. eCos finds `ISP_UPDT.BIN` and offers the update. xboot then loads U-Boot from that file, and U-Boot runs the script stored in `ISPBOOOT.BIN`. The script marks the update done, deletes both installer files, and boots `/BOOT.BIN` from the card the way `isp/bootcmd/boot.txt` does. It contains no command that writes the flash. The tool checks that, along with the size limits and U-Boot's script checks, on the files as written. The reasoning is in the docstring of `tools/mkrelease.py`. Build published firmware with `make CARD_LOG=0`. `dist/` is gitignored.
+
+### Running and day-to-day
 
 The card holds `/BOOT.BIN` (the payload) and `/WIFI.TXT`, plus files the payload writes itself (`UI.TXT` settings, `AP.TXT` car network, logs). After power-on the payload joins the home Wi-Fi, broadcasts `HU1 hello` on UDP 5152 and serves UDP 5151. Requests need the token from `WIFI.TXT`:
 
@@ -130,6 +174,7 @@ Other tools, one line each:
 - `aa_phone.py`: stands in for the phone in wireless AA (TLS server, streams an H.264 file as AA video).
 - `adc.py`: samples the SoC SAR ADC channels over Wi-Fi.
 - `card.py`: loads and saves the SD card for ISP rounds; `card.py wifi` writes `WIFI.TXT`.
+- `mkrelease.py`: builds the end-user release zip (see "Making a release").
 - `ecos_snap.py`: boots stock eCos with a register-snapshot hook (`tools/ecos-snap`).
 - `fb.py`: drives the OSD0 framebuffer directly.
 - `flash_bootcmd.py`, `flash_script.py`, `patch_uboot.py`, `patch_card_uboot.py`: NOR U-Boot env and boot script patching (done; recovery is a CH341A and the original dump).

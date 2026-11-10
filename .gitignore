@@ -3,6 +3,9 @@
 /bootrom_*.bin
 /dumps/
 
+# release artifacts (tools/mkrelease.py), never committed
+/dist/
+
 # build outputs (rebuilt by make)
 *.BIN
 *.elf
