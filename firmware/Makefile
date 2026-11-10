@@ -69,7 +69,7 @@ HOSTCC ?= gcc
 test: test/crypto_host test/wpa_host test/ip_host test/mcu_host test/con_host test/h264p_host test/lwiptcp_host test/aawl_host test/wpaap_host test/dhcps_host test/ap80211_host test/osdvid_host test/gcm_host test/nor_host test/install_host test/aacert_host
 	cd test && python3 -I test_crypto.py ./crypto_host && python3 -I test_wpa.py ./wpa_host && \
 	  python3 -I test_ip.py ./ip_host && python3 -I test_mcu.py ./mcu_host && \
-	  python3 -I test_console.py ./con_host && python3 -I test_h264p.py ./h264p_host && ./lwiptcp_host && ./aawl_host && ./wpaap_host && ./dhcps_host && python3 -I test_ap80211.py ./ap80211_host && python3 -I test_osdvid.py ./osdvid_host && python3 -I test_gcm.py ./gcm_host && ./nor_host && python3 -I test_install.py ./install_host && python3 -I test_aacert.py ./aacert_host && ./test_tls.sh && ./test_aatcp.sh
+	  python3 -I test_console.py ./con_host && python3 -I test_h264p.py ./h264p_host && ./lwiptcp_host && ./aawl_host && ./wpaap_host && ./dhcps_host && python3 -I test_ap80211.py ./ap80211_host && python3 -I test_osdvid.py ./osdvid_host && python3 -I test_gcm.py ./gcm_host && ./nor_host && python3 -I test_install.py ./install_host && python3 -I test_aacert.py ./aacert_host && ./test_tls.sh && ./test_aatcp.sh && python3 -I test_mkrelease.py
 
 test/%_host: test/%_host.c h264p.c h264p.h aa_wl.c aa_wl.h wpa_ap.c wpa_ap.h ap80211.c ap80211.h crypto.c crypto.h wpa.c wpa.h ip.c ip.h mcu.c mcu.h console.c console.h font8x16.h osdvid.c osdvid.h vdec.h
 	$(HOSTCC) -O2 -Wall -Wextra -o $@ $<

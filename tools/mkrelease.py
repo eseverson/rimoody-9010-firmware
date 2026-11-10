@@ -26,14 +26,17 @@ How the stock update path runs the installer (reverse engineered, see git histor
 
 The MCU stays parked for the whole session that follows: it ignores the heartbeat (`d1 00`), `e5 00` and `ad`, and
 power-cycles the unit about 145 s after the update started (measured on the ISP rounds; `ispsp update_finish` did not
-change it). Our firmware therefore runs only about two minutes after the installer, long enough to tap
-Settings > Flash > Set up, after which every power-on boots the card's BOOT.BIN with the MCU in its normal mode.
-Without Set up, the power cycle brings back the stock firmware: the script has already deleted the installer files,
-so eCos does not offer the update again.
+change it). Our firmware therefore runs only about two minutes after the installer. The script starts it as
+`go 0x1800000 main isp`: the `isp` argument tells it that this is the installer's boot, and it sets up the boot path
+(Settings > Flash > "Boot from the SD card, else from flash", stage 1) by itself within the first seconds, before
+anything else runs, with a full-screen message. After that every power-on boots the card's BOOT.BIN with the MCU in its
+normal mode. If the set-up is refused, the power cycle brings back the stock firmware: the script has already deleted
+the installer files, so eCos does not offer the update again. In this session a manual Set up is refused from 90 s
+after boot on, so it cannot run into the power cut.
 
-The installer never writes the unit's NOR flash: the script has no flash command (checked below against a list of
-U-Boot commands that can write it), and the U-Boot it runs lives in RAM only. The flash is changed only by our
-firmware's Settings > Flash, which runs its own checks.
+The installer itself never writes the unit's NOR flash: the script has no flash command (checked below against a list
+of U-Boot commands that can write it), and the U-Boot it runs lives in RAM only. The flash is changed only by our
+firmware, through the checked install path of Settings > Flash.
 
 Stdlib only. Never executes anything from the dump.
 """
@@ -61,9 +64,11 @@ ECOS_NAMES = ('MCU_SY260L.BIN', 'LOGO.BIN', 'DKEY.BIN')   # other files stock eC
 #   pinmux, uartsp, d1 00             UART1 up and one heartbeat, as boot.txt (the parked MCU ignores it)
 #   ispsp update_finish               the frame stock sends after an update (`ad`); was harmless on the ISP rounds
 #   SD pinmux, isp_if/isp_dev, mmc    boot.txt's card setup and its mmc 0, then mmc 1 search for /BOOT.BIN
-#   hu_src isp                        tells the firmware (and `hu.py cmd 'printenv hu_src'`) it came in this way
+#   hu_src isp                        shows `hu.py cmd 'printenv hu_src'` that it came in this way (the firmware does
+#                                     not read U-Boot's environment at boot)
 #   crc32 ...                         evicts the D-cache so the freshly loaded code is what the CPU fetches
-#   go hello, go main                 the firmware's two entry calls, as boot.txt
+#   go hello, go main isp             the firmware's two entry calls, as boot.txt; `isp` makes the firmware set up the
+#                                     boot path at once (an EXEC or a later boot never passes it)
 #   reset                             no BOOT.BIN or the firmware returned: boot normally (stock eCos)
 SCRIPT = """\
 setenv isp_all_or_update_done 1
@@ -82,7 +87,7 @@ setenv isp_dev 0
 mmc dev 0
 mmc rescan
 if fatload mmc 0 0x1800000 /BOOT.BIN; then setenv hu_ok 1; else mmc dev 1; mmc rescan; if fatload mmc 1 0x1800000 /BOOT.BIN; then setenv isp_dev 1; setenv hu_ok 1; fi; fi
-if test -n "$hu_ok"; then setenv hu_src isp; crc32 0x00f00000 0x100000; wdt stop all; go 0x1800000 hello; go 0x1800000 main; fi
+if test -n "$hu_ok"; then setenv hu_src isp; crc32 0x00f00000 0x100000; wdt stop all; go 0x1800000 hello; go 0x1800000 main isp; fi
 reset
 """
 
@@ -108,12 +113,11 @@ You need: a microSD card of 32 GB or less, a PC, and the unit running its origin
 
 4. Put the card in the unit and switch it on. The original firmware offers a software update. Accept it.
 
-5. The unit restarts and our firmware starts from the card within a few seconds. The installer deletes ISP_UPDT.BIN and ISPBOOOT.BIN from the card; it does not change the unit's flash.
+5. The unit restarts and our firmware starts from the card within a few seconds. The installer deletes ISP_UPDT.BIN and ISPBOOOT.BIN from the card.
 
-6. Right away: Settings > Flash > "Boot from the SD card, else from flash" > Set up (the buttons appear once the flash has been checked), confirm, and keep the power on until it says it is done, a few seconds. Do not start the engine meanwhile.
-   Why right away: after an update the unit's power controller switches it off and on by itself about two minutes later. Set up must finish before that; a power loss while it writes can leave the unit unable to start.
+6. The firmware then sets up the boot path in the unit's flash by itself: the screen says "Installing the boot path... do not switch off" and shows its progress, a few seconds. Keep the power on and do not start the engine until it says "Installed". A power loss while it writes can leave the unit unable to start.
 
-7. The unit then restarts by itself. If Set up finished, it starts our firmware from the card at every power-on from now on. If not, it starts the original firmware: start again from step 1.
+7. About two minutes after the update the unit switches itself off and on (its power controller does this after every update). If it said "Installed", it starts our firmware from the card at every power-on from now on. If it said the boot path was not installed, it gives the reason, nothing was changed, and the unit starts the original firmware again: start again from step 1, or ask for help with the reason.
 
 8. Recommended, once it starts normally: Settings > Flash > Back up. It writes NORDUMP.BIN (16 MB, about two minutes) to the card. Keep a copy on your PC: it is the only way to repair the unit with a flash programmer.
 
@@ -133,15 +137,20 @@ WIFI_REQUIRED = ("Required by this build: rename WIFI.TXT.example to WIFI.TXT (e
                  "your Wi-Fi network's name and password, choose your own token, and copy it to the card. Without it "
                  "the firmware does not start. A network that is out of range is fine: after 30 s "
                  "the unit starts its own \"car network\" for Android Auto.")
-WIFI_OPTIONAL = ("Optional: to join your Wi-Fi, rename WIFI.TXT.example to WIFI.TXT (not WIFI.TXT.txt), fill it in and "
-                 "copy it to the card. Without it the unit runs its own \"car network\" for Android Auto.")
+WIFI_OPTIONAL = ("Optional: WIFI.TXT. Without it the unit runs its own Wi-Fi network, the \"car network\" (its name and "
+                 "password are made up at the first start and kept in AP.TXT on the card). Wireless Android Auto uses "
+                 "it: the phone gets the password over Bluetooth, there is nothing to type. With WIFI.TXT (rename "
+                 "WIFI.TXT.example to WIFI.TXT, not WIFI.TXT.txt, and fill it in) the unit also joins your own Wi-Fi "
+                 "when it is in range, and starts the car network 30 s after it is not. Its token= turns on the PC "
+                 "tools' commands; without a token the unit accepts none.")
 
 WIFI_EXAMPLE = """\
 # Rename this file to WIFI.TXT and copy it to the SD card. Lines starting with # are ignored.
+# The file is optional: without it the unit runs only its own car network, for wireless Android Auto.
 # ssid=  your Wi-Fi network's name (or a phone hotspot). If it is not in range, the unit starts its own car network.
 # psk=   its password, 8 to 63 characters.
 # token= a secret of your own, up to 32 characters. Anyone on the same network who knows it can control the unit
-#        with the PC tools, so change it.
+#        with the PC tools, so change it. Leave the line out and the unit accepts no PC tool commands.
 ssid=YourNetwork
 psk=your-wifi-password
 token=CHANGE-THIS-SECRET
@@ -252,7 +261,7 @@ def main():
     isp = build_isp(xboot, uimg, script_img)
     verify_isp(isp, uimg, script_img)
 
-    # the firmware build decides whether WIFI.TXT is required: net.c ends a boot without it as "no config (WIFI.TXT)"
+    # older builds end a boot without WIFI.TXT as "no config (WIFI.TXT)"; current ones run the car network instead
     wifi_required = b'no config (WIFI.TXT)' in img
     url = ('Project page, with what works and what does not: ' + a.url if a.url else
            'What works and what does not: the project README, "Stock features not built yet".')

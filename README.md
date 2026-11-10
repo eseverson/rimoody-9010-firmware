@@ -14,15 +14,21 @@ You need a microSD card of 32 GB or less, formatted FAT32 (not exFAT), and a PC.
 
 1. Download the release zip (`rimoody-9010-firmware-<build>.zip`) and extract it. Its `INSTALL.txt` has these steps too.
 2. Format the card, so it starts empty. Copy `ISP_UPDT.BIN` and `ISPBOOOT.BIN` to it first, then `BOOT.BIN`.
-3. Rename `WIFI.TXT.example` to `WIFI.TXT`, fill in your Wi-Fi name and password and a token of your own, and copy it to the card. The current firmware does not start without this file. A network that is out of range is fine: the unit then runs its own "car network" for Android Auto.
+3. Optional: `WIFI.TXT` (see below). Rename `WIFI.TXT.example` to `WIFI.TXT`, fill it in, and copy it to the card.
 4. Put the card in, switch the unit on, and accept the software update it offers.
-5. The unit restarts into this firmware, running from the card. The installer deletes its own two files from the card and changes nothing in the unit's flash.
-6. Right away, open Settings > Flash and press Set up on "Boot from the SD card, else from flash". It has to finish within about two minutes of accepting the update. After an update, the unit's power controller switches the unit off and on again by itself.
-7. After that restart, every power-on starts this firmware from the card. If Set up did not finish in time, the original firmware comes back. Start over from step 2.
+5. The unit restarts into this firmware, running from the card. The installer deletes its own two files from the card.
+6. The firmware sets up the boot path in the unit's flash by itself: a full-screen message says "Installing the boot path... do not switch off" and shows its progress for a few seconds. Keep the power on until it says "Installed".
+7. About two minutes after the update, the unit's power controller switches the unit off and on again by itself (it does that after every update). From then on, every power-on starts this firmware from the card. If the message said the boot path was not installed, it names the reason, nothing was changed, and the original firmware comes back. Start over from step 2.
 8. Recommended: Settings > Flash > Back up, then keep `NORDUMP.BIN` from the card on your PC. It is what a flash programmer needs to repair the unit.
 9. Optional: Settings > Flash > Install copies the firmware into flash, so it starts even without the card.
 
 Android Auto needs the unit's own certificate (`AACERT.PEM`, `AAKEY.PEM`). The firmware takes it from the unit's flash at first start, so there is nothing to copy.
+
+Wi-Fi, with and without `WIFI.TXT`:
+
+- Without `WIFI.TXT`, the unit runs only its own Wi-Fi network, the "car network". Its name (`Miata-` and four hex digits) and a random password are made up at the first start and kept in `AP.TXT` on the card. Wireless Android Auto works: the phone gets the network's password over Bluetooth, so there is nothing to type. The PC tools' commands (HU1) are off.
+- With `ssid=` and `psk=`, the unit joins that network when it is in range. With Wi-Fi mode Auto (Settings > Network) it starts the car network 30 s after the network goes out of range. Android Auto works on either network.
+- With `token=`, the PC tools (`tools/hu.py`) can control the unit over the network. Without a token, the unit accepts no commands at all. Settings > Network shows which applies.
 
 Going back to the original firmware:
 
@@ -35,7 +41,7 @@ What works is listed below. Much of the stock feature set is not built yet: no B
 Risks:
 
 - It has been tested on one unit. Units sold as the 9010 may differ. Set up checks the flash layout and refuses anything it does not recognize.
-- Set up and Remove rewrite U-Boot's settings in flash. If the power drops during those one to three seconds, the unit no longer starts, and only a flash programmer (for example a CH341A clip) with a backup can repair it. Don't run them while starting the engine, or close to the restart two minutes after the update.
+- Setting up the boot path (step 6, or Settings > Flash > Set up) and Remove rewrite U-Boot's settings in flash. If the power drops during those one to three seconds, the unit no longer starts, and only a flash programmer (for example a CH341A clip) with a backup can repair it. Don't run them while starting the engine. Right after the update, Set up and Remove refuse to start once 90 s have passed, so they can't run into the automatic restart.
 - Install the flash copy only after the card version has run well for a while. Once a copy is in flash, taking the card out no longer gets you back to stock.
 
 ## What works today
