@@ -28,6 +28,10 @@
 #define MM_OSDVID_BUF1    0x01200000u
 #define MM_OSDVID_BUF_SZ  0x0012C000u
 
+/* aacert.c work area: the stock AA module from flash, packed and unpacked (aa start, only while AACERT.PEM is missing) */
+#define MM_AACERT         0x01340000u
+#define MM_AACERT_SZ      0x00100000u
+
 /* net.c scratch text */
 #define MM_HELLO          0x01500000u   /* HELLO.TXT report, 0x800 */
 #define MM_HELLO_SZ       0x00000800u

@@ -11,4 +11,6 @@ int aa_tls_read(unsigned char *p, size_t max);       /* decrypt what was fed; 0 
 const char *aa_tls_cipher(void);
 const char *aa_tls_error(void);
 void aa_tls_free(void);
+int aa_tls_check_pair(const unsigned char *crt_pem, size_t crt_len, const unsigned char *key_pem, size_t key_len,
+                      char *subj, size_t subj_n);   /* 0: the key belongs to the certificate (lens incl. NUL) */
 #endif

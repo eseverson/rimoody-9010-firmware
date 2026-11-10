@@ -245,6 +245,39 @@ int aa_tls_read(unsigned char *p, size_t max)
     return e < 0 ? fail("read", e) : e;
 }
 
+/* Does the private key belong to the certificate? For the key and certificate taken from flash (aacert.c), before
+ * they are saved to the card. Contexts of its own: a running TLS link is not touched. 0 = they pair; the certificate's
+ * subject goes to subj. */
+int aa_tls_check_pair(const unsigned char *crt_pem, size_t crt_len, const unsigned char *key_pem, size_t key_len,
+                      char *subj, size_t subj_n)
+{
+    static mbedtls_x509_crt c;
+    static mbedtls_pk_context k;
+    static mbedtls_ctr_drbg_context d;
+    static mbedtls_entropy_context ent;
+    mbedtls_platform_set_calloc_free(tls_calloc, tls_free);
+    mbedtls_x509_crt_init(&c);
+    mbedtls_pk_init(&k);
+    mbedtls_ctr_drbg_init(&d);
+    mbedtls_entropy_init(&ent);
+    if (subj_n)
+        subj[0] = 0;
+    int e = mbedtls_x509_crt_parse(&c, crt_pem, crt_len);
+    if (!e)
+        e = mbedtls_ctr_drbg_seed(&d, mbedtls_entropy_func, &ent, (const unsigned char *)"hu-aa-pair", 10);
+    if (!e)
+        e = mbedtls_pk_parse_key(&k, key_pem, key_len, 0, 0, mbedtls_ctr_drbg_random, &d);
+    if (!e)
+        e = mbedtls_pk_check_pair(&c.pk, &k, mbedtls_ctr_drbg_random, &d);
+    if (!e && subj_n && mbedtls_x509_dn_gets(subj, subj_n, &c.subject) < 0)
+        subj[0] = 0;
+    mbedtls_x509_crt_free(&c);
+    mbedtls_pk_free(&k);
+    mbedtls_ctr_drbg_free(&d);
+    mbedtls_entropy_free(&ent);
+    return e;
+}
+
 #ifndef AA_TLS_HOST
 /* HU1 op 23: what decrypting a 16 KB record costs, per primitive (issue #3) */
 #include "mbedtls/gcm.h"

@@ -111,6 +111,8 @@ typedef int (*bulk_fn)(void *dev, u32 pipe, void *data, int len, int *actual, in
 #include "audio.h"
 #include "nor.h"
 #include "install.h"
+#include "aacert.h"
+#include "aa_tls.h"
 
 /* ---- time budget, in ub_ms(0) (which starts ~3 s after U-Boot itself; the unit resets ~150 s after U-Boot) ---- */
 #define EHCI_BULK_MS   5000    /* ehci_submit_async gives up on a bulk TD after 5000 ms, others after 1000 (0xf7e562) */
@@ -3213,8 +3215,9 @@ static void vpp_restore_now(void)
 }
 
 /* ---- wireless Android Auto (aa.c over aa_tcp.c), HU1 op 22. Net task only. The head unit's certificate and key are
- * read from the SD card (AACERT.PEM, AAKEY.PEM), never built into the image. Video access units go straight to the
- * hardware decoder (vdec_feed). ---- */
+ * read from the SD card (AACERT.PEM, AAKEY.PEM), never built into the image; a card without them gets them from the
+ * stock AA module in flash once (aa_cert_load). Video access units go straight to the hardware decoder
+ * (vdec_feed). ---- */
 static u8 aa_cert[8192], aa_key[8192];
 static int aa_listening;
 static char aa_vmsg[160];
@@ -3714,6 +3717,98 @@ static void aa_touch_poll(void)   /* net task: panel 1024 x 600 -> video coordin
     }
 }
 
+/* AACERT.PEM / AAKEY.PEM into aa_cert / aa_key (NUL-terminated). When the card has no pair, the unit's own comes from
+ * the stock AA module in flash (aacert.c, notes/android_auto.md): found by walking the JFFS2 filesystems in the XIP
+ * window, unpacked into MM_AACERT 32 KB per step with hb_tick() and a 1-tick yield in between, checked with
+ * mbedtls_pk_check_pair, then saved to the card so later starts load it as before. If saving fails, this boot keeps
+ * the RAM copy; if the flash has none, later starts this boot only look at the card again. 0, or the length of an
+ * "ERR aa: ..." reply in t. */
+_Static_assert(sizeof aa_cert >= AACERT_PEM_MAX && sizeof aa_key >= AACERT_PEM_MAX, "aacert output buffers");
+static u32 aa_cert_len, aa_key_len;   /* a pair from flash this boot (aa_cert_len != 0), saved to the card or not */
+static const char *volatile aa_cert_fail;   /* why there is none (the Settings status line says so) */
+static char aa_cert_subj[160];
+
+static int aa_cert_pair(void *ctx, const char *c, unsigned cl, const char *k, unsigned kl)
+{
+    (void)ctx;
+    hb_tick();
+    return aa_tls_check_pair((const u8 *)c, cl, (const u8 *)k, kl, aa_cert_subj, sizeof aa_cert_subj);
+}
+
+static int aa_cert_save(const char *tmp, const char *name, const u8 *p, u32 n)   /* via tmp + rename; 0 or error */
+{
+    u32 got;
+    int r = fs_save(tmp, p, n);
+    if (!r && (fs_crc(tmp, &got) != crc32_le(p, (int)n) || got != n))
+        r = -2;
+    if (!r && (r = f_unlink(name)) == FR_NO_FILE)
+        r = 0;
+    if (r)
+        return r;
+    return f_rename(tmp, name);
+}
+
+static int aa_cert_load(u32 *cl, u32 *kl, char *t)
+{
+    if (aa_cert_len) {
+        *cl = aa_cert_len, *kl = aa_key_len;
+        return 0;
+    }
+    int rc = fs_load("AACERT.PEM", aa_cert, sizeof aa_cert - 1, cl);
+    int rk = fs_load("AAKEY.PEM", aa_key, sizeof aa_key - 1, kl);
+    if (!rc && *cl && !rk && *kl) {
+        aa_cert[*cl] = 0, aa_key[*kl] = 0;
+        aa_cert_fail = 0;
+        return 0;
+    }
+    if (aa_cert_fail)
+        return vfmt_n(t, "ERR aa: no AACERT.PEM / AAKEY.PEM on the card and none from flash: %s", aa_cert_fail);
+    lprintf("aa cert: %s%s%s not on the card (%d, %d): taking the unit's own from its stock AA module in flash\n",
+            rc || !*cl ? "AACERT.PEM" : "", (rc || !*cl) && (rk || !*kl) ? " and " : "", rk || !*kl ? "AAKEY.PEM" : "",
+            rc, rk);
+    static struct aacert x;
+    u32 t0 = clk_ms(), worst = 0, steps = 0;
+    hb_tick();
+    int r = aacert_open(&x, (const u8 *)NOR_XIP, NOR_SIZE, (void *)MM_AACERT, MM_AACERT_SZ);
+    u32 t_open = clk_ms() - t0;
+    while (!r) {
+        hb_tick();
+        if (steps && xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+            vTaskDelay(1);   /* the other tasks get a turn between steps */
+        u32 s0 = clk_ms();
+        r = aacert_step(&x, 32768, (char *)aa_cert, (char *)aa_key, aa_cert_pair, 0);
+        u32 d = clk_ms() - s0;
+        worst = d > worst ? d : worst;
+        steps++;
+        if (r == 1)
+            r = 0;
+        else if (r == 0)
+            break;
+    }
+    u32 ms = clk_ms() - t0;
+    if (x.dirent != ~0u)
+        lprintf("aa cert: " AACERT_NAME " entry at flash 0x%06x (XIP 0x%08x), inode %u, %u data nodes, %u bytes, xor 0x%02x, "
+                "%u unpacked\n", x.dirent, NOR_XIP + x.dirent, x.ino, x.nodes, x.packed, x.xor_key, x.unpacked);
+    if (r < 0) {
+        aa_cert_fail = aacert_strerror(r);
+        lprintf("aa cert: FAILED after %u ms: %s (%d); no Android Auto without AACERT.PEM / AAKEY.PEM\n", ms, aa_cert_fail, r);
+        return vfmt_n(t, "ERR aa: no AACERT.PEM / AAKEY.PEM on the card and none from flash: %s", aa_cert_fail);
+    }
+    lprintf("aa cert: key at +0x%x and certificate at +0x%x pair (%s); unpacked %u KB in %u steps, %u ms (open %u, "
+            "longest step %u), work area %u KB at 0x%08x\n", x.key_at, x.cert_at, aa_cert_subj, x.decoded >> 10, steps, ms,
+            t_open, worst, x.work_used >> 10, MM_AACERT);
+    aa_cert_len = *cl = x.cert_len, aa_key_len = *kl = x.key_len;
+    aa_cert_fail = 0;
+    hb_tick();
+    int sk = aa_cert_save("AAKEY.TMP", "AAKEY.PEM", aa_key, x.key_len);
+    int sc = sk ? -1 : aa_cert_save("AACERT.TMP", "AACERT.PEM", aa_cert, x.cert_len);
+    if (sk || sc)
+        lprintf("aa cert: NOT saved to the card (key %d, certificate %d): using the copy in RAM until a reboot\n", sk, sc);
+    else
+        lprintf("aa cert: saved AACERT.PEM (%u B) and AAKEY.PEM (%u B) to the card\n", x.cert_len, x.key_len);
+    return 0;
+}
+
 static int aa_op(int c, const u8 *p, int n, char *t)
 {
     const struct aa_status *a = aa_status();
@@ -3725,9 +3820,9 @@ static int aa_op(int c, const u8 *p, int n, char *t)
         if (c == 2 && (!ip || aa_tcp_connected()))
             return vfmt_n(t, "ERR aa: no ip, or a session is up");
         u32 cl, kl;
-        if (fs_load("AACERT.PEM", aa_cert, sizeof aa_cert - 1, &cl) || !cl || fs_load("AAKEY.PEM", aa_key, sizeof aa_key - 1, &kl) || !kl)
-            return vfmt_n(t, "ERR aa: AACERT.PEM / AAKEY.PEM not readable on the card");
-        aa_cert[cl] = 0, aa_key[kl] = 0;
+        int e = aa_cert_load(&cl, &kl, t);
+        if (e)
+            return e;
         char vm[200];
         vdec_init(vm, vfmt_n);
         vdec_stream_reset();
@@ -4489,7 +4584,7 @@ static int wifi_init(void)
     return errs ? -1 : 0;
 }
 
-int plat_ui_status(char *out, int max)
+static int net_status(char *out, int max)
 {
     if (jstate == J_AP)
         return vfmt_n(out, "Car network %s  %s", ap_ssid, sta_st >= 3 ? "phone connected" : "no phone");
@@ -4501,6 +4596,15 @@ int plat_ui_status(char *out, int max)
     ss[n] = 0;
     (void)max;
     return vfmt_n(out, "%s  %s  %d dBm", ss, ip_addr() ? ip : "no address", rssi_now);
+}
+
+int plat_ui_status(char *out, int max)   /* the Settings status line: network, then an Android Auto certificate failure */
+{
+    int k = net_status(out, max);
+    const char *f = aa_cert_fail;
+    if (f && k + 40 < max)
+        k += vfmt_n(out + k, "  No AA certificate");
+    return k;
 }
 
 int plat_ui_console(char *out, int max)   /* the last lines of the log that fit */

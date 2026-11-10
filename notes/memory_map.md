@@ -12,6 +12,7 @@ The source of truth is `firmware/memmap.h`. `memmap_check.c` asserts at compile 
 | 0x00540000, 0x00580000 | 128 KB each | decoder working buffers BG2D 0x3B / 0x3C | vdec.c |
 | 0x00600000 | 4 × 0x280000 (to 0x00FFC000) | decoder frame slots: luma, CbCr +0x180000, MVC +0x240000 | vdec.c |
 | 0x01000000, 0x01200000 | 0x12C000 each | OSD video buffers (RGB565 1024 × 600) | osdvid.c |
+| 0x01340000 | 1 MB | AA certificate extraction: the stock AA module from flash, packed and unpacked (only while AACERT.PEM / AAKEY.PEM are missing) | aacert.c, net.c |
 | 0x01500000 | 0x800 | HELLO.TXT report | net.c |
 | 0x01600000 | 16 KB used (1 MB slot) | MCU RX hex text | net.c |
 | 0x01800000 | to < 0x01A00000 | payload image + .bss | payload.ld |
