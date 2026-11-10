@@ -3,7 +3,8 @@
  * every U-Boot address below is the link address plus `reloc`, taken from the $gp that U-Boot's `go` leaves us.
  *
  *   go 0x1800000 hello   CPU/gd report into HELLO_BUF, returns. Touches nothing else.
- *   go 0x1800000 main    reads /WIFI.TXT (ssid=, psk=, token=, optional ip=), runs `usb start`, brings the RTL8188FTV
+ *   go 0x1800000 main    reads /WIFI.TXT (ssid=, psk=, token=, optional ip=; all optional: without ssid= and psk= no
+ *                        home network, only the car network; without token= no HU1 commands), brings the RTL8188FTV
  *                        up as in round 7, scans channels 1/6/11 (then all) for the SSID, joins the strongest BSS
  *                        (open auth, association, WPA2-PSK 4-way handshake, software CCMP), gets an address by DHCP
  *                        (or ip= after 10 s), answers ARP and ping, serves the HU1 command protocol on UDP 5151 and
@@ -1764,6 +1765,7 @@ static void fail_or_stay(unsigned int vec, const char *why)
     irq_fail_reset(vec);
 }
 
+/* Never fails: what is missing only turns a feature off (no ssid= / psk=: no home network; no token=: no HU1). */
 static int load_config(void)
 {
     if (handoff_take()) {
@@ -1778,8 +1780,9 @@ static int load_config(void)
     /* the stage-1 loads that work use no size argument; U-Boot's own ispsp code names files with a leading slash */
     if (run("fatload $isp_if $isp_dev 2100000 WIFI.TXT") && run("fatload $isp_if $isp_dev 2100000 /WIFI.TXT") &&
         run("fatload $isp_if $isp_dev 2100000 /WIFI.TXT fff")) {
-        log_s("config: cannot read /WIFI.TXT (lines ssid=, psk=, token=, optional ip=)\n");
-        return -1;
+        log_s("config: no /WIFI.TXT (lines ssid=, psk=, token=, optional ip=): no home network, the car network only; "
+              "HU1 commands off (no token)\n");
+        return 0;
     }
     WIFI_TXT[4095] = 0;
     static char psk[65];
@@ -1827,9 +1830,14 @@ static int load_config(void)
     esc_ssid(es, cfg_ssid, cfg_ssid_len);
     lprintf("config: ssid '%s' (%d bytes), psk %s (%d chars), token %d chars, static ip %s%s\n", es, cfg_ssid_len,
             hex ? "hex PMK" : "passphrase", psk_len, tok_len, cfg_ip ? "set" : "none", bad ? " (ip= unparsable)" : "");
-    if (!cfg_ssid_len || !tok_len || (!hex && (psk_len < 8 || psk_len > 63))) {
-        log_s("config: need ssid=, token= and psk= (8-63 chars or 64 hex digits)\n");
-        return -1;
+    if (!tok_len)
+        log_s("config: no token=: HU1 commands off\n");
+    if (!cfg_ssid_len || (!hex && (psk_len < 8 || psk_len > 63))) {
+        log_s("config: no usable ssid= and psk= (8-63 chars or 64 hex digits): no home network, the car network only\n");
+        cfg_ssid_len = 0;
+        for (int i = 0; i < 65; i++)
+            psk[i] = 0;
+        return 0;
     }
     u32 t0 = ub_ms(0);
     if (hex)
@@ -2985,7 +2993,14 @@ int plat_status(char *out)
 int plat_hello_extra(char *out)
 {
     const char *c = crash_live();
-    return c ? vfmt_n(out, " crash=%s", c) : 0;
+    int k = ip_hu1_on() ? 0 : vfmt_n(out, " hu1=off");
+    return k + (c ? vfmt_n(out + k, " crash=%s", c) : 0);
+}
+
+int plat_ui_hu1(char *out, int max)   /* Settings > Network: the PC tools' command channel */
+{
+    (void)max;
+    return ip_hu1_on() ? vfmt_n(out, "On (token from WIFI.TXT)") : vfmt_n(out, "Off: no token= in WIFI.TXT");
 }
 
 void plat_bssid(cu8 out[6]) { cpy(out, bss.addr, 6); }
@@ -3482,6 +3497,10 @@ static int aa_op(int c, const u8 *p, int n, char *t);
 static void bt_aa_open(int handle, cu32 now)
 {
     static char reply[600];
+    if (jstate != J_AP && !cfg_ssid_len) {   /* no home network: the phone can only join the car network */
+        lprintf("bt: AA channel %d open ignored: no home network and the car network is not up yet\n", handle);
+        return;
+    }
     if (!aa_listening) {   /* the phone will connect over TCP: listen first */
         u8 st[3] = { 1, 5288 & 0xff, 5288 >> 8 };
         aa_op(1, st, 3, reply);
@@ -4588,6 +4607,8 @@ static int net_status(char *out, int max)
 {
     if (jstate == J_AP)
         return vfmt_n(out, "Car network %s  %s", ap_ssid, sta_st >= 3 ? "phone connected" : "no phone");
+    if (!cfg_ssid_len)
+        return vfmt_n(out, "No home network set up (WIFI.TXT)  car network starting");
     char ip[16], ss[34];
     ip_fmt_addr(ip, ip_addr());
     int n = cfg_ssid_len < 32 ? cfg_ssid_len : 32;
@@ -4680,6 +4701,13 @@ static void car_net_start(const char *why)
     if (!ss[0] || pl < 8) {   /* first time: a name from our MAC and a random 16-character passphrase, kept on the card */
         static const char al[] = "abcdefghijkmnpqrstuvwxyz23456789";
         u8 r[16];
+        if (jstate < J_AUTH || jstate > J_UP) {   /* a fresh card may not have scanned yet: received frames into the pool */
+            set_rcr(0);
+            scanning = 1;
+            for (int c = 1; c <= 11; c += 5)
+                scan_channel(c, 300);
+            scanning = 0, n_cands = 0;
+        }
         rng_bytes(r, 16);
         for (int i = 0; i < 16; i++)
             pk[i] = al[r[i] & 31];
@@ -4753,6 +4781,10 @@ static void net_loop(void)
         if (errs || jstate == J_ABORT || bulk_fail > 50) {
             lprintf("net: stopping (usb errors %u, bulk failures %d, state %s)\n", errs, bulk_fail, jnames[jstate]);
             return;
+        }
+        if (jstate == J_SCAN && !cfg_ssid_len) {   /* no home network configured: the car network, at once */
+            car_net_start("no home network configured");
+            continue;
         }
         if (jstate == J_SCAN) {
             int r = scan_and_choose();
@@ -5028,8 +5060,7 @@ static void net_task(void *arg)
                 lprintf("--- %s: own FAT write failed (%d)\n", name, fr);
         }
     }
-    if (load_config())
-        fail_or_stay(103, "no config (WIFI.TXT)");
+    load_config();
     audio_boot();
 
     log_s("\n# USB (usbh.c)\n");

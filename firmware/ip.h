@@ -17,6 +17,7 @@ void ip_ap_start(cu32 ip);   /* we are the access point: static ip/24, DHCP serv
 void ip_rx(const cu8 *src, const cu8 *dst, int type, const cu8 *p, int len);
 void ip_poll(void);
 cu32 ip_addr(void);
+int ip_hu1_on(void);       /* a token is configured (ip_init); without one the command server drops every request */
 int ip_fmt_addr(char *out, cu32 ip);
 extern int ip_stats[8];   /* rx, tx, arp, icmp, udp, cmd, badtoken, resent */
 

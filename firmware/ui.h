@@ -48,5 +48,6 @@ void plat_ui_install(int what);                  /* 1 set up the boot path (SD, 
                                                  * flash, 3 refresh the status, 4 remove the boot path, 5 remove the copy */
 int plat_ui_install_row(int stage, char *label, int lmax, char *button, int bmax);   /* a Settings > Flash row: its
                                                  * text, main button text; 1 = main button, 2 = Remove, 3 = both */
+int plat_ui_hu1(char *out, int max);             /* Settings > Network: whether HU1 commands are on (token set) */
 
 #endif

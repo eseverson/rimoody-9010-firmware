@@ -59,7 +59,7 @@ static void settings_save(void);
 static lv_obj_t *scr_home, *scr_aa, *scr_settings, *scr_wifi, *scr_btname;
 static lv_obj_t *bt_ta, *bt_msg, *bt_label;
 static lv_obj_t *wifi_ssid, *wifi_psk, *wifi_kb, *wifi_msg;
-static lv_obj_t *aa_card, *status_label, *vol_panel, *vol_bar, *vol_icon, *vol_num;
+static lv_obj_t *aa_card, *status_label, *hu1_label, *vol_panel, *vol_bar, *vol_icon, *vol_num;
 static lv_timer_t *vol_timer;
 static lv_obj_t *dialog;   /* an open confirmation; any navigation closes it */
 
@@ -932,6 +932,10 @@ static void build_settings(void)
     lv_obj_set_size(wm, 330, 64);
     lv_obj_set_style_pad_all(wm, 4, 0);
     lv_obj_add_event_cb(wm, wifi_mode_cb, LV_EVENT_VALUE_CHANGED, 0);
+    r = row(p, "PC tools (HU1 commands)");
+    hu1_label = lv_label_create(r);
+    lv_label_set_text(hu1_label, "");
+    lv_obj_set_style_pad_right(hu1_label, 16, 0);
 
     p = page(scr_settings, 1, "Android Auto", nav);
     r = row(p, "Enabled");
@@ -1049,6 +1053,8 @@ static void status_timer(lv_timer_t *t)
     if (lv_screen_active() == scr_settings) {
         plat_ui_status(buf, sizeof buf);
         lv_label_set_text(status_label, buf);
+        plat_ui_hu1(buf, sizeof buf);
+        set_text(hu1_label, buf);
         plat_ui_nor_dump_status(buf, sizeof buf);
         lv_label_set_text(dump_label, buf + 10);   /* without the "nor dump: " prefix */
         plat_ui_install_status(buf, sizeof buf);

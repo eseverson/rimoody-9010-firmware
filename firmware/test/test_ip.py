@@ -176,6 +176,26 @@ g, n, data = hu(0x42, seq=12)
 check('unknown op -> ERR', g and data.startswith(b'ERR unknown op'))
 check('plat_cmd ran exactly twice, sync once', dev.do('stat')[0][1:] == ['runs', '2', 'syncs', '1'])
 
+# no token configured (WIFI.TXT without token=, or no WIFI.TXT): every HU1 request is dropped, all zeros included
+class NoTok(Dev):
+    def __init__(self):
+        self.p = subprocess.Popen([HOST], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.do('init %s 00 c0a80163' % MAC.hex())
+
+
+nt = NoTok()
+nt.do('up')
+nt.do('time 10500')
+nt.do('poll')
+hello = [parse_tx(l) for l in nt.do('time 13000') + nt.do('poll') if l[0] == 'tx']
+check('no token: the hello still goes out', any(h[1] == 0x0800 and h[2][28:].startswith(b'HU1 hello ip=192.168.1.99')
+                                                for h in hello))
+for tk, name in ((b'', 'an all-zero token'), (b'anything', 'a made-up token')):
+    req = b'HU1' + tk.ljust(32, b'\0') + struct.pack('<IB', 1, 1)
+    out = nt.rx(DESK, MAC, 0x0800, udp(IP('192.168.1.2'), IP('192.168.1.99'), 40000, 5151, req))
+    check('no token: PING with %s dropped' % name, not [l for l in out if l[0] == 'tx'])
+check('no token: no command ran', nt.do('stat')[0][1:] == ['runs', '0', 'syncs', '0'])
+
 dev2 = Dev(static_ip=0xc0a80163)
 dev2.do('up')
 dev2.do('time 5000')

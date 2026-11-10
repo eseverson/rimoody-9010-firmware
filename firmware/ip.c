@@ -4,13 +4,15 @@
  *   ops      1 PING, 2 CMD <U-Boot command>, 3 WRITE addr:u32 bytes -> crc32:u32, 4 READ addr:u32 len:u16,
  *            5 SYNC addr:u32 len:u32 (D-cache write-back + I-cache invalidate), 6 LOG (last <= 64 KB of the log),
  *            7.. platform ops (plat_op): 7 MCU_TX, 8 MCU_STATE, 9 SETTIME, 10 EXEC
- * A request with the cached reply's seq gets that reply again instead of running twice; a bad token is dropped. */
+ * A request with the cached reply's seq gets that reply again instead of running twice; a bad token is dropped. An
+ * all-zero token (none configured) turns the command server off: every request is dropped, the hello still goes out. */
 #include "ip.h"
 
 int ip_stats[8];
 enum { S_RX, S_TX, S_ARP, S_ICMP, S_UDP, S_CMD, S_BADTOKEN, S_RESENT };
 
 static cu8 my_mac[6], tok[32];
+static int tok_set;   /* a token is configured: HU1 commands are accepted with it */
 static cu32 my_ip, my_mask, my_router, static_ip, dhcp_server, offered_ip, xid;
 static cu32 lease_ms, bound_at, dhcp_started, dhcp_last_tx, hello_last;
 static int link, bound, dhcp_state, dhcp_tries;   /* bound: 1 DHCP, 2 static */
@@ -62,11 +64,16 @@ int ip_fmt_addr(char *out, cu32 ip)
 }
 
 cu32 ip_addr(void) { return bound ? my_ip : 0; }
+int ip_hu1_on(void) { return tok_set; }
 
 void ip_init(const cu8 mac[6], const cu8 token[32], cu32 sip, cu8 *rb)
 {
     cpy(my_mac, mac, 6);
     cpy(tok, token, 32);
+    tok_set = 0;
+    for (int i = 0; i < 32; i++)
+        tok_set |= tok[i];
+    tok_set = tok_set != 0;
     static_ip = sip;
     rbuf = rb;
 }
@@ -366,7 +373,7 @@ static void cmd_rx(const cu8 *smac, cu32 sip, int sport, const cu8 *d, int n)
 {
     if (n < 40 || d[0] != 'H' || d[1] != 'U' || d[2] != '1')
         return;
-    if (!same(d + 3, tok, 32)) {
+    if (!tok_set || !same(d + 3, tok, 32)) {   /* no token configured: nothing is accepted, not even all zeros */
         ip_stats[S_BADTOKEN]++;
         return;
     }
