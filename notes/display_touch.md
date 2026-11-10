@@ -85,7 +85,7 @@ What the test pattern contains: an 8-px white border. Top half: four bars whose 
 - PWM block 0x9C007A00: +0x04 = per-channel enable bits [3:0] plus bits [11:8], +0x08/+0x0C/+0x10/+0x14 = duty of PWM0..3. Live: 0x9C007A04 = 0xF01, 0x9C007A08 = 0x14.
 - eCos `tft_backlight_on/off` (0x47306E / 0x473038) send the MCU frame `EE <level>` through 0x31D928 (off = `EE FF`). The PWM0 duty at 0x9C007A08 has no visible effect; the MCU owns the backlight.
 - **`EE <level>` verified on the unit (2026-11-02, camera with fixed exposure):** the level is an inverted duty. 0x00 is brightest; it dims roughly linearly through 0xC0, 0xE1 is dim but lit, and 0xF0..0xFF is off. The level is `table[idx]`, where the table is 33 bytes at flash 0x9806BF9C (`e1 dc d7 d2 cd c8 c3 be b9 b2 ab a4 9d 96 8f 88 81 7a 74 6e 68 62 5c 56 50 46 3c 32 28 1e 14 0a 00`) and idx is the user brightness 0..32 (config +0x10, getter 0x32136C, setter 0x321390).
-- **Headlight (illumination) input: GPIO26, active low** (eCos sysio 0x6B, pin-table entry `6b 1a 00 00 01 01 00 02`: an input). Under U-Boot it reads from IN 0x9C000360 bit 26 without setting GPIO_FIRST; with nothing connected it reads 1 (lights off). eCos samples it in 0x320998, and 0x320A82 debounces it (5 equal samples, struct 0x71E5CA). A change calls 0x3213DC(night): night halves the brightness index, day doubles it (capped at 32). The same handler drives GPIO38 (0x31D848) high with the lights (if 0x71E59F), probably the front-button illumination; we do not touch GPIO38.
+- **Headlight (illumination) input: GPIO26, active low** (eCos sysio 0x6B, pin-table entry `6b 1a 00 00 01 01 00 02`: an input). Under U-Boot it reads from IN 0x9C000360 bit 26 without setting GPIO_FIRST; with nothing connected it reads 1 (lights off). eCos samples it in 0x320998, and 0x320A82 debounces it (two equal samples in a row, then a 5-poll holdoff; struct 0x71E5CA). A change calls 0x3213DC(night): night halves the brightness index, day doubles it (capped at 32). The same handler can drive GPIO38, but on this image it never follows the lights; see "Front-button lights (key lights)" below.
 - Payload (build 20261102-012033): the Settings › Display day and headlight sliders (percent → eCos table) send `EE`, the UI debounces GPIO26 every 200 ms, Auto theme goes dark with the lights, and Android Auto gets the night-mode sensor (SensorBatch field 10). `hu.py ui lights 0|1|2` forces the input off/on or releases it. **Still to check in the car:** that GPIO26 reads 0 with the lights on. If it stays at 1, set GPIO_FIRST 0x9C0032E4 bit 26 as eCos does.
 
 ### White haze after an abrupt power cut (2026-10-31)
@@ -145,6 +145,55 @@ The earlier reboot with `tools/gt9.py` was not these pins. The payload's log for
 - GT9xx: the status register's key bit and eCos's "touch do virtaul key region" (0x3820E4) mean touch keys are possible on the touch glass.
 
 **Answered:** the capacitive buttons are the GT911 virtual-key area (see "Live touch"). The SAR ADC ladders are presumably for other unit variants or wired keys; not needed.
+
+## Front-button lights (key lights)
+
+Static analysis of the stock eCos image (2026-11-09), nothing run on the unit. Summary: stock lights the buttons with **SoC GPIOs, not MCU frames, PWM, or the GT911**. GPIO20, GPIO21 and GPIO22 are on/off color lines (seven fixed colors plus a color cycle, picked on a Settings page), and GPIO38 is held high whenever the unit is on. The headlight input does **not** change the button lights on this image: the factory switch that would make GPIO38 follow the headlights is missing from its menus. That these pins really reach the bezel LEDs is inferred (the eCos build is generic across boards), so the owner checks below decide it.
+
+### What stock does
+
+- **Pins** (sysio pin table 0x6C7A64, entries `[sysio, gpio, pu, pd, M, F, OE, OUT]`): sysio 0x6C → GPIO20 `6c 14 00 00 01 01 01 00`, 0x6D → GPIO21 `6d 15 ...`, 0x6E → GPIO22 `6e 16 ...`, 0x37 → GPIO38 `37 26 00 00 01 01 01 00`. All four are GPIO-owned outputs, low at boot. `init_gpio_config` (0x5205C2) applies each entry in the order OUT (0x5203BC), OE (0x520414), M (0x52046C, masked register 0x9C000300 + 4·(pin/16)), FIRST (0x5204C0, read-modify-write 0x9C0032E4 + 4·(pin/32)).
+- **Key-light engine** (0x32047E resolves the three pins; 0x320506, called from the MCU thread's setup 0x31EC68, drives all three low). The command entry is 0x31D804(v), which builds a 2-byte command and passes it to **0x320660, a local function (not the MCU sender 0x31D928)**:
+  - v 1..7 → `02 <v-1>`: static color v-1 (0x3205AC).
+  - v 8 → `03 02`: cycle through the seven colors, one step every 2·20 = 40 passes of the MCU receive loop 0x31E948.
+  - v 0xFF → `04 00`: off. The enable flag 0x6DCE4C is cleared and GPIO20/21/22 are driven low.
+- **Output**: on every pass of the MCU receive loop, 0x3207D8 writes each pin from its channel byte (0x71E57E → GPIO20, 0x71E57F → GPIO21, 0x71E580 → GPIO22): 1 if the byte is nonzero, else 0. The bytes only ever take 0 or 0x3F, so this is on/off with **no dimming**.
+- **Color table** (0x3205AC, index → GPIO20/21/22): 0 → 1 0 0, 1 → 0 1 0, 2 → 1 1 0, 3 → 0 0 1, 4 → 1 0 1, 5 → 0 1 1, 6 → 1 1 1. If the lines are R, G, B (inferred), that is red, green, yellow, blue, magenta, cyan, white.
+- **Setting**: Settings › System › "Key Lights" (string id 0x1FA; System menu table entry at 0x6BDC6E `fa 01 00 10 ff 00`, a page link) opens `keylightview` (0x38326E, handler 0x382EA4): eight buttons in a 4×2 grid. Button k (0..7) stores k in config byte 0x6DCE28+0x15 and calls 0x31D804(k+1), so k = 7 is the cycle. A second page handler (0x33DAE6) does the same. No `setupcfg`/`factorycfg` field is printed for it; it lives in the system config block that `/test/usercfg.bin` restores, which we have not decoded.
+- **power_on** (0x47AF0A): GPIO38 high (see below), 30 ms, then 0x31D804(config+0x15 + 1), so the saved color comes back. **power_off** (0x47ACBC): 0x31D804(0xFF) (keys off), 20 ms, then GPIO38 low. The MCU shutdown frame `00` (handler 0x31E510) also drives GPIO38 low.
+- **GPIO38 and the headlights.** The lights-change handler 0x320A82 and the init 0x320BD4 compute GPIO38 = `!detect || lights`: with the lights on it goes high (if powered, 0x71E59F); with them off it goes low only if `detect` is set. `detect` is 0x6DCE67, written only by 0x320F72 from config+1 bit 3, and only if setup item 0x2FD exists in the factory Option menu (0x34F51A searches the table at 0x6BE50C). String 0x2FD is **"Headlight detection"**, and that item is in neither the Option table nor the System table of this image (no 6-byte menu entry with id 0x2FD anywhere in the data). So `detect` = 0, and GPIO38 is high whenever the unit is on, whatever the headlights do. The `00 10 ff` System entries and the factory Option list are static data; no code was found that adds items to them at runtime.
+- **Everything else the lights change does** (0x320A82 → 0x3213DC): TFT backlight only (index halved or doubled, `EE table[idx]` via 0x321390 → 0x472FDC → 0x31D928), GUI message 0x68, and the phone-projection night flag (0x3926B4 in `android_auto_mw.c` for sources 0x0A/0x0B, 0x395BD6 for sources 4/5). Nothing for the keys.
+- **Ruled out:**
+  - MCU frames: none in the key-light path, and none of the stock boot frames (see notes/android_auto.md, "the boot frames") is a key-light command.
+  - PWM: the only other PWM user near this code is 0x3203F6 (PWM1, duty 0x80, period 0x190, a few ticks), called from the key handlers and gated by the Beep setting (0x6D7108): the key beep.
+  - GT911: only the config block (0x8047) and the status ack (0x814E) are written; its touch-key registers are 0 and the GT911 has no LED outputs.
+  - I2C: the hardware I2C masters serve only the tuner drivers.
+  - LED driver chips: no LED-driver strings in the image.
+
+### Hardware or MCU paths
+
+Two other possibilities stay open: the button LEDs could be wired to the illumination line, or the AC6965A could drive them by itself. The firmware does not settle either. Against them: stock has a working color page and drives these pins at power-on and power-off, which only makes sense if the LEDs hang off the SoC on at least some boards. The owner's checks below decide it.
+
+### What our firmware should do
+
+Masked registers (bits 31:16 = write mask, 15:0 = value). For GPIO20..22 the bits are 4..6 of the second 16-pin group; for GPIO38 it is bit 6 of the third.
+
+| Pin | M | OE | OUT on / off | FIRST (RMW) |
+|---|---|---|---|---|
+| GPIO20..22 | 0x9C000304 ← 0x00700070 | 0x9C000324 ← 0x00700070 | 0x9C000344 ← `0x0070xxxx`, value bits per color (white 0x00700070, off 0x00700000) | 0x9C0032E4 \|= 0x00700000 |
+| GPIO38 | 0x9C000308 ← 0x00400040 | 0x9C000328 ← 0x00400040 | 0x9C000348 ← 0x00400040 / 0x00400000 | 0x9C0032E8 \|= 0x00000040 |
+
+1. At startup, in the eCos order (OUT, then OE, M, FIRST): GPIO38 high, then GPIO20/21/22 to a color. Single colors: GPIO20 `0x00700010`, GPIO21 `0x00700020`, GPIO22 `0x00700040`. Confidence: register layout proven (same helpers as GPIO13 and the GT911 pins); that it lights the buttons inferred, medium. Driving GPIO38 high matches what stock does whenever it is on, so it is the safe direction even if GPIO38 is something other than the LED supply.
+2. Before a deliberate reset or power-down: GPIO20/21/22 low, then GPIO38 low (stock power_off order).
+3. Headlights: stock does nothing to the keys. Optional, beyond stock: offer "Headlight detection" ourselves (GPIO38 = lights) or switch to a dimmer color at night. Real dimming needs software PWM on these GPIOs; untested.
+4. No MCU frames are needed.
+
+### Owner checks (stock boot, no SD card)
+
+1. Daytime, headlights off: are the buttons lit, and in what color? Stock predicts lit.
+2. Settings › System › Key Lights: does the page exist, and does a color change the buttons? Note which button is selected; that is the color to copy (first row is presumably red, green, yellow, blue; second row magenta, cyan, white, cycle).
+3. Headlights on: do the buttons change at all? Stock code predicts no change. If they brighten, dim or switch on, the LEDs are on the illumination line in hardware (or the MCU), not under eCos control.
+4. Under our firmware today: are the buttons dark? A read-only peek of 0x9C000304/324/344, 0x9C000308/328/348 and 0x9C0032E4/E8 shows what U-Boot leaves on these pins.
 
 ## Next steps
 
