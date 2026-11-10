@@ -30,7 +30,7 @@ def rows():
     return int(r[1]), int(r[3])
 
 
-panel = ['HU net 20261031-170042   up 01:23:45', 'IP 192.168.1.138  meow  ch 11  -66 dBm  state up',
+panel = ['HU net 20261031-170042   up 01:23:45', 'IP 192.168.1.50  HomeWiFi  ch 11  -66 dBm  state up',
          'IRQ on 100 Hz  ticks 120763  hb 402', "MCU ACC 00 01  'Oct 8 24 11:58'  16:29  2026-10-31",
          'crash: none', 'say: hello from the desk']
 for i, t in enumerate(panel):

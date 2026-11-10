@@ -3,7 +3,7 @@
 /bootrom_*.bin
 /dumps/
 
-# build outputs (rebuilt by make on cachy)
+# build outputs (rebuilt by make)
 *.BIN
 *.elf
 *.map

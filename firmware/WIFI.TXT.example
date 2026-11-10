@@ -1,4 +1,4 @@
-ssid=meow
+ssid=HomeWiFi
 psk=your passphrase here (8-63 characters) or 64 hex digits of the PMK
 token=a shared secret for hu.py, up to 32 characters
 ip=192.168.1.99

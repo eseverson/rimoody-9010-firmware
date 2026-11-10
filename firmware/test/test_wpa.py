@@ -50,8 +50,8 @@ def mic_ok(f, kck):
     return hmac.new(kck, bytes(g), hashlib.sha1).digest()[:16] == f[81:97]
 
 
-pmk = hashlib.pbkdf2_hmac('sha1', b'correct horse battery', b'meow', 4096, 32)
-aa, spa = bytes.fromhex('c0c9e3a29916'), bytes.fromhex('0cc11957a25d')
+pmk = hashlib.pbkdf2_hmac('sha1', b'correct horse battery', b'HomeWiFi', 4096, 32)
+aa, spa = bytes.fromhex('02c0ffee00aa'), bytes.fromhex('02c0ffee0001')
 ie = bytes.fromhex('30140100000fac040100000fac040100000fac020000')
 anonce, snonce = os.urandom(32), os.urandom(32)
 check('init', cmd('init %s %s %s %s %s' % (pmk.hex(), aa.hex(), spa.hex(), ie.hex(), snonce.hex()))[0] == 'ok')

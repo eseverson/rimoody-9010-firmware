@@ -25,7 +25,7 @@ def sample(u, ch):
 
 
 def main():
-    u = hu.Unit(os.environ.get('HU_IP', '192.168.1.138'), os.environ['HU_TOKEN'], timeout=2, retries=2)
+    u = hu.Unit(os.environ.get('HU_IP') or hu.listen(10)[0], os.environ['HU_TOKEN'], timeout=2, retries=2)
     if sys.argv[1:2] == ['watch']:
         chans = [int(c) for c in sys.argv[2:]] or [0, 1]
         last = {}

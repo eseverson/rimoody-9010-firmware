@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the two SD-card variants from NET.BIN (built on cachy) and the stage-1 scripts:
+# Build the two SD-card variants from NET.BIN (built with the NDS32 toolchain) and the stage-1 scripts:
 #   fin/    runs `ispsp update_finish` after `uartsp init 1 115200`, before `go ... main`
 #   nofin/  does not
 #   loop/   like nofin, but leaves ISP_UPDT.BIN on the card and sets the update register to QART, so when the unit

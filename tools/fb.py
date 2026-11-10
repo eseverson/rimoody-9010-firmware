@@ -91,7 +91,7 @@ def status(u):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--ip', default=os.environ.get('HU_IP', '192.168.1.138'))
+    ap.add_argument('--ip', default=os.environ.get('HU_IP'))
     ap.add_argument('--token', default=os.environ.get('HU_TOKEN'))
     sub = ap.add_subparsers(dest='op', required=True)
     sub.add_parser('status'); sub.add_parser('pattern'); sub.add_parser('off')
@@ -100,6 +100,7 @@ def main():
     a = ap.parse_args()
     if not a.token:
         sys.exit('no token: source tools/hu.env')
+    a.ip = a.ip or hu.listen(10)[0] or sys.exit('no hello from the unit: pass --ip or set HU_IP')
     u = hu.Unit(a.ip, a.token)
     if a.op == 'status':
         status(u)

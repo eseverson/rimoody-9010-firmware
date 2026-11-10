@@ -65,7 +65,7 @@ int plat_log_tail(cu8 *out, int max)
     return max;
 }
 int plat_status(char *out) { return sprintf(out, "up=%u hb=4 mcurx=5 rssi=-60", now_ms); }
-void plat_bssid(cu8 out[6]) { memcpy(out, "\xc0\xc9\xe3\xa2\x99\x16", 6); }
+void plat_bssid(cu8 out[6]) { memcpy(out, "\x02\xc0\xff\xee\x00\xaa", 6); }
 int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
 {
     (void)max;

@@ -23,7 +23,7 @@ static void feed(const unsigned char *p, int n, int split)
 }
 int main(void)
 {
-    struct aa_wl_ap ap = { "DIRECT-phonelink-d9249c", "88888888", "0c:c1:19:57:a2:5d", "192.168.0.1", 8765, 8461480 };
+    struct aa_wl_ap ap = { "DIRECT-phonelink-d9249c", "88888888", "02:c0:ff:ee:00:01", "192.168.0.1", 8765, 8461480 };
     aa_wl_rfcomm_connected(&ap, snd);
     static const unsigned char ver[] = { 0x00, 0x09, 0x00, 0x04, 0x10, 0x00, 0x18, 0x00, 0x20, 0xa8, 0xb9, 0x84, 0x04 };
     expect(0, ver, sizeof ver, "WifiVersionRequest as stock");
@@ -37,8 +37,8 @@ int main(void)
     feed(req, sizeof req, 1);
     static const unsigned char info[] = { 0x00, 0x38, 0x00, 0x03, 0x0a, 0x17, 'D', 'I', 'R', 'E', 'C', 'T', '-', 'p', 'h', 'o', 'n', 'e',
                                           'l', 'i', 'n', 'k', '-', 'd', '9', '2', '4', '9', 'c', 0x12, 0x08, '8', '8', '8', '8', '8',
-                                          '8', '8', '8', 0x1a, 0x11, '0', 'c', ':', 'c', '1', ':', '1', '9', ':', '5', '7', ':', 'a',
-                                          '2', ':', '5', 'd', 0x20, 0x08 };
+                                          '8', '8', '8', 0x1a, 0x11, '0', '2', ':', 'c', '0', ':', 'f', 'f', ':', 'e', 'e', ':', '0',
+                                          '0', ':', '0', '1', 0x20, 0x08 };
     expect(2, info, sizeof info, "WifiInfoResponse as stock");
     static const unsigned char st[] = { 0x00, 0x02, 0x00, 0x07, 0x18, 0x00, 0x00, 0x02, 0x00, 0x06, 0x08, 0x00 };
     feed(st, sizeof st, 5);

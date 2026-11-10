@@ -10,7 +10,7 @@ import hu
 
 def main():
     show_all = '--all' in sys.argv
-    u = hu.Unit(os.environ.get('HU_IP', '192.168.1.138'), os.environ['HU_TOKEN'], timeout=1.5, retries=2)
+    u = hu.Unit(os.environ.get('HU_IP') or hu.listen(10)[0], os.environ['HU_TOKEN'], timeout=1.5, retries=2)
     seen = set()
     first = True
     while True:

@@ -5,7 +5,7 @@ import struct, subprocess, sys, zlib
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else './ip_host'
 fails = 0
-MAC = bytes.fromhex('0cc11957a25d')
+MAC = bytes.fromhex('02c0ffee0001')
 DESK = bytes.fromhex('3c7c3fb00102')
 TOKEN = b'sekrit-token'
 
@@ -95,12 +95,12 @@ def dhcp_reply(mtype, yi, extra=b''):
     return udp(IP('192.168.1.1'), IP('255.255.255.255'), 67, 68, bytes(b) + opts)
 
 
-out = dev.rx(bytes.fromhex('c0c9e3a29916'), b'\xff' * 6, 0x0800, dhcp_reply(2, IP('192.168.1.77')))
+out = dev.rx(bytes.fromhex('02c0ffee00aa'), b'\xff' * 6, 0x0800, dhcp_reply(2, IP('192.168.1.77')))
 dst, typ, p, ok = parse_tx(out[0])
 d = p[28:]
 check('OFFER -> REQUEST with 50=offered, 54=server', ok and d[240:243] == b'\x35\x01\x03' and
       b'\x32\x04' + IP('192.168.1.77') in d and b'\x36\x04' + IP('192.168.1.1') in d)
-out = dev.rx(bytes.fromhex('c0c9e3a29916'), b'\xff' * 6, 0x0800, dhcp_reply(5, IP('192.168.1.77')))
+out = dev.rx(bytes.fromhex('02c0ffee00aa'), b'\xff' * 6, 0x0800, dhcp_reply(5, IP('192.168.1.77')))
 garp = [l for l in out if l[0] == 'tx' and l[2] == '0806']
 ev = [l for l in out if l[0] == 'event']
 check('ACK -> bound 192.168.1.77/24 router .1', ev and ev[0][1:] == ['c0a8014d', 'ffffff00', 'c0a80101', '1'])
@@ -112,7 +112,7 @@ dst, typ, p, ok = parse_tx(out[0])
 txt = p[28:].decode()
 check('hello broadcast to 255.255.255.255:5152 from :5151', ok and dst == b'\xff' * 6 and p[16:20] == b'\xff' * 4 and
       p[20:24] == struct.pack('>HH', 5151, 5152))
-check('hello text with build id', txt == 'HU1 hello ip=192.168.1.77 mac=0c:c1:19:57:a2:5d up=2500 bssid=c0:c9:e3:a2:99:16 '
+check('hello text with build id', txt == 'HU1 hello ip=192.168.1.77 mac=02:c0:ff:ee:00:01 up=2500 bssid=02:c0:ff:ee:00:aa '
       'build=20261031-120000')
 
 arp = struct.pack('>HHBBH', 1, 0x0800, 6, 4, 1) + DESK + IP('192.168.1.2') + b'\0' * 6 + IP('192.168.1.77')

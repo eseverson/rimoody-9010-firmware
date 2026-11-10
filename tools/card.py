@@ -3,7 +3,7 @@
 
   card.py load <round-dir> [--keep WIFI.TXT ...]   replace the card's files with <round-dir>'s card files
   card.py save <dest-dir>                           copy every file except the round's binaries off the card
-  card.py wifi                                      (re)write WIFI.TXT, prompting for the meow password
+  card.py wifi                                      (re)write WIFI.TXT, prompting for the Wi-Fi password
   card.py check                                     show the card's files, sizes and fragmentation
 
 What `load` guarantees, from what went wrong before:
@@ -127,7 +127,7 @@ def save(a):
 def wifi(a):
     root = card()
     lines = open(TEMPLATE).read().splitlines()
-    pw = getpass.getpass('meow password: ')
+    pw = getpass.getpass('Wi-Fi password: ')
     if not 8 <= len(pw) <= 63:
         sys.exit('WPA2 passphrases are 8-63 characters')
     out = '\n'.join(('psk=' + pw) if l.startswith('psk=') else l for l in lines) + '\n'

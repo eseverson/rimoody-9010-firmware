@@ -5,7 +5,7 @@ set -u
 cd "$(dirname "$0")/.."
 source tools/hu.env
 IMG=$1 LOG=$2; shift 2
-IP=${HU_IP:-192.168.1.142}
+IP=${HU_IP:?set HU_IP to the unit address}
 hu() { python3 tools/hu.py --ip "$IP" "$@"; }
 want=$(strings -n 15 "$IMG" | grep -m1 -oE '20[0-9]{6}-[0-9]{6}')
 wait_up() {   # wait until the unit answers a ping (up to 120 s)
