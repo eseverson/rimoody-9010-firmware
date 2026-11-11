@@ -3696,7 +3696,8 @@ void plat_ui_night(int on) { ui_req_night = on; }
 #define REG32(a) (*(volatile u32 *)(a))
 static volatile int key_mode = -1, key_rgb = 7, key_dirty;
 static int key_night;
-void plat_ui_keylight(int mode, int rgb) { key_mode = mode, key_rgb = rgb & 7, key_dirty = 1; }
+static volatile u32 key_req_at;   /* when the UI asked: the log shows how long the net loop took to apply it (#27) */
+void plat_ui_keylight(int mode, int rgb) { key_req_at = ub_ms(0), key_mode = mode, key_rgb = rgb & 7, key_dirty = 1; }
 static void key_apply(void)
 {
     static int inited;
@@ -3713,6 +3714,10 @@ static void key_apply(void)
     u32 rgb = on ? (u32)key_rgb : 0;
     REG32(0x9C000344) = 0x00700000u | rgb << 4;   /* GPIO20 red, 21 green, 22 blue */
     REG32(0x9C000348) = 0x00400000u | (on ? 0x40u : 0);   /* GPIO38 power */
+    lprintf("keys: mode %d night %d rgb %u -> %s, %u ms after the request; FIRST %08x %08x M %08x %08x OE %08x %08x "
+            "OUT %08x %08x\n", key_mode, key_night, rgb, on ? "on" : "off", ub_ms(0) - key_req_at, REG32(0x9C0032E4),
+            REG32(0x9C0032E8), REG32(0x9C000304), REG32(0x9C000308), REG32(0x9C000324), REG32(0x9C000328),
+            REG32(0x9C000344), REG32(0x9C000348));
 }
 static void key_off(void)   /* shutdown: colors first, then the power line, as stock */
 {
@@ -5002,7 +5007,7 @@ static void net_loop(void)
                 int on = ui_req_night;
                 ui_req_night = -1;
                 aa_set_night(on);
-                key_night = on, key_dirty = 1;
+                key_night = on, key_req_at = ub_ms(0), key_dirty = 1;
                 lprintf("ui: headlights %s\n", on ? "on (night)" : "off (day)");
             }
             if (ui_req_save) {
