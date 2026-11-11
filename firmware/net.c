@@ -3124,8 +3124,17 @@ static void console_poll(void)
     u32 s = now / 1000;
     vfmt_n(t, "HU net %s   up %u:%02u:%02u", hu_build_id, s / 3600, s / 60 % 60, s % 60);
     con_panel(0, t, CON_YELLOW);
-    ip_fmt_addr(ip, ip_addr());
-    esc_ssid(es, cfg_ssid, cfg_ssid_len);
+    /* on the car network show its own name; off any network, no address (a DHCP lease is kept for the rejoin) */
+    int on_net = jstate == J_AP || jstate == J_UP;
+    ip_fmt_addr(ip, on_net ? ip_addr() : 0);
+    if (jstate == J_AP) {
+        int n = 0;
+        while (ap_ssid[n])
+            n++;
+        esc_ssid(es, (const u8 *)ap_ssid, n);
+    } else {
+        esc_ssid(es, cfg_ssid, cfg_ssid_len);
+    }
     vfmt_n(t, "IP %s  %s  ch %d  %d dBm  %s", ip, es, cur_ch, rssi_now, jnames[jstate]);
     con_panel(1, t, jstate == J_UP && ip_addr() ? CON_GREEN : CON_WHITE);
     vfmt_n(t, "IRQ %s  ticks %u  hb %u  usb err %u  tx %u", irq_is_on() ? "on" : "off", irq_ticks,
@@ -4729,6 +4738,8 @@ static int net_status(char *out, int max)
         ss[i] = (char)cfg_ssid[i];
     ss[n] = 0;
     (void)max;
+    if (jstate != J_UP)
+        return vfmt_n(out, "%s  not connected (%s)", ss, jnames[jstate]);
     return vfmt_n(out, "%s  %s  %d dBm", ss, ip_addr() ? ip : "no address", rssi_now);
 }
 
