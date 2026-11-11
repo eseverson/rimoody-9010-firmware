@@ -25,6 +25,7 @@ void plat_ui_card_log(int on);                  /* write log files to the SD car
 void plat_ui_mute(int on);                      /* MCU system mute and the DSP master mute */
 void plat_ui_volume(int index);
 void plat_ui_eq(int band, int db);             /* equalizer band 0..9, -12..+12 dB (audio.c) */                 /* 0..40 (audio.c) */
+void plat_ui_preamp(int cut_half_db);           /* anti-clip: turn the sound down by this many 0.5 dB steps before the EQ */
 void plat_ui_reboot(void);
 void plat_ui_boot_stock(void);
 void plat_ui_aa_key(int keycode);               /* 4 BACK */

@@ -11,6 +11,7 @@
  * 0x9C0018C8, DSP read pointer 0x9C0018CC. NEVER read 0x9C001B00..0x9C001DFF: that kills the system while audio runs
  * (eCos snapshot runs 3..5, 2026-11-02). */
 #include "audio.h"
+#include "eqhead.h"
 #include "clk.h"
 #include "memmap.h"
 
@@ -763,9 +764,8 @@ void aud_set_volume(int index)
  * (id 0x27, info +0x36), 20 slots per channel, channels 0..3 at halfword offsets 0x00/0x28/0x50/0x78. A slot is two
  * halfwords, stored byte-swapped: w0 = (2·dB & 0x7f) << 9 | type << 6 | code (type 3 = peaking, code = 32/Q),
  * w1 = frequency in Hz (0 = off). eCos sends no mailbox command after these writes. Our bands: a 10-band octave EQ. */
-static const u16 eq_hz[AUD_EQ_BANDS] = { 31, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000 };
+#define eq_hz eq_band_hz                     /* eqhead.c: the bands and their Q are shared with the anti-clip math */
 static signed char eq_half[AUD_EQ_BANDS];   /* gain per band in 0.5 dB steps, -24..24 */
-#define EQ_Q_CODE 23                          /* 32 / 1.41: one octave wide */
 
 static void eq_slot(int ch, int slot, int type, unsigned hz, int half_db, unsigned code)
 {
@@ -828,6 +828,11 @@ static void zero_to(u32 end)   /* extend the valid region to end, zero-filled */
     }
 }
 
+/* anti-clip: every source but the test tone is scaled by this before it reaches the DSP (and so before its EQ), by as
+ * much as the EQ lifts its loudest frequency (eqhead.c). Q15, 32767 = unchanged. */
+static int pre_q15 = 32767;
+void aud_set_pregain(int cut_half_db) { pre_q15 = eq_q15(cut_half_db < 0 ? 0 : cut_half_db > 48 ? 48 : cut_half_db); }
+
 static void add_be(u32 pos, short v)   /* saturating add of one sample at byte position pos (ring byte order) */
 {
     u8 *d = (u8 *)(ring + pos % ring_size);
@@ -854,12 +859,15 @@ static int mix(int src, const short *lr, int frames, int mono_x3)
     u32 n = out < room ? out : room;
     u32 start = cur[src];
     zero_to(start + 4 * n);
+    int g = src == 3 ? 32767 : pre_q15;   /* test tones keep their calibrated level */
     for (u32 i = 0; i < n; i++) {
         short l, r;
         if (mono_x3)
             l = r = lr[i / 3];
         else
             l = lr[2 * i], r = lr[2 * i + 1];
+        if (g < 32767)
+            l = (short)((l * g + 16384) >> 15), r = (short)((r * g + 16384) >> 15);
         add_be(start + 4 * i, l);
         add_be(start + 4 * i + 2, r);
     }

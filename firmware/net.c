@@ -3439,6 +3439,9 @@ void plat_ui_volume(int index) { ui_vol_want = index; }
 static volatile signed char ui_eq_want[AUD_EQ_BANDS];
 static volatile int ui_eq_gen;
 static int aud_eq_sent = -1;
+static volatile int ui_pre_want;   /* anti-clip cut, 0.5 dB steps (ui.c computes it from the EQ) */
+static int aud_pre_sent = -1;
+void plat_ui_preamp(int cut_half_db) { ui_pre_want = cut_half_db; }
 void plat_ui_eq(int band, int db)
 {
     if (band >= 0 && band < AUD_EQ_BANDS)
@@ -3458,7 +3461,7 @@ static void audio_boot(void)
     IOREG(0x9c000340) = 0x20002000u;            /* OUT high */
     clk_udelay(100000);
     int r = aud_init(lprintf);
-    aud_vol_sent = aud_mute_sent = aud_eq_sent = -1;
+    aud_vol_sent = aud_mute_sent = aud_eq_sent = aud_pre_sent = -1;
     if (!r && !ui_mute_want) {
         m[1] = 0x00;
         mcu_send(&mcu_st, m, 2, ub_ms(0));
@@ -4531,7 +4534,7 @@ int plat_op(int op, const cu8 *p, int n, cu8 *out, int max)
         }
         if (c == 1) {
             int r = aud_init(lprintf);
-            aud_vol_sent = aud_mute_sent = aud_eq_sent = -1;   /* init leaves it muted at volume 0: the UI's settings go again */
+            aud_vol_sent = aud_mute_sent = aud_eq_sent = aud_pre_sent = -1;   /* init leaves it muted at volume 0: the UI's settings go again */
             int k = vfmt_n(t, "init %d; ", r);
             return k + aud_status(t + k, vfmt_n);
         }
@@ -4976,6 +4979,11 @@ static void net_loop(void)
                     for (int b = 0; b < AUD_EQ_BANDS; b++)
                         aud_eq_set(b, 2 * ui_eq_want[b]);
                     aud_eq_sent = g;
+                }
+                int pre = ui_pre_want;
+                if (pre != aud_pre_sent) {
+                    aud_set_pregain(pre), aud_pre_sent = pre;
+                    lprintf("audio: anti-clip cut %d.%d dB\n", pre / 2, pre % 2 ? 5 : 0);
                 }
             }
             if (ui_req_key) {

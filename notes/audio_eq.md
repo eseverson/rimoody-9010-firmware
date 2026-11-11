@@ -7,6 +7,7 @@ Status 2026-11-02 (second pass: write path, pointer derivation, encoder, slider 
 - **Working on the unit (2026-11-02, build 20261102-112420, persisted).** `audio.c` writes the slot descriptors straight into the id 0x27 area (one aligned 32-bit store per slot, cache write-back) with no mailbox command, as eCos does, and the DSP picks them up. Our own model, not stock's: a 10-band octave EQ at 31, 63, 125, 250, 500 Hz, 1, 2, 4, 8, 16 kHz, peaking, Q ≈ 1.41 (code 23), the same on channels 0..3, slots 0..9.
 - Measured with the C270 webcam microphone (1 kHz tone, stream 1): flat 32.1 dB, 1 kHz band at -12 dB 19.8 dB (-12.3), flat again 32.0 dB; the "Voice" preset (+4 at 1 kHz, +3 at 500 Hz / 2 kHz) +6.1 dB.
 - Settings › Audio: presets Flat / Bass / Loud / Voice / Treble (ours) and ten -12..+12 dB sliders; `eq=` line in UI.TXT; HU1 op 27 sub 5 / `hu.py audio eq BAND DB`.
+- Anti-clip (Settings › Audio › "Prevent clipping", `anticlip=` in UI.TXT, off by default): `eqhead.c` computes the peak of the cascaded band responses (analog peaking prototype, 1/24-octave grid, rounded up to 0.5 dB) and the CPU mixer scales media, guidance and system sounds by that much before the ring, so the cut lands ahead of the DSP's EQ whatever order the DSP applies EQ and master volume in. Test tones are not scaled. Presets: Bass and Treble 7.5 dB, Loud 6 dB, Voice 5.5 dB. Not yet heard on the unit.
 
 ## Summary
 

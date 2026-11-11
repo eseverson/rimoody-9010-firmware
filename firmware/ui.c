@@ -7,6 +7,7 @@
  * volume. Only the UI task touches LVGL; other tasks reach it through ui_pointer / ui_button / ui_aa_session. */
 #include "lvgl.h"
 #include "ui.h"
+#include "eqhead.h"
 #include "clk.h"
 #include "memmap.h"
 #include "FreeRTOS.h"
@@ -47,6 +48,7 @@ static int boot_console = 0;   /* UI.TXT boot=1: power up into the text console 
 /* equalizer: 10 octave bands (audio.c), -12..+12 dB each; presets are ours, not stock's */
 #define EQ_N 10
 static signed char eq_db[EQ_N];
+static int anticlip;   /* UI.TXT anticlip=: turn the sound down before the EQ by as much as the EQ lifts it (eqhead.c) */
 static const char *const eq_label[EQ_N] = { "31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k" };
 static const signed char eq_preset[][EQ_N] = {
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },           /* Flat */
@@ -350,6 +352,7 @@ static void settings_load(void)
     key_mode = kv_int(settings_text, "keylight", key_mode, 0, 2);
     key_color = kv_int(settings_text, "keycolor", key_color, 0, 6);
     kv_list(settings_text, "eq", eq_db, EQ_N, -12, 12);
+    anticlip = kv_int(settings_text, "anticlip", anticlip, 0, 1);
     plat_ui_aa_enable(aa_enabled);
     plat_ui_aa_dpi(aa_dpi);
     plat_ui_bt_name(bt_name);
@@ -361,9 +364,9 @@ static void settings_load(void)
 static void settings_save(void)
 {
     char t[256];
-    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nbtname=%s\nwifimode=%d\nvol=%d\nboot=%d\ncardlog=%d\nkeylight=%d\nkeycolor=%d\neq=",
+    int k = lv_snprintf(t, sizeof t, "day=%d\nnight=%d\ntheme=%d\naa=%d\naadpi=%d\nbtname=%s\nwifimode=%d\nvol=%d\nboot=%d\ncardlog=%d\nkeylight=%d\nkeycolor=%d\nanticlip=%d\neq=",
                         bright_day, bright_night, theme_mode, aa_enabled, aa_dpi, bt_name, wifi_mode, volume,
-                        boot_console, card_log, key_mode, key_color);
+                        boot_console, card_log, key_mode, key_color, anticlip);
     for (int i = 0; i < EQ_N; i++)
         k += lv_snprintf(t + k, sizeof t - (unsigned)k, "%d%s", eq_db[i], i < EQ_N - 1 ? "," : "\n");
     plat_ui_settings_save(t);
@@ -817,7 +820,27 @@ static lv_obj_t *page(lv_obj_t *parent, int i, const char *name, lv_obj_t *nav)
 
 /* ---- equalizer page: presets, then one vertical slider per band ---- */
 
-static lv_obj_t *eq_slider[EQ_N], *eq_val[EQ_N], *eq_presets;
+static lv_obj_t *eq_slider[EQ_N], *eq_val[EQ_N], *eq_presets, *anticlip_label;
+
+static void anticlip_apply(void)   /* after any EQ change: send the cut and say how much it is */
+{
+    int cut = eq_peak_half_db(eq_db);
+    plat_ui_preamp(anticlip ? cut : 0);
+    if (!anticlip_label)
+        return;
+    if (!cut)
+        lv_label_set_text(anticlip_label, "Prevent clipping\nThe EQ lifts nothing: no change");
+    else
+        lv_label_set_text_fmt(anticlip_label, "Prevent clipping\nThe EQ lifts up to %d.%d dB: %s", cut / 2, cut % 2 ? 5 : 0,
+                              anticlip ? "turned down to match" : "can clip at high volume");
+}
+
+static void anticlip_cb(lv_event_t *e)
+{
+    anticlip = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    anticlip_apply();
+    settings_save();
+}
 
 static void eq_show(int b)
 {
@@ -850,6 +873,7 @@ static void eq_slider_cb(lv_event_t *e)
         plat_ui_eq(b, eq_db[b]);
     } else {
         eq_preset_mark();
+        anticlip_apply();
         settings_save();
     }
 }
@@ -866,6 +890,7 @@ static void eq_preset_cb(lv_event_t *e)
         plat_ui_eq(b, eq_db[b]);
     }
     eq_preset_mark();
+    anticlip_apply();
     settings_save();
 }
 
@@ -909,6 +934,13 @@ static void build_eq(lv_obj_t *p)
         eq_show(b);
     }
     eq_preset_mark();
+    r = row(p, "Prevent clipping");
+    anticlip_label = lv_obj_get_child(r, 0);
+    lv_obj_t *sw = lv_switch_create(r);
+    if (anticlip)
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, anticlip_cb, LV_EVENT_VALUE_CHANGED, 0);
+    anticlip_apply();
 }
 
 static lv_obj_t *dump_label, *install_label;
@@ -1384,6 +1416,7 @@ static void ui_task(void *arg)
     plat_ui_volume(volume);
     for (int b = 0; b < EQ_N; b++)
         plat_ui_eq(b, eq_db[b]);
+    plat_ui_preamp(anticlip ? eq_peak_half_db(eq_db) : 0);
     apply_theme();
     build_home();
     build_aa();
