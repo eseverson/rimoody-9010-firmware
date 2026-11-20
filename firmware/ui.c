@@ -68,6 +68,7 @@ static lv_obj_t *wifi_ssid, *wifi_psk, *wifi_kb, *wifi_msg;
 static lv_obj_t *aa_card, *status_label, *hu1_label, *vol_panel, *vol_bar, *vol_icon, *vol_num;
 static lv_timer_t *vol_timer;
 static lv_obj_t *dialog;   /* an open confirmation; any navigation closes it */
+static lv_indev_t *pointer_indev;   /* touch/mouse input; disabled while AA is visible */
 
 static void dialog_close(void)
 {
@@ -1303,6 +1304,7 @@ static void show_home(void)
     if (aa_view) {
         aa_view = 0;
         plat_ui_video_hide();
+        lv_indev_enable(pointer_indev, true);   /* restore touch input for our UI */
     }
     lv_screen_load(scr_home);
 }
@@ -1319,6 +1321,7 @@ static void show_aa(void)
     if (!aa_enabled)
         return;
     aa_view = 1;
+    lv_indev_enable(pointer_indev, false);   /* phone handles its own touch; hide our cursor */
     if (aa_session)
         lv_obj_add_flag(aa_card, LV_OBJ_FLAG_HIDDEN);
     else
@@ -1405,9 +1408,9 @@ static void ui_task(void *arg)
     lv_display_set_color_format(d, LV_COLOR_FORMAT_ARGB8888);
     lv_display_set_buffers(d, (void *)DRAW_BUF, 0, PANEL_W * DRAW_ROWS * 4, LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(d, flush_cb);
-    lv_indev_t *in = lv_indev_create();
-    lv_indev_set_type(in, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_read_cb(in, pointer_cb);
+    pointer_indev = lv_indev_create();
+    lv_indev_set_type(pointer_indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(pointer_indev, pointer_cb);
     settings_load();
     lights = plat_ui_lights() ? 1 : 0;   /* the state at power-on counts as is */
     dark = theme_mode == 2 ? lights : theme_mode;
